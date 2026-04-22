@@ -1,0 +1,23 @@
+# EditorConfig — https://editorconfig.org
+# Keeps whitespace and line endings consistent across editors and OSes.
+
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+indent_style = space
+indent_size = 4
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.{yml,yaml,toml,json}]
+indent_size = 2
+
+[*.md]
+indent_size = 2
+# Trailing two-space is a Markdown hard line break — don't strip it.
+trim_trailing_whitespace = false
+
+[Makefile]
+indent_style = tab

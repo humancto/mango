@@ -1,0 +1,12 @@
+# rustfmt — stable channel only.
+#
+# Nightly-only options (imports_granularity, group_imports, wrap_comments,
+# format_code_in_doc_comments, normalize_comments, style_edition = "2024")
+# are unsupported on stable rustfmt and are intentionally omitted. A
+# nightly-fmt CI job is a separate roadmap follow-up that will be
+# evaluated once real crates (mango-proto, mango-storage) exist, so the
+# decision is made on a real corpus.
+
+edition = "2021"
+newline_style = "Unix"
+use_field_init_shorthand = true
