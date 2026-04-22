@@ -1,0 +1,87 @@
+# Mango supply-chain policy enforced by `cargo-deny`. Runs in CI on
+# every push and PR — a failure blocks merge. Changes here need
+# reviewer sign-off.
+#
+# Docs: https://embarkstudios.github.io/cargo-deny/
+# Schema: cargo-deny 0.19.x (v2 schema — there is no longer an opt-in
+# `version` key; the shape below is the only shape the tool accepts
+# in current releases).
+
+[graph]
+# Single-target today; expand when cross-compilation lands.
+targets = [{ triple = "x86_64-unknown-linux-gnu" }]
+# CI overrides with `--all-features` (see `.github/workflows/ci.yml`)
+# so every feature any downstream can enable is checked. This default
+# applies to a local `cargo deny check` without flags — useful when
+# iterating on `deny.toml` without waiting on feature resolution.
+all-features = false
+
+[output]
+feature-depth = 1
+
+[licenses]
+# SPDX identifiers we accept. Anything outside this set fails the PR.
+# Rationale:
+#   Apache-2.0 (+ LLVM exception), MIT, BSD-3-Clause, BSD-2-Clause,
+#     ISC — standard permissive licenses, compatible with mango's
+#     Apache-2.0 release.
+#   Unicode-3.0, Unicode-DFS-2016 — `unicode-ident` and friends.
+#   Zlib — `adler`, `miniz_oxide`.
+#   CC0-1.0 — public-domain-equivalent.
+# MPL-2.0 is deliberately NOT here (file-level copyleft). When a dep
+# that requires it comes up, widen the list in that PR with a
+# justification. Same treatment for any other license.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-3-Clause",
+    "BSD-2-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "CC0-1.0",
+]
+# Tighter than the 0.8 upstream default — we want high confidence in
+# license detection before accepting a crate. Tune down only if a
+# legitimate dep gets rejected on ambiguous text.
+confidence-threshold = 0.93
+
+[advisories]
+# `deny` on yanked crates and "all" scopes for unmaintained/unsound
+# (default is "workspace" which silently passes transitive cases —
+# wrong posture for a consensus-database project).
+yanked = "deny"
+unmaintained = "all"
+unsound = "all"
+ignore = []
+
+[bans]
+multiple-versions = "deny"
+# When a dupe is unavoidable during a major-version migration, add an
+# entry here with an issue link and a removal target. Empty today.
+skip = []
+skip-tree = []
+wildcards = "deny"
+# Crate-level bans. Security axis mandates rustls — no OpenSSL path.
+# Belt-and-suspenders: ban every common entrypoint that can pull
+# OpenSSL into the graph, because a transitive ban produces a
+# confusing error message. `crate = ...` is the modern canonical form
+# (older `name = ...` still accepted but deprecated in 0.19.x).
+deny = [
+    { crate = "openssl-sys", reason = "Security axis mandates rustls; no OpenSSL in the tree." },
+    { crate = "openssl", reason = "Use rustls." },
+    { crate = "openssl-src", reason = "Vendored OpenSSL build — same ban class." },
+    { crate = "native-tls", reason = "Pulls OpenSSL on Linux by default; use rustls." },
+    { crate = "libssh2-sys", reason = "Drags OpenSSL via libgit2's ssh path; use a pure-Rust SSH stack or avoid git-over-SSH in-process." },
+]
+
+[sources]
+# Prod dep tree comes from crates.io. Any git-dep or alternate
+# registry requires an explicit allowlist entry below with a
+# justification — empty today.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

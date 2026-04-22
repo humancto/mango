@@ -81,3 +81,22 @@ jobs:
         # in one CI run" — it is unrelated to the matrix-strategy
         # `fail-fast: false` knob, which doesn't apply (no matrix yet).
         run: cargo test --workspace --all-targets --locked --no-fail-fast
+
+  deny:
+    # Supply-chain policy gate: licenses, RustSec advisories, banned
+    # crates (openssl-*, native-tls), duplicate versions, git-deps.
+    # Policy lives in `deny.toml` at the repo root.
+    #
+    # The action downloads a pinned `cargo-deny` binary — no Rust
+    # toolchain needed. SHA-pinned per the same convention as the
+    # other jobs; Embark Studios owns both the action and the tool,
+    # so the pin tracks v2.0.17 (April 2026).
+    name: deny
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: EmbarkStudios/cargo-deny-action@91bf2b620e09e18d6eb78b92e7861937469acedb  # v2.0.17
+        with:
+          command: check
+          arguments: --all-features
