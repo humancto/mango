@@ -17,22 +17,22 @@ regression relative to the goal — find the win.
 
 Mango is not "etcd, but rewritten." It is etcd's problem space attacked with
 a language whose primitives lift specific etcd footguns out of existence
-*at compile time*. These are the structural advantages every plan should
+_at compile time_. These are the structural advantages every plan should
 think in terms of:
 
 - **No GC.** Etcd's tail latency is shaped by Go's stop-the-world GC pauses,
-  which are small but real and *unbounded* under memory pressure. Rust has
+  which are small but real and _unbounded_ under memory pressure. Rust has
   deterministic destruction (RAII), so tail latency is bounded by what we
   do in our own code, never by a runtime collector. This is the single
   largest structural lever for the p99 bars below.
 - **Memory safety without a runtime.** Use-after-free, double-free, data
-  races on shared memory, buffer overflows — *not possible* in safe Rust.
+  races on shared memory, buffer overflows — _not possible_ in safe Rust.
   CVEs in this class become impossible-by-construction, not
   impossible-after-careful-review.
 - **Fearless concurrency via `Send` / `Sync`.** Sharing data across threads
-  without proper synchronization is a *compile error*, not a Friday-night
+  without proper synchronization is a _compile error_, not a Friday-night
   page. Etcd's Go race-detector catches these dynamically and only when a
-  race actually occurs in a test run; Rust catches the *category* before
+  race actually occurs in a test run; Rust catches the _category_ before
   the binary exists.
 - **Zero-cost abstractions.** Iterators, futures, generics, traits all
   compile to the same code we'd hand-write. We pay nothing for clean APIs.
@@ -45,7 +45,7 @@ think in terms of:
   threads explicitly (Phase 14 NUMA item). Etcd is at the mercy of Go's
   goroutine scheduler.
 - **`unsafe` is rare, named, and audited.** `unsafe_code = "forbid"` at the
-  workspace root means there are *zero* unsafe blocks unless a module
+  workspace root means there are _zero_ unsafe blocks unless a module
   explicitly opts in. Every opt-in module is named, has a `# Safety`
   comment block on every `unsafe` block, is Miri-tested. Etcd has neither
   the concept nor the audit trail.
@@ -53,7 +53,7 @@ think in terms of:
   `cargo-audit`, `cargo-vet`, SBOM via `cargo-cyclonedx`. The Go ecosystem
   has analogues; Rust's are more complete and CI-native.
 
-These are the *mechanism*. The bars below are the *measurement*. Every
+These are the _mechanism_. The bars below are the _measurement_. Every
 plan's first paragraph should name which mechanism it leverages and which
 bar it moves.
 
@@ -74,19 +74,19 @@ named test are auto-`REVISE`.
 1. **Performance — Blazing fast.** Rust's no-GC + zero-cost abstractions
    are the structural lever.
    - 1KB Put throughput on a 3-node loopback cluster: **≥ 1.5× etcd's**.
-     *Test:* `benches/runner/raft.sh` (Phase 5).
+     _Test:_ `benches/runner/raft.sh` (Phase 5).
    - p99 client latency at 50% of mango's saturation: **≤ 0.7× etcd's**
      at the same absolute QPS.
-     *Test:* `benches/runner/grpc.sh` (Phase 6).
+     _Test:_ `benches/runner/grpc.sh` (Phase 6).
    - Resident set size at idle (3-node cluster, empty data dir):
      **≤ 0.7× etcd's**.
-     *Test:* `benches/runner/idle-rss.sh` (Phase 6).
+     _Test:_ `benches/runner/idle-rss.sh` (Phase 6).
    - Cold start (process exec → first successful Put accepted):
      **≤ 0.7× etcd's**.
-     *Test:* `benches/runner/cold-start.sh` (Phase 6).
+     _Test:_ `benches/runner/cold-start.sh` (Phase 6).
    - Leader-failover-to-quorum-write time after `SIGKILL` of the leader:
      **≤ 0.7× etcd's**.
-     *Test:* `benches/runner/failover.sh` (Phase 5).
+     _Test:_ `benches/runner/failover.sh` (Phase 5).
 2. **Concurrency & parallelism.** Rust's `Send` / `Sync` + Tokio's
    structured concurrency mean we get correct parallel scaling without
    the GC scheduler artifacts that bound etcd's per-node throughput.
@@ -99,19 +99,19 @@ named test are auto-`REVISE`.
      serialization): throughput at 16 cores **≥ 14× throughput at 1
      core** (linear scaling is achievable on the read path). Etcd
      typically delivers ~10× here.
-     *Test:* `benches/runner/per-core-scaling.sh --workload=read-only`
+     _Test:_ `benches/runner/per-core-scaling.sh --workload=read-only`
      (Phase 6).
    - **Mixed workload** (50/50 read/write): throughput at 16 cores
      **≥ 8× throughput at 1 core** (the win over etcd's ~5× comes
      from no-GC tail + parallel reads via MVCC snapshots while writes
      pipeline through Raft).
-     *Test:* `benches/runner/per-core-scaling.sh --workload=mixed`
+     _Test:_ `benches/runner/per-core-scaling.sh --workload=mixed`
      (Phase 6).
    - **Write-heavy workload** (90% writes): throughput at 16 cores
      **≥ 4× throughput at 1 core** (apply is fundamentally serial in
      Raft; the win over etcd's ~3× comes from pipelined replication
      and tighter batching, not from getting around the protocol).
-     *Test:* `benches/runner/per-core-scaling.sh --workload=write-heavy`
+     _Test:_ `benches/runner/per-core-scaling.sh --workload=write-heavy`
      (Phase 6).
    - Zero deadlocks under fuzzed concurrent workloads. **Enforcement
      is layered, not single-mechanism**: compile-time,
@@ -120,17 +120,17 @@ named test are auto-`REVISE`.
      every shared-state primitive catch lock-cycle and channel-deadlock
      patterns within the modeled state space; runtime, the
      `cargo-nextest` per-test-class timeout (Phase 0 watchdog item)
-     catches anything that escapes both. *The compile-time check
-     alone does not guarantee deadlock-freedom*; the layered approach
+     catches anything that escapes both. _The compile-time check
+     alone does not guarantee deadlock-freedom_; the layered approach
      does, within the modeled state space.
-     *Tests:* per-crate `tests/loom/*.rs`; `.config/nextest.toml`
+     _Tests:_ per-crate `tests/loom/*.rs`; `.config/nextest.toml`
      timeouts (Phase 0 + Phase 5 onwards).
    - Lock-poisoning is unrepresentable in our code: `parking_lot`
      mutexes (no poisoning) or `tokio::sync` (no poisoning); use of
      `std::sync::Mutex` / `RwLock` in non-test code is rejected by
      `clippy::disallowed_types` (the correct mechanism — `cargo-deny`
      bans crates, not stdlib type uses).
-     *Test:* `clippy.toml` `disallowed-types` config (Phase 0).
+     _Test:_ `clippy.toml` `disallowed-types` config (Phase 0).
 3. **Reliability.** Graceful degradation, no thundering herds, no
    cascading failures, bounded recovery time. Rust's typed errors +
    the absence of unchecked exceptions mean every failure mode is
@@ -138,20 +138,20 @@ named test are auto-`REVISE`.
    - Follower restart against a 10M-revision cluster causes **≤ 1.2×
      the steady-state network ingress on the leader for ≤ 30s** (no
      thundering herd).
-     *Test:* `benches/runner/follower-restart.sh` + assertion in
+     _Test:_ `benches/runner/follower-restart.sh` + assertion in
      `tests/reliability/follower_catchup.rs` (Phase 5).
    - Zero leader changes during a 1-member-add-then-promote cycle on a
      healthy 3-node cluster.
-     *Test:* `tests/reliability/membership_change.rs` (Phase 9).
+     _Test:_ `tests/reliability/membership_change.rs` (Phase 9).
    - Single-node disk-full scenario: server enters read-only mode,
      raises `NOSPACE`, **never crashes, never corrupts**, recovers
      cleanly when space is freed.
-     *Test:* `tests/reliability/disk_full.rs` + `tests/chaos/disk_eio.rs`
+     _Test:_ `tests/reliability/disk_full.rs` + `tests/chaos/disk_eio.rs`
      (Phase 1 + Phase 15).
    - Slow client cannot stall the server: bounded per-stream send
      buffer with documented disconnect policy; zero memory growth
      under a misbehaving-client harness.
-     *Test:* `tests/dos/slow_loris.rs`, `tests/dos/oversized_frames.rs`
+     _Test:_ `tests/dos/slow_loris.rs`, `tests/dos/oversized_frames.rs`
      (Phase 6).
    - Recovery from any single-node failure (process kill, kernel
      panic, disk yank) within **≤ 0.7× etcd's recovery time** to the
@@ -160,28 +160,28 @@ named test are auto-`REVISE`.
      cold-cache reads (better storage engine), no Go-runtime startup
      cost (~50ms saved). If a PR's measured recovery time exceeds
      0.7×, the PR must either find more lever or document why the bar
-     should be revised. *Distinct from Performance bar #5*, which is
+     should be revised. _Distinct from Performance bar #5_, which is
      specifically leader-`SIGKILL`-to-quorum-write; this Reliability
      bar covers any-node any-failure-mode and is verified by
      `tests/chaos/single_node_failure.rs`, not the failover bench.
-     *Test:* `tests/chaos/single_node_failure.rs` (Phase 15).
+     _Test:_ `tests/chaos/single_node_failure.rs` (Phase 15).
 4. **Correctness — Distributed-systems grade.** Linearizability is
    the load-bearing claim; we verify it externally.
    - Public Jepsen run published in CI (Phase 13), results uploaded
      to a GitHub Pages site so the claim is externally checkable.
-     *Test:* `tests/jepsen/` (Phase 13).
+     _Test:_ `tests/jepsen/` (Phase 13).
    - Deterministic simulator (Phase 5 onwards) replays every reported
      bug from a seed; every fix lands with the seed in the regression
      suite.
-     *Test:* `tests/simulator/regression/` (Phase 5).
+     _Test:_ `tests/simulator/regression/` (Phase 5).
    - Property tests for every state machine — Raft transitions, MVCC
      visibility, lease state, watcher state — under proptest with
      shrinking; the simulator runs every property test under a panic
      hook that fails on any panic from non-test code.
-     *Tests:* `tests/properties/<state-machine>.rs` per crate.
+     _Tests:_ `tests/properties/<state-machine>.rs` per crate.
    - Linearizability checker (Porcupine-style) over every recorded
      simulator history.
-     *Test:* `tests/linearizability/` (Phase 13).
+     _Test:_ `tests/linearizability/` (Phase 13).
 5. **Safety — Memory-safe by construction.** Use-after-free, data
    race, double-free, buffer overflow: not possible in safe Rust. We
    enforce the rest mechanically.
@@ -189,9 +189,9 @@ named test are auto-`REVISE`.
      modules with documented invariants and a `# Safety` comment block
      on every `unsafe` block. Per-PR sign-off cites Miri output
      (`MIRIFLAGS=-Zmiri-strict-provenance cargo +nightly miri test
-     -p <crate>`) or a written justification for why Miri doesn't
+-p <crate>`) or a written justification for why Miri doesn't
      apply (e.g. FFI).
-     *Test:* CI step counts `unsafe` blocks across the workspace and
+     _Test:_ CI step counts `unsafe` blocks across the workspace and
      fails if it grows without an approving label.
    - **No panics in steady state**. **Mechanically enforced in three
      layers**: per-PR via clippy lints (Phase 0 — denies `unwrap_used`,
@@ -213,17 +213,17 @@ named test are auto-`REVISE`.
      waiting 7 days for a CVE patch is unacceptable. The next
      scheduled release post-hotfix re-establishes the 7-day-clean
      signal before cutting.
-     *Tests:* clippy config (Phase 0); `tests/simulator/panic_hook.rs`
+     _Tests:_ clippy config (Phase 0); `tests/simulator/panic_hook.rs`
      (Phase 13); `tests/chaos/long_running.rs` (Phase 15) + the
      continuous-chaos-runner workflow.
    - Every public fallible op returns a typed crate-local `Error`
      enum; `Box<dyn Error>` in a public API is auto-`REVISE`.
-     *Test:* `cargo public-api --diff` (Phase 0) plus a CI grep
+     _Test:_ `cargo public-api --diff` (Phase 0) plus a CI grep
      against `Box<dyn` in `pub fn` signatures.
    - Miri runs on a curated subset of tests (the ones touching unsafe
      blocks or pointer arithmetic) on every push to `main` and once
      per PR night.
-     *Test:* `.github/workflows/miri.yml` (Phase 15).
+     _Test:_ `.github/workflows/miri.yml` (Phase 15).
 6. **Security — Defense-in-depth.** Memory safety is necessary but
    not sufficient. Supply chain, network, disk, and operator are all
    trust boundaries.
@@ -231,33 +231,33 @@ named test are auto-`REVISE`.
      advisory, duplicate-version, ban-git-deps); `cargo-audit`
      (RustSec); `cargo-vet` (transitive-dep audits); SBOM via
      `cargo-cyclonedx` published with every release.
-     *Tests:* `.github/workflows/supply-chain.yml` (Phase 0).
+     _Tests:_ `.github/workflows/supply-chain.yml` (Phase 0).
    - **Cryptographic correctness**: TLS via `rustls` (memory-safe TLS,
      formally-verified crypto primitives via `*ring*` / `aws-lc-rs`);
      never `openssl` (CVE history, C codebase). All key material
      handled via `secrecy::Secret<T>` so it's zeroized on drop.
-     *Tests:* `tests/crypto/zeroize.rs`; `cargo-deny` ban list
+     _Tests:_ `tests/crypto/zeroize.rs`; `cargo-deny` ban list
      prohibits `openssl-sys`.
    - **Disk-corruption detection**: every backend write is checksummed
      (XXH3 or BLAKE3); reads verify; mismatch raises `CORRUPT` and
      refuses to serve stale-checksum pages.
-     *Test:* `tests/security/disk_corruption.rs` (Phase 15).
+     _Test:_ `tests/security/disk_corruption.rs` (Phase 15).
    - **DoS hardening at the gRPC layer**: max-message-size, max-concurrent-
      streams, http2 keepalive, per-conn rate limit. Defaults documented
      and tested with a misbehaving-client harness.
-     *Test:* `tests/dos/grpc_hostile_client.rs` (Phase 6).
+     _Test:_ `tests/dos/grpc_hostile_client.rs` (Phase 6).
    - **Threat model** in `docs/security/threat-model.md` covering
      client ↔ server, peer ↔ peer, operator ↔ disk; every threat has
      a named mitigation and a test (or a documented "accepted risk"
      justification).
-     *Test:* `docs/security/threat-model.md` is reviewed by
+     _Test:_ `docs/security/threat-model.md` is reviewed by
      `sensitive-data-auditor` + `security-reviewer` subagents before
      1.0 (Phase 15).
    - **Side-channel awareness**: constant-time comparison for all
      credential / token / hash-chain checks; `subtle` crate enforced
      via clippy custom-lint; CI test for non-constant-time use of
      `==` on `&[u8]` in security-relevant modules.
-     *Test:* `tests/security/constant_time.rs` (Phase 8 + 15).
+     _Test:_ `tests/security/constant_time.rs` (Phase 8 + 15).
 7. **Large-scale distributed.** Etcd is famously stretched at large
    cluster size (≥ 7 voters), large dataset (multi-GB), and large
    watcher counts. We target two scale tiers in v1.0: the single-Raft-
@@ -277,7 +277,7 @@ named test are auto-`REVISE`.
      workload as 3-voter; throughput delta documented and bounded
      (Raft has fundamental quorum-size cost; we minimize it via
      pipelined replication).
-     *Test:* `benches/runner/cluster-size.sh` (Phase 5 + 9).
+     _Test:_ `benches/runner/cluster-size.sh` (Phase 5 + 9).
    - **100k concurrent watchers** on a single server: RSS bounded at
      **≤ 100 KB per watcher** (so ≤ 10 GB total at the 100k case —
      this is the realistic memory footprint of 100k tonic streams +
@@ -286,14 +286,14 @@ named test are auto-`REVISE`.
      management work (excluding actual event delivery), p99 event
      delivery latency **≤ 100ms** under a 1k-events/sec write
      workload.
-     *Test:* `benches/runner/watcher-scale.sh` (Phase 3 + 14).
+     _Test:_ `benches/runner/watcher-scale.sh` (Phase 3 + 14).
    - **8 GB on-disk dataset** with **≥ 100M revisions**: range
      queries, compaction, snapshot, defrag all complete within the
      same per-op latency bounds as a small dataset.
-     *Test:* `benches/runner/large-dataset.sh` (Phase 2 + 14).
+     _Test:_ `benches/runner/large-dataset.sh` (Phase 2 + 14).
    - **Long-running stability**: 7-day continuous run at 5k writes/sec
      ships a stability report (Phase 15).
-     *Test:* `tests/chaos/long_running.rs` (Phase 15).
+     _Test:_ `tests/chaos/long_running.rs` (Phase 15).
 
    **Tier 2 — read-scale-out within a single Raft group** (the lever
    no etcd-shaped system has used; ships in Phase 14.5 pre-1.0). The
@@ -309,14 +309,14 @@ named test are auto-`REVISE`.
      ~500K-1M ops/sec — bounded-staleness is etcd's stronger suit
      (it's already serving reads off followers locally), so the
      multiplier here is naturally smaller than on linearizable.
-     *Test:* `benches/runner/read-scale-out.sh --read-mode=bounded-staleness` (Phase 14.5).
+     _Test:_ `benches/runner/read-scale-out.sh --read-mode=bounded-staleness` (Phase 14.5).
    - **Tier 2a 95/5 mix: ≥ 1.5M ops/sec** on the same topology
      (~1.5-3× over etcd serializable, depending on where in the
      ~500K-1M etcd range the comparison lands on the same hardware).
      This is the workload K8s-class operators actually run; calling
      it out separately so the bar isn't perceived as cherry-picked
      at 80/20.
-     *Test:* `benches/runner/read-scale-out.sh --read-mode=bounded-staleness --mix=95/5` (Phase 14.5).
+     _Test:_ `benches/runner/read-scale-out.sh --read-mode=bounded-staleness --mix=95/5` (Phase 14.5).
    - **Tier 2b (linearizable ReadIndex reads): ≥ 600K ops/sec** on the
      same 80/20 mix and topology. The honest ceiling — every read
      pays a leader-confirm round trip, even with ReadIndex batching.
@@ -325,20 +325,20 @@ named test are auto-`REVISE`.
      "5-10×" range reflects the spread in published etcd numbers
      across hardware generations; mango's bar is fixed at ≥ 600K, the
      comparison ratio is informational.
-     *Test:* `benches/runner/read-scale-out.sh --read-mode=linearizable` (Phase 14.5).
+     _Test:_ `benches/runner/read-scale-out.sh --read-mode=linearizable` (Phase 14.5).
    - **Read-throughput scaling with learner count**: throughput at N
      learners is **≥ 0.7 × N × (single-voter read throughput), up to
      N = 7 learners** (bounded-staleness mode). Past N = 7 the leader
      becomes the membership-and-replication bottleneck even without
      ReadIndex serialization. Going further requires multi-shard,
      which is explicitly post-1.0 and out of scope.
-     *Test:* `benches/runner/learner-scale.sh` (Phase 14.5).
+     _Test:_ `benches/runner/learner-scale.sh` (Phase 14.5).
    - **Hot-key client cache hit rate ≥ 90%** on the typical "watch one
      key, read it repeatedly" pattern, with watch-driven invalidation
      correctness verified by **multiple property tests** (server-cache
      equivalence at the cached revision, reconnect-with-compaction,
      event-ordering across reconnect — see Phase 14.5).
-     *Test:* `tests/cache/watch_invalidation.rs` and siblings (Phase 14.5).
+     _Test:_ `tests/cache/watch_invalidation.rs` and siblings (Phase 14.5).
    - **Process commitment**: if any of the Tier 2 bars above slips at
      bench time, the bar gets restated **in the same release** as the
      evidence — no quiet downgrade. Phase 12 includes a design task
@@ -352,52 +352,53 @@ named test are auto-`REVISE`.
      prose-coverage rules was itself an instance of the failure mode
      the commitment is meant to prevent. The design task is what
      turns the commitment into a mechanism; it is not the mechanism.
+
 8. **Operability.** Production-grade defaults; predictable behavior at
    the limits.
    - Every metric documented in `docs/metrics.md` with declared label
      set and cardinality bound; CI test scrapes `/metrics` and asserts
      each family's distinct label-value count stays below its declared
      bound under a 10k-key workload.
-     *Test:* `tests/observability/metric_cardinality.rs` (Phase 11).
+     _Test:_ `tests/observability/metric_cardinality.rs` (Phase 11).
    - `mango --check-config <path>` validates the entire config and
      exits non-zero on any conflict; tested against a malformed-
      config corpus.
-     *Test:* `tests/config/check_config.rs` (Phase 6).
+     _Test:_ `tests/config/check_config.rs` (Phase 6).
    - All structured logs use stable `mango.*` tracing target names;
      `tracing-opentelemetry` bridge wired natively so logs are
      OTel-ingestible out of the box.
-     *Test:* `tests/observability/log_targets.rs` (Phase 11).
+     _Test:_ `tests/observability/log_targets.rs` (Phase 11).
 9. **Developer ergonomics.** Mango should be pleasant to contribute to
    and pleasant to operate.
    - CI cold ≤ 5 min, warm ≤ 90s (CI-asserted via job duration check
      starting Phase 11).
-     *Test:* `.github/workflows/ci-duration-budget.yml` (Phase 11).
+     _Test:_ `.github/workflows/ci-duration-budget.yml` (Phase 11).
    - `mango cluster up --nodes 3` brings up a working local cluster in
      ≤ 10s and prints connection info.
-     *Test:* `tests/cli/cluster_up.rs` (Phase 12).
+     _Test:_ `tests/cli/cluster_up.rs` (Phase 12).
    - `cargo doc --open` for `mango-client` shows zero `prost`/`tonic`
      types in the public API surface (CI-checked via a doc-extracted
      allowlist).
-     *Test:* `tests/api/no_proto_leakage.rs` (Phase 7).
+     _Test:_ `tests/api/no_proto_leakage.rs` (Phase 7).
    - `cargo public-api --diff` clean against the previous tagged release
      unless the PR is tagged `breaking-change`.
-     *Test:* `.github/workflows/public-api-diff.yml` (Phase 0 warn,
+     _Test:_ `.github/workflows/public-api-diff.yml` (Phase 0 warn,
      Phase 6 gate).
 10. **Storage efficiency.** Smaller, faster compaction, no read stalls.
     - On-disk size after the same workload: **≤ 0.7× etcd's** (with
       mango's default compression on, etcd's default off — both
       defaults).
-      *Test:* `benches/runner/disk-size.sh` (Phase 1 + 2).
+      _Test:_ `benches/runner/disk-size.sh` (Phase 1 + 2).
     - Compaction: bounded CPU (≤ 25% of one core during compaction)
       and read p99 during compaction within **1.5× of steady-state
       read p99**.
-      *Test:* `benches/runner/compaction-impact.sh` (Phase 2).
+      _Test:_ `benches/runner/compaction-impact.sh` (Phase 2).
 
 ### Cross-cutting principle: **Tested or it doesn't exist.**
 
 Every bar above lists a named test. The test must exist (committed,
 runnable locally, runnable in CI) before the corresponding feature is
-considered "done." A bar without a named test is *not a bar*; it's
+considered "done." A bar without a named test is _not a bar_; it's
 marketing. The Reviewer's contract enforces this — see below.
 
 When two approaches both work, pick the one that wins on at least one axis
@@ -452,38 +453,38 @@ The reference systems column is the production user whose existence is
 the evidence the crate is good enough. If the reference user
 discontinues the crate, the row gets re-evaluated.
 
-| Subsystem | Crate (default) | Reference system | Notes |
-|---|---|---|---|
-| Async runtime | `tokio` | ~everyone in async Rust | The default; `glommio` / `monoio` only with an ADR justifying thread-per-core. |
-| gRPC server + client | `tonic` + `prost` | Linkerd2-proxy, Databricks, Cloudflare | The de-facto stack. No alternative considered. |
-| HTTP (UI server) | `axum` + `tower-http` | Cloudflare, Fly.io | Standard tokio-stack HTTP. |
-| Raft consensus | `tikv/raft-rs` | TiKV (operates raft-rs at multi-PB scale in PingCAP customer deployments) | See Phase 5 ADR — `openraft` is the documented alternative; hand-roll requires an ADR demonstrating both crates fail one of the four Phase 5 criteria. |
-| Storage engine | `redb` | iroh, several Rust DBs | Pure-Rust COW B-tree, design-inspired by bbolt; ~10kloc auditable surface. **Unsafe stance**: limited, audited `unsafe` concentrated in the mmap layer (the `unsafe` is structural — projecting struct types over a memory-mapped file requires it; bbolt has the same shape). Tested under Miri by upstream. Mango's workspace stays `unsafe_code = "forbid"`; redb's transitive `unsafe` is accepted as the storage row's cost and counted in the Phase 0.5 `cargo-geiger` baseline. Documented alternatives: `rust-rocksdb` for write-heavy LSM workloads where the C++ blast surface is acceptable; **`fjall`** as the pure-Rust LSM alternative (active development, smaller production track record). Hand-roll requires an ADR. See Phase 1 ADR. |
-| TLS | `rustls` + `rustls-platform-verifier` | Cloudflare, AWS, Linkerd | `openssl-sys` is banned via `cargo-deny` (security-axis bar). Pure Rust, formally-verified primitives via `aws-lc-rs` / `*ring*`. |
-| Tracing | `tracing` + `tracing-subscriber` + `tracing-opentelemetry` | Linkerd, Databricks | Standard observability stack. |
-| Metrics | `metrics` + `metrics-exporter-prometheus` | Grafana, others | Facade-based so backend swaps are cheap; OTel bridge already in roadmap. |
-| Concurrency primitives | `parking_lot` (sync), `tokio::sync` (async), `arc-swap`, `crossbeam` | Bevy, polars, TiKV | `std::sync::Mutex` / `RwLock` banned by `clippy::disallowed_types` (Phase 0). |
-| Hashing (DoS-resistant) | `ahash` (per-process random seed) | Bevy, polars | Already specified in Phase 2 sharded `KeyIndex`. |
-| Property testing | `proptest` | Tokio, sled, redb | The default; `quickcheck` only for legacy interop. |
-| Fuzzing | `cargo-fuzz` (libFuzzer) + `bolero` | `cargo-fuzz`: RustSec corpora, BoringSSL fuzz harnesses; `bolero`: AWS `s2n-quic` | `bolero` for property/fuzz unification on the parser surfaces. |
-| Concurrency model checking | `loom` | Tokio internals | Already in Phase 0.5; per-primitive scope discipline applies. |
-| **Deterministic simulation** | **`madsim`** | **RisingWave (dozens of distributed bugs publicly attributed to madsim DST in failover, recovery, and DDL surfaces — see RW blog series on madsim and `risingwavelabs/risingwave#4527`)** | **Drop-in `tokio` replacement with deterministic time / network / RNG. Adopting it makes the Phase 5 + Phase 13 deterministic-simulator items "integrate a runtime," not "build a simulator." See Phase 0.5 + Phase 5.** |
-| Network fault injection (live) | `toxiproxy` (binary) | Shopify | Live, real-network fault injection (latency, drop, partition, bandwidth cap) for Phase 14.5 chaos tests against real cluster topologies. Operates on real sockets; not deterministic. |
-| In-process network simulation | `turmoil` | Tokio team | In-process deterministic network simulation (drop, partition, reorder); narrower than `madsim` (network-only, no time/disk). Complement to `madsim` for tests where the full runtime swap is overkill but deterministic network behavior is required. |
-| Randomized concurrency search | `shuttle` | AWS | Complement to `loom`; randomized scheduler instead of exhaustive. Optional, weekly nightly. |
-| UB detection | `Miri` | Rust project | Already in Phase 0.5; tree-borrows + strict-provenance enabled. |
-| Bounded model checking | `kani` | AWS S2N, Firecracker | Optional release-gate verification for safety-critical modules. |
-| Secret handling | `secrecy` (zeroizing wrappers) + `subtle` (constant-time) | rustls, ring | Already specified in security-axis bars. |
-| Bytes / serialization | `bytes`, `serde`, `prost` (proto), `bincode` (internal) | Everyone | Standard. `serde` for human-facing config; `prost` on the wire; `bincode` for internal-only on-disk records that benefit from speed (with explicit version byte). |
-| Configuration | `figment` | Rocket, others | Layered config (file → env → CLI) with strict-schema validation. Backs the Phase 6 `mango --check-config` north-star bar. |
-| CLI | `clap` (derive) | Most modern Rust CLIs | Standard. |
-| gRPC service surface | `tonic-health`, `tonic-reflection` | Everyone using `tonic` | Standard health and reflection services for Phase 6 — required by k8s probes and `grpcurl`-style debugging. |
-| Rate limiting / load shedding | `tower::limit`, `governor` | Linkerd, others | Per-connection rate limit (`governor`) and concurrency cap (`tower::limit::ConcurrencyLimit`) for the Phase 6 gRPC DoS-hardening bar. |
-| Backoff / retry | `backon` | RisingWave, GreptimeDB | Typed retry with exponential / jittered backoff for the Phase 7 `mango-client` endpoint failover. |
-| Internal opaque IDs (request IDs, snapshot IDs) | `uuid` (v4 + v7) and/or `ulid` | Everyone | Phase 6 request-ID propagation, Phase 10 snapshot UUIDs. v7 (time-ordered) preferred for IDs that index into b-tree storage. **Note**: Phase 4 lease IDs are `i64` per the etcd-equivalent API shape and are **not** UUIDs/ULIDs — that is a wire-format decision the inventory does not override. |
-| Block compression | `lz4_flex` (default), `zstd` (high-ratio) | TiKV, polars | Phase 1 backend block compression (configurable). `lz4_flex` is the pure-Rust default; `zstd` is C-backed but standard. |
-| Time / wallclock display | `jiff` | Astral (`uv`, `ruff` adjacent timestamping) | Human-facing timestamps in logs / lease-TTL display per `docs/time.md`. Protocol time stays on `Instant` (monotonic) per Phase 0. `chrono` is the legacy alternative. |
-| Linearizability checker | **None production-grade in Rust as of 2026** — see notes | — | **Honest gap**: no production-grade Rust linearizability checker exists. `porcupine-rs` on crates.io is its author's "learning project." The Phase 13 linearizability-checker item depends on one of three paths, picked via ADR in `.planning/adr/0013-linearizability-checker.md`: **(a)** FFI to `anishathalye/porcupine` (Go) via subprocess + JSON history; **(b)** call Aphyr's Elle (Clojure on JVM) as a side-binary from CI; **(c)** accept this as a hand-rolled component (Phase 13 work-item, ADR exception to the inventory's "no hand-rolling without ADR" rule). The Reviewer's Contract treats this as the inventory's named exception so the auto-`REVISE` trigger does not fire. |
+| Subsystem                                       | Crate (default)                                                      | Reference system                                                                                                                                                                          | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| ----------------------------------------------- | -------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Async runtime                                   | `tokio`                                                              | ~everyone in async Rust                                                                                                                                                                   | The default; `glommio` / `monoio` only with an ADR justifying thread-per-core.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| gRPC server + client                            | `tonic` + `prost`                                                    | Linkerd2-proxy, Databricks, Cloudflare                                                                                                                                                    | The de-facto stack. No alternative considered.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| HTTP (UI server)                                | `axum` + `tower-http`                                                | Cloudflare, Fly.io                                                                                                                                                                        | Standard tokio-stack HTTP.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| Raft consensus                                  | `tikv/raft-rs`                                                       | TiKV (operates raft-rs at multi-PB scale in PingCAP customer deployments)                                                                                                                 | See Phase 5 ADR — `openraft` is the documented alternative; hand-roll requires an ADR demonstrating both crates fail one of the four Phase 5 criteria.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| Storage engine                                  | `redb`                                                               | iroh, several Rust DBs                                                                                                                                                                    | Pure-Rust COW B-tree, design-inspired by bbolt; ~10kloc auditable surface. **Unsafe stance**: limited, audited `unsafe` concentrated in the mmap layer (the `unsafe` is structural — projecting struct types over a memory-mapped file requires it; bbolt has the same shape). Tested under Miri by upstream. Mango's workspace stays `unsafe_code = "forbid"`; redb's transitive `unsafe` is accepted as the storage row's cost and counted in the Phase 0.5 `cargo-geiger` baseline. Documented alternatives: `rust-rocksdb` for write-heavy LSM workloads where the C++ blast surface is acceptable; **`fjall`** as the pure-Rust LSM alternative (active development, smaller production track record). Hand-roll requires an ADR. See Phase 1 ADR. |
+| TLS                                             | `rustls` + `rustls-platform-verifier`                                | Cloudflare, AWS, Linkerd                                                                                                                                                                  | `openssl-sys` is banned via `cargo-deny` (security-axis bar). Pure Rust, formally-verified primitives via `aws-lc-rs` / `*ring*`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| Tracing                                         | `tracing` + `tracing-subscriber` + `tracing-opentelemetry`           | Linkerd, Databricks                                                                                                                                                                       | Standard observability stack.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| Metrics                                         | `metrics` + `metrics-exporter-prometheus`                            | Grafana, others                                                                                                                                                                           | Facade-based so backend swaps are cheap; OTel bridge already in roadmap.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| Concurrency primitives                          | `parking_lot` (sync), `tokio::sync` (async), `arc-swap`, `crossbeam` | Bevy, polars, TiKV                                                                                                                                                                        | `std::sync::Mutex` / `RwLock` banned by `clippy::disallowed_types` (Phase 0).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| Hashing (DoS-resistant)                         | `ahash` (per-process random seed)                                    | Bevy, polars                                                                                                                                                                              | Already specified in Phase 2 sharded `KeyIndex`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| Property testing                                | `proptest`                                                           | Tokio, sled, redb                                                                                                                                                                         | The default; `quickcheck` only for legacy interop.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| Fuzzing                                         | `cargo-fuzz` (libFuzzer) + `bolero`                                  | `cargo-fuzz`: RustSec corpora, BoringSSL fuzz harnesses; `bolero`: AWS `s2n-quic`                                                                                                         | `bolero` for property/fuzz unification on the parser surfaces.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| Concurrency model checking                      | `loom`                                                               | Tokio internals                                                                                                                                                                           | Already in Phase 0.5; per-primitive scope discipline applies.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| **Deterministic simulation**                    | **`madsim`**                                                         | **RisingWave (dozens of distributed bugs publicly attributed to madsim DST in failover, recovery, and DDL surfaces — see RW blog series on madsim and `risingwavelabs/risingwave#4527`)** | **Drop-in `tokio` replacement with deterministic time / network / RNG. Adopting it makes the Phase 5 + Phase 13 deterministic-simulator items "integrate a runtime," not "build a simulator." See Phase 0.5 + Phase 5.**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| Network fault injection (live)                  | `toxiproxy` (binary)                                                 | Shopify                                                                                                                                                                                   | Live, real-network fault injection (latency, drop, partition, bandwidth cap) for Phase 14.5 chaos tests against real cluster topologies. Operates on real sockets; not deterministic.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| In-process network simulation                   | `turmoil`                                                            | Tokio team                                                                                                                                                                                | In-process deterministic network simulation (drop, partition, reorder); narrower than `madsim` (network-only, no time/disk). Complement to `madsim` for tests where the full runtime swap is overkill but deterministic network behavior is required.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| Randomized concurrency search                   | `shuttle`                                                            | AWS                                                                                                                                                                                       | Complement to `loom`; randomized scheduler instead of exhaustive. Optional, weekly nightly.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| UB detection                                    | `Miri`                                                               | Rust project                                                                                                                                                                              | Already in Phase 0.5; tree-borrows + strict-provenance enabled.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| Bounded model checking                          | `kani`                                                               | AWS S2N, Firecracker                                                                                                                                                                      | Optional release-gate verification for safety-critical modules.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| Secret handling                                 | `secrecy` (zeroizing wrappers) + `subtle` (constant-time)            | rustls, ring                                                                                                                                                                              | Already specified in security-axis bars.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| Bytes / serialization                           | `bytes`, `serde`, `prost` (proto), `bincode` (internal)              | Everyone                                                                                                                                                                                  | Standard. `serde` for human-facing config; `prost` on the wire; `bincode` for internal-only on-disk records that benefit from speed (with explicit version byte).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| Configuration                                   | `figment`                                                            | Rocket, others                                                                                                                                                                            | Layered config (file → env → CLI) with strict-schema validation. Backs the Phase 6 `mango --check-config` north-star bar.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| CLI                                             | `clap` (derive)                                                      | Most modern Rust CLIs                                                                                                                                                                     | Standard.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| gRPC service surface                            | `tonic-health`, `tonic-reflection`                                   | Everyone using `tonic`                                                                                                                                                                    | Standard health and reflection services for Phase 6 — required by k8s probes and `grpcurl`-style debugging.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| Rate limiting / load shedding                   | `tower::limit`, `governor`                                           | Linkerd, others                                                                                                                                                                           | Per-connection rate limit (`governor`) and concurrency cap (`tower::limit::ConcurrencyLimit`) for the Phase 6 gRPC DoS-hardening bar.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| Backoff / retry                                 | `backon`                                                             | RisingWave, GreptimeDB                                                                                                                                                                    | Typed retry with exponential / jittered backoff for the Phase 7 `mango-client` endpoint failover.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| Internal opaque IDs (request IDs, snapshot IDs) | `uuid` (v4 + v7) and/or `ulid`                                       | Everyone                                                                                                                                                                                  | Phase 6 request-ID propagation, Phase 10 snapshot UUIDs. v7 (time-ordered) preferred for IDs that index into b-tree storage. **Note**: Phase 4 lease IDs are `i64` per the etcd-equivalent API shape and are **not** UUIDs/ULIDs — that is a wire-format decision the inventory does not override.                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| Block compression                               | `lz4_flex` (default), `zstd` (high-ratio)                            | TiKV, polars                                                                                                                                                                              | Phase 1 backend block compression (configurable). `lz4_flex` is the pure-Rust default; `zstd` is C-backed but standard.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| Time / wallclock display                        | `jiff`                                                               | Astral (`uv`, `ruff` adjacent timestamping)                                                                                                                                               | Human-facing timestamps in logs / lease-TTL display per `docs/time.md`. Protocol time stays on `Instant` (monotonic) per Phase 0. `chrono` is the legacy alternative.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| Linearizability checker                         | **None production-grade in Rust as of 2026** — see notes             | —                                                                                                                                                                                         | **Honest gap**: no production-grade Rust linearizability checker exists. `porcupine-rs` on crates.io is its author's "learning project." The Phase 13 linearizability-checker item depends on one of three paths, picked via ADR in `.planning/adr/0013-linearizability-checker.md`: **(a)** FFI to `anishathalye/porcupine` (Go) via subprocess + JSON history; **(b)** call Aphyr's Elle (Clojure on JVM) as a side-binary from CI; **(c)** accept this as a hand-rolled component (Phase 13 work-item, ADR exception to the inventory's "no hand-rolling without ADR" rule). The Reviewer's Contract treats this as the inventory's named exception so the auto-`REVISE` trigger does not fire.                                                      |
 
 **Reference systems we will actively mine (not just depend on):**
 
@@ -531,7 +532,7 @@ agent enforces this list in plan + diff review.
   - **Unit tests** for every public function (table-driven where the
     input space allows).
   - **Property tests** (`proptest`, with shrinking) for every data
-    structure, codec, or protocol op. Property tests are the *default*;
+    structure, codec, or protocol op. Property tests are the _default_;
     unit tests are the exception, used only when the input space is
     genuinely a small enum.
   - **Integration tests** for every cross-crate boundary in
@@ -660,7 +661,7 @@ checklist tractable.
 5. **For unsafe code:** every `unsafe` block has a `// SAFETY:` comment
    naming the invariant; PR description has a sign-off line citing Miri
    output (`MIRIFLAGS=-Zmiri-strict-provenance cargo +nightly miri test
-   -p <crate>`) or a written justification for why Miri doesn't apply
+-p <crate>`) or a written justification for why Miri doesn't apply
    (e.g. FFI). The workspace `unsafe` count cannot grow without an
    approving PR label.
 6. **For security-claiming PRs:** named test(s) covering the threat
@@ -676,7 +677,7 @@ checklist tractable.
 9. **For new public API:** at least one doctest, `#[must_use]` where
    applicable, `#[non_exhaustive]` for new enums (per the Phase 0.5
    policy), and `cargo public-api --diff` output in the PR
-   *(advisory pre-Phase-6, gating from Phase 6 onwards)*. Plus
+   _(advisory pre-Phase-6, gating from Phase 6 onwards)_. Plus
    `cargo-semver-checks` clean from Phase 6 onwards.
 10. **CI green:** clippy clean (no `#[allow]` without a comment), tests
     green including doctests, fmt clean, deny clean, audit clean,
@@ -712,7 +713,7 @@ checklist tractable.
 - A claim against any north-star bar without naming the test that
   verifies it.
 - A new dependency on `openssl-sys` (use `rustls`).
-- A hand-rolled implementation of any subsystem listed in the workspace **Crate inventory** (see "Crate inventory & non-rolled stack") without an accompanying ADR in `.planning/adr/` justifying the deviation. Adding an *alternative* to a row (e.g., a second async runtime, a second TLS stack) is the same trigger. **Enforcement is reviewer-side** — unlike the clippy / cargo-deny / grep-able triggers above, no mechanical CI lint detects "this is a hand-rolled TLS stack." The `linearizability checker` row's ADR (`0013-linearizability-checker.md`) is pre-required by the inventory itself, so the auto-`REVISE` rule operates normally on it (the row spells out the three permitted paths; picking one still requires the ADR).
+- A hand-rolled implementation of any subsystem listed in the workspace **Crate inventory** (see "Crate inventory & non-rolled stack") without an accompanying ADR in `.planning/adr/` justifying the deviation. Adding an _alternative_ to a row (e.g., a second async runtime, a second TLS stack) is the same trigger. **Enforcement is reviewer-side** — unlike the clippy / cargo-deny / grep-able triggers above, no mechanical CI lint detects "this is a hand-rolled TLS stack." The `linearizability checker` row's ADR (`0013-linearizability-checker.md`) is pre-required by the inventory itself, so the auto-`REVISE` rule operates normally on it (the row spells out the three permitted paths; picking one still requires the ADR).
 - A non-constant-time comparison (`==` on `&[u8]`) in code touching
   credentials, tokens, or hash chains (use the `subtle` crate).
 - A new `pub` symbol without a doctest.
@@ -728,7 +729,7 @@ checklist tractable.
 If the reviewer's instinct is "this works, ship it" — but the PR did not
 move any north-star axis, did not add a property test, did not add a
 bench, and did not declare itself as plumbing — the verdict is `REVISE`
-with the question: *what does this PR do that beats etcd?* If the answer
+with the question: _what does this PR do that beats etcd?_ If the answer
 is "nothing, it just keeps parity," then the implementation needs to
 find the win or the scope needs to expand.
 
@@ -754,7 +755,7 @@ Phase 6 ships gRPC publicly.
 - [x] Add `deny.toml` and a `cargo-deny` CI job (license + advisory + duplicate-version checks; ban `git`-deps without explicit allowlist; ban `openssl-sys` per the Security axis — use `rustls`).
 - [x] Add `cargo-audit` CI job (RustSec advisories) running on push, PR, and a nightly schedule. **Nightly schedule auto-files a GitHub issue on any new advisory**, even if no PR is open, so we don't sit on advisories between PRs.
 - [x] Add a `cargo-msrv` job pinning the minimum supported Rust version (start at 1.80, bump deliberately) so we don't accidentally raise it.
-- [ ] **Bench oracle harness scaffold**: `benches/oracles/etcd/` checks in a script that downloads etcd v3.5.x at a pinned version + sha256, plus `benches/runner/HARDWARE.md` documenting the canonical hardware spec we run comparisons on, plus `benches/runner/run.sh` that prints a hardware signature alongside every result. Without this, every later "beats etcd by Nx" claim has no oracle. **`HARDWARE.md` MUST declare two hardware tiers**: (a) **Tier 1 / single-node bench rig** — single host, NVMe SSD, ≥ 16 cores, ≥ 64 GB RAM, sufficient for Phases 2-13 single-node and 3-node benches; (b) **Tier 2 / multi-node fleet** — ≥ 10 hosts (5 voters + 5 learners), ≥ 25 GbE intra-cluster bandwidth, root access for `tc` / `iptables` (or a `toxiproxy` install) to drive the Phase 14.5 chaos tests. If the Tier 2 fleet is unavailable, Phase 14.5 acceptance benches cannot ship and the Tier 2 release-gate fails (Phase 12 positioning-claim consistency gate).
+- [x] **Bench oracle harness scaffold**: `benches/oracles/etcd/` checks in a script that downloads etcd v3.5.x at a pinned version + sha256, plus `benches/runner/HARDWARE.md` documenting the canonical hardware spec we run comparisons on, plus `benches/runner/run.sh` that prints a hardware signature alongside every result. Without this, every later "beats etcd by Nx" claim has no oracle. **`HARDWARE.md` MUST declare two hardware tiers**: (a) **Tier 1 / single-node bench rig** — single host, NVMe SSD, ≥ 16 cores, ≥ 64 GB RAM, sufficient for Phases 2-13 single-node and 3-node benches; (b) **Tier 2 / multi-node fleet** — ≥ 10 hosts (5 voters + 5 learners), ≥ 25 GbE intra-cluster bandwidth, root access for `tc` / `iptables` (or a `toxiproxy` install) to drive the Phase 14.5 chaos tests. If the Tier 2 fleet is unavailable, Phase 14.5 acceptance benches cannot ship and the Tier 2 release-gate fails (Phase 12 positioning-claim consistency gate).
 - [ ] **Monotonic-clock policy**: workspace doc note in `docs/time.md` declaring "all protocol-relevant time math uses `Instant` (monotonic), never `SystemTime`. Wallclock is used only for human-facing logs and lease TTL display, never for protocol decisions. Leap seconds: documented as N/A. NTP step tolerance: tested with ±5s clock jumps in Phase 13."
 - [ ] **Crash-only design declaration** in `docs/architecture/crash-only.md`: storage and server layers assume the process can be killed at any instant; clean shutdown is an optimization, never a correctness requirement. WAL-then-apply ordering and `data-dir/VERSION` recovery (Phase 12) make process restart equivalent to crash recovery. Every storage / Raft PR must satisfy "this would also be correct if killed at any point."
 - [ ] Create `crates/mango-proto` skeleton with `tonic-build` and a hello-world `.proto` that compiles
@@ -769,26 +770,27 @@ worked in parallel with Phases 1–5 by anyone with cycles. They are not
 allowed to slip past Phase 5 — the rust-expert is instructed to refuse any
 Phase 6 PR that lands before Phase 0.5 is complete.
 
-- [ ] **`loom` as a workspace dev-dependency**: every crate that introduces a shared-state primitive (channel, lock, atomic) ships at least one `loom`-based model-checking test under `tests/loom/`. CI runs `cargo test --features loom-test --release` (cfg-gated so it only builds under the feature) on push and PR. **Scope discipline**: `loom` tests model *individual primitives* (a single channel, a single lock, a single atomic), not entire subsystems — exhaustive exploration scales exponentially in primitive count. Subsystem-level interleavings live in the Phase 13 deterministic simulator.
+- [ ] **`loom` as a workspace dev-dependency**: every crate that introduces a shared-state primitive (channel, lock, atomic) ships at least one `loom`-based model-checking test under `tests/loom/`. CI runs `cargo test --features loom-test --release` (cfg-gated so it only builds under the feature) on push and PR. **Scope discipline**: `loom` tests model _individual primitives_ (a single channel, a single lock, a single atomic), not entire subsystems — exhaustive exploration scales exponentially in primitive count. Subsystem-level interleavings live in the Phase 13 deterministic simulator.
 - [ ] **`madsim` as a workspace dev-dependency** (the deterministic-simulator runtime). The integration mechanism is **dependency renaming via Cargo's `package = "..."` field**, not `[patch.crates-io]`, per madsim's documented integration guide. Workspace `Cargo.toml` re-targets the runtime crates by rename. **Versions verified against crates.io as of the ADR date** (current as of late 2025: `madsim-tokio 0.2.x` wraps tokio 1.x; `madsim-tonic 0.6.x` wraps tonic 0.14; the team must re-verify before committing):
 
-   ```toml
-   [dependencies]
-   tokio = { version = "0.2", package = "madsim-tokio" }   # wraps tokio 1.x
-   tonic = { version = "0.6", package = "madsim-tonic" }   # wraps tonic 0.14
-   # TLS in sim: there is NO published `madsim-tokio-rustls` shim. Real
-   # `tokio-rustls` works under cfg(madsim) but TLS handshake timing is
-   # non-deterministic; most sim tests skip TLS or terminate it in front
-   # of the simulator (e.g., a real load balancer or a no-TLS test profile).
-   # RNG in sim: there is NO published `madsim-rand` shim. Use `madsim::rand`
-   # directly from inside `#[cfg(madsim)]` test code.
-   ```
+  ```toml
+  [dependencies]
+  tokio = { version = "0.2", package = "madsim-tokio" }   # wraps tokio 1.x
+  tonic = { version = "0.6", package = "madsim-tonic" }   # wraps tonic 0.14
+  # TLS in sim: there is NO published `madsim-tokio-rustls` shim. Real
+  # `tokio-rustls` works under cfg(madsim) but TLS handshake timing is
+  # non-deterministic; most sim tests skip TLS or terminate it in front
+  # of the simulator (e.g., a real load balancer or a no-TLS test profile).
+  # RNG in sim: there is NO published `madsim-rand` shim. Use `madsim::rand`
+  # directly from inside `#[cfg(madsim)]` test code.
+  ```
 
-   Source code then writes `use tokio::time::sleep;` / `use tonic::transport::Channel;` **unchanged** — the rename does the swap at link time. The simulator is activated by `RUSTFLAGS="--cfg madsim"` (set by the `sim` CI profile), not by a Cargo feature; `#[cfg(madsim)]` gates code paths that exist *only* in sim (test scaffolding, fault injectors, `madsim::rand` calls). `[patch.crates-io]` is reserved as the escape hatch for transitive dependencies the team cannot rename (a dep that pulls `tokio` directly without a feature gate). `std::time` is intercepted from inside `madsim-tokio`'s runtime, not patched.
+  Source code then writes `use tokio::time::sleep;` / `use tonic::transport::Channel;` **unchanged** — the rename does the swap at link time. The simulator is activated by `RUSTFLAGS="--cfg madsim"` (set by the `sim` CI profile), not by a Cargo feature; `#[cfg(madsim)]` gates code paths that exist _only_ in sim (test scaffolding, fault injectors, `madsim::rand` calls). `[patch.crates-io]` is reserved as the escape hatch for transitive dependencies the team cannot rename (a dep that pulls `tokio` directly without a feature gate). `std::time` is intercepted from inside `madsim-tokio`'s runtime, not patched.
 
-   **Why now and not Phase 5 / 13**: every later phase that ships an async primitive needs to be sim-testable, and retrofitting the rename across an established codebase is more expensive than adopting it from line 1. Adopting `madsim` in Phase 0.5 turns the Phase 5 "deterministic simulation testing harness" item from "build it" into "write tests against it," which is the single largest schedule-risk reduction in the roadmap.
+  **Why now and not Phase 5 / 13**: every later phase that ships an async primitive needs to be sim-testable, and retrofitting the rename across an established codebase is more expensive than adopting it from line 1. Adopting `madsim` in Phase 0.5 turns the Phase 5 "deterministic simulation testing harness" item from "build it" into "write tests against it," which is the single largest schedule-risk reduction in the roadmap.
 
-   **Scope**: `mango-raft`, `mango-mvcc`, `mango-server`, `mango-client` MUST be `madsim`-compatible by the time their respective phases ship. The CI matrix runs every async test under both the default profile (real `tokio`) and the `sim` profile (`RUSTFLAGS="--cfg madsim"`); regressions in either profile fail the PR. The crate inventory table above enumerates `madsim` as the default deterministic-simulator runtime; alternatives (`turmoil`, `shuttle`) are complementary, narrower-scope tools.
+  **Scope**: `mango-raft`, `mango-mvcc`, `mango-server`, `mango-client` MUST be `madsim`-compatible by the time their respective phases ship. The CI matrix runs every async test under both the default profile (real `tokio`) and the `sim` profile (`RUSTFLAGS="--cfg madsim"`); regressions in either profile fail the PR. The crate inventory table above enumerates `madsim` as the default deterministic-simulator runtime; alternatives (`turmoil`, `shuttle`) are complementary, narrower-scope tools.
+
 - [ ] **Test watchdog via `cargo-nextest`**: `.config/nextest.toml` declares per-test-class timeouts (`unit = 30s`, `integration = 5min`, `loom = 30min`, `chaos = 24h`). CI runs `cargo nextest run --profile ci`; tests exceeding their class timeout are killed and reported as failed. Per-test 10×-baseline regressions are surfaced via `nextest`'s flake-detector and `tests/watchdog-baselines.json` (updated in the same PR that legitimately makes a test slower). **Why nextest, not a custom harness or proc macro**: a custom harness would lose `cargo test --filter` and IDE integration; a proc macro relies on every test author remembering to use it. `nextest` does the wrapping natively and is the standard tool.
 - [ ] **Miri CI workflow** at `.github/workflows/miri.yml`: nightly Miri run across the curated subset of tests touching `unsafe` / pointer arithmetic; fails on any UB. **`MIRIFLAGS` includes both `-Zmiri-strict-provenance` AND `-Zmiri-tree-borrows`** (the latter is the stricter aliasing model becoming default in nightly Miri). Per PR: Miri runs only on changed crates that contain `unsafe` blocks. Per release: Miri runs on the full curated subset.
 - [ ] **Workspace `unsafe`-count tracker via `cargo-geiger`**: CI runs `cargo geiger --output-format=Json --workspace --all-targets` and asserts the `unsafe_used.functions.unsafe_` + `unsafe_used.exprs.unsafe_` + `unsafe_used.item_impls.unsafe_` counts (across mango crates) do not grow without an approving `unsafe-growth-approved` PR label. Baseline in `unsafe-baseline.json`, updated in the same PR that legitimately adds an `unsafe` block. Bonus: `cargo-geiger` also flags transitive `unsafe` density per dep, used as a supply-chain signal in the `cargo-vet` review.
@@ -830,13 +832,13 @@ backend.
 - [ ] Implement `KeyIndex` (in-memory tree of keys → list of generations of revisions) with put / tombstone / compact / restore-from-disk
 - [ ] **Sharded in-memory `KeyIndex`** as `[parking_lot::RwLock<HashMap<Bytes, KeyHistory>>; 64]`, hashed by `ahash::RandomState` seeded once at process start from a CSPRNG and shared across all 64 shards. **Why `RwLock` and not `Mutex`**: the watcher-cache target workload is "watch one key, read it repeatedly" — adversarially hot keys land in one shard, where `Mutex` would serialize all readers. `RwLock` lets concurrent readers on the same shard parallelize at the cost of a small write penalty (~10ns per `write()` under `parking_lot`'s implementation), which is the right trade for a read-heavy KV. **Why `ahash` per-process random seed**: prevents key-collision DoS where an attacker who can predict keys (e.g., paths under `/registry/`, lease IDs through clients) targets one shard and serializes its readers. The single-mutex design also fails Phase 6's per-core scaling bar (`≥ 14× at 16 cores` on the read-only workload — Concurrency axis #2). Hand-rolled (not `dashmap`) because of `dashmap`'s CVE history (RUSTSEC-2022-0002 et al.), `unsafe_code = "forbid"` ethos, easier `loom`-testability, and a tighter `cargo-vet` audit surface.
 - [ ] **`loom` test for the sharded key index** in `crates/mango-mvcc/tests/loom/sharded_index.rs`: model concurrent put + range + compact across two shards; assert no torn reads, no missed compactions, no deadlock under arbitrary interleaving.
-- [ ] **Hostile-key DoS test** in `crates/mango-mvcc/tests/security/keyindex_dos.rs`: with the `ahash` seed fixed to a known value (test-only API), confirm that an attacker who *knows* the seed can construct N keys colliding into one shard and bring per-shard read latency to its single-`RwLock` ceiling. Then re-seed with a fresh CSPRNG-derived value and confirm the same key set distributes across shards within statistical bounds (no shard holds > 2× the mean key count). Validates that production seeding defeats the attack.
+- [ ] **Hostile-key DoS test** in `crates/mango-mvcc/tests/security/keyindex_dos.rs`: with the `ahash` seed fixed to a known value (test-only API), confirm that an attacker who _knows_ the seed can construct N keys colliding into one shard and bring per-shard read latency to its single-`RwLock` ceiling. Then re-seed with a fresh CSPRNG-derived value and confirm the same key set distributes across shards within statistical bounds (no shard holds > 2× the mean key count). Validates that production seeding defeats the attack.
 - [ ] **Note on Phase 2 acceptance vs Phase 6 verification**: Phase 2's acceptance for these structures is the `loom` test (correctness) and the snapshot-reclamation bench (resource bounds). The full per-core scaling verification (`≥ 14× at 16 cores`) cannot run until Phase 6's gRPC stack ships and the integrated bench harness exists. Phase 2 ships green on correctness; Phase 6 ships green on the perf number that depends on these structures.
 - [ ] Implement the MVCC `KV` API: `Range`, `Put`, `DeleteRange`, `Txn` (compare + then/else ops), `Compact`
 - [ ] Read transactions return a consistent snapshot at a chosen revision
 - [ ] **Lock-free snapshot publication via `arc_swap::ArcSwap<Snapshot>`**. Readers acquire the latest snapshot with a single `Acquire` load; the MVCC apply loop swaps in a new `Arc<Snapshot>` after each batch; old `Arc`s drop when the last reader releases. Required for the Concurrency axis #2 read-only per-core bar — a snapshot mutex is the same kind of bottleneck the sharded `KeyIndex` removes, in a different position. **API discipline**: `Range` over more than 1000 keys MUST use `arc_swap::ArcSwap::load_full()` (returning a plain `Arc`), not `load()` (returning a `Guard`), so the slot is not pinned for the duration of the scan. Documented in the `mango-mvcc` rustdoc.
 - [ ] **Property test in `crates/mango-mvcc/tests/properties/snapshot_consistency.rs`**: under concurrent reads + writes, every reader sees a snapshot that is either "the snapshot at read-time" or "a snapshot that committed before read-time." No torn snapshots.
-- [ ] **`benches/runner/snapshot-reclamation.sh`**: sustained writes at 100K/sec for 60s while 16 reader threads each hold a snapshot for 1ms / 10ms / 100ms (three sweeps). **Assert**: reclamation latency p99 ≤ 1ms after slowest reader drops, and RSS bounded by `snapshot_baseline_bytes + (slowest_reader_hold_seconds × write_rate_per_second × bytes_per_write_delta) × 1.5`, where `bytes_per_write_delta` is the per-write retained delta size (typically ~1KB for the bench's 1KB values + per-revision metadata, *not* the full snapshot size). At 100K writes/sec × 0.1s × ~1KB × 1.5 ≈ 15 MB delta retained at the 100ms-hold sweep, on top of a typical multi-GB snapshot baseline. Catches the `ArcSwap` Guard-pinning footgun before it surfaces in production. Numbers in `benches/results/phase-2/snapshot-reclamation.md`.
+- [ ] **`benches/runner/snapshot-reclamation.sh`**: sustained writes at 100K/sec for 60s while 16 reader threads each hold a snapshot for 1ms / 10ms / 100ms (three sweeps). **Assert**: reclamation latency p99 ≤ 1ms after slowest reader drops, and RSS bounded by `snapshot_baseline_bytes + (slowest_reader_hold_seconds × write_rate_per_second × bytes_per_write_delta) × 1.5`, where `bytes_per_write_delta` is the per-write retained delta size (typically ~1KB for the bench's 1KB values + per-revision metadata, _not_ the full snapshot size). At 100K writes/sec × 0.1s × ~1KB × 1.5 ≈ 15 MB delta retained at the 100ms-hold sweep, on top of a typical multi-GB snapshot baseline. Catches the `ArcSwap` Guard-pinning footgun before it surfaces in production. Numbers in `benches/results/phase-2/snapshot-reclamation.md`.
 - [ ] Compaction: physically removes old revisions; `Range` against a compacted revision returns `ErrCompacted`
 - [ ] **Online compaction with bounded impact** — etcd's compaction can pause readers; mango compacts in the background with bounded CPU (≤ 25% of one core) and read p99 during compaction within **1.5× of steady-state read p99**. Bench gate in `benches/mvcc/` confirms; numbers committed to `benches/results/phase-2/compaction.md`. (Stronger claims like "zero impact" are aspirational and engine-dependent — this is the honest target that still beats etcd, whose major compactions cause much larger spikes.)
 - [ ] Property tests: random ops + random snapshot reads match a model implementation (proptest, 10k+ cases, shrinking on)
@@ -875,7 +877,7 @@ The hardest phase. Decide between `tikv/raft-rs`, `openraft`, or hand-roll;
 the `rust-expert` decides at plan time. Wrap whatever we pick behind a
 `Consensus` trait so the upper layers don't care.
 
-- [ ] ADR in `.planning/adr/0005-raft-implementation.md` confirming the Raft implementation. **Default per the workspace crate inventory: `tikv/raft-rs`** (TiKV operates raft-rs at multi-PB scale in production at PingCAP customers; a decade of bug-fixing already paid for). **Burden of proof is on deviation, not adoption.** Adopting `openraft` requires the ADR to document a specific raft-rs failure on at least one criterion below that openraft passes. Hand-rolling requires the ADR to document failures of *both* off-the-shelf crates against *all four* criteria, plus a written acknowledgement of the multi-year maintenance commitment. **The ADR is not "one page"** — even when the answer is "raft-rs," it must cover §1 the four decision criteria below, §2 the API-driver discipline mango will enforce (callbacks, snapshot model, `Ready` cadence), §3 the integration with `mango-storage`'s `Backend` trait, §4 how `cfg(madsim)` interacts with raft-rs's internal scheduling (does it use `tokio` directly? if not, does the deterministic clock still apply?). Expect ~5-10 pages. **Decision criteria**: (1) faster leader-failover recovery than etcd, (2) lower steady-state CPU, (3) a clean path to deterministic-simulation testing under `madsim` (Phase 0.5), (4) **evidence of active maintenance** — issue triage cadence, security-advisory channel, response to critical bug reports within a reasonable SLA — measured at ADR time, not by a hard "commits in the last N months" threshold (mature, feature-stable crates can quiesce by design). Re-checked at each major-release ADR refresh.
+- [ ] ADR in `.planning/adr/0005-raft-implementation.md` confirming the Raft implementation. **Default per the workspace crate inventory: `tikv/raft-rs`** (TiKV operates raft-rs at multi-PB scale in production at PingCAP customers; a decade of bug-fixing already paid for). **Burden of proof is on deviation, not adoption.** Adopting `openraft` requires the ADR to document a specific raft-rs failure on at least one criterion below that openraft passes. Hand-rolling requires the ADR to document failures of _both_ off-the-shelf crates against _all four_ criteria, plus a written acknowledgement of the multi-year maintenance commitment. **The ADR is not "one page"** — even when the answer is "raft-rs," it must cover §1 the four decision criteria below, §2 the API-driver discipline mango will enforce (callbacks, snapshot model, `Ready` cadence), §3 the integration with `mango-storage`'s `Backend` trait, §4 how `cfg(madsim)` interacts with raft-rs's internal scheduling (does it use `tokio` directly? if not, does the deterministic clock still apply?). Expect ~5-10 pages. **Decision criteria**: (1) faster leader-failover recovery than etcd, (2) lower steady-state CPU, (3) a clean path to deterministic-simulation testing under `madsim` (Phase 0.5), (4) **evidence of active maintenance** — issue triage cadence, security-advisory channel, response to critical bug reports within a reasonable SLA — measured at ADR time, not by a hard "commits in the last N months" threshold (mature, feature-stable crates can quiesce by design). Re-checked at each major-release ADR refresh.
 - [ ] `crates/mango-raft` skeleton with the chosen crate (or hand-rolled module structure)
 - [ ] Single-node Raft: proposals get applied to a state-machine trait; the state-machine is wired to the MVCC store
 - [ ] WAL: append every entry before applying; replay on startup; **bounded WAL space** with retention by size + time, oldest segment recycled or deleted post-snapshot. Documented behavior when WAL disk fills (refuse new proposals, raise `WAL_FULL` alarm).
@@ -890,7 +892,7 @@ the `rust-expert` decides at plan time. Wrap whatever we pick behind a
 - [ ] Bench in `benches/raft/`: 3-node cluster on local loopback, 1KB Put values, runner script `benches/runner/raft.sh` invoking `etcd-benchmark put --conns=100 --clients=1000 --total=100000 --val-size=1024` against the pinned etcd in `benches/oracles/etcd/` and the equivalent against mango on the hardware sig in `benches/runner/HARDWARE.md`. **Mango beats etcd by ≥ 1.5× on throughput and ≤ 0.7× on p99 commit latency.** Numbers committed to `benches/results/phase-5/raft.md`.
 - [ ] **Failover bench** `benches/runner/failover.sh`: 3-node cluster under sustained 1KB Put load; `SIGKILL` the leader; measure wall-clock time until the cluster accepts a quorum-write again. **Mango's failover time ≤ 0.7× etcd's** under identical conditions. Numbers committed to `benches/results/phase-5/failover.md`. Operationalizes the Performance "leader-failover-to-quorum-write" bar.
 - [ ] **Cluster-size scaling bench** `benches/runner/cluster-size.sh`: same workload as `raft.sh` but across {3, 5, 7} voters; document throughput delta vs cluster size and compare to etcd. Operationalizes the Large-scale-distributed bar #1. Numbers in `benches/results/phase-5/cluster-size.md`.
-- [ ] **`raft-rs` driver-discipline differential test** `tests/raft/driver_discipline.rs` (gated behind a `raft-driver-oracle` feature so the comparison driver is not pulled in by default). **Honest framing first**: if mango-raft uses `tikv/raft-rs` (the default per the workspace crate inventory), then both sides of this test share the same `raft-rs` implementation. This test cannot catch *Raft semantic bugs* in raft-rs itself — by construction, two `RawNode`s built from the same crate at the same revision agree on Raft semantics. What it *can* catch is **API-driver-discipline bugs**: mis-sequenced `propose` / `step` / `tick` calls, missed `Ready` handling, wrong `advance_apply` cadence, snapshot-application races. The "comparison driver" is a known-good minimal driver maintained alongside this test (initially modeled on the `examples/single_mem_node` and `examples/five_mem_node` examples in the upstream `raft-rs` repo at the pinned version), not a TiKV `tikv-server` binary. Run a workload of operations through both drivers with identical Raft configuration; assert the call sequence and `Ready` handling match. **What this test is NOT**: a substitute for Jepsen, the deterministic simulator, or the conformance suite. It is narrow API-discipline insurance against subtly mis-driving raft-rs, which is the single most common failure mode for new raft-rs adopters per the upstream issue tracker. Documented intentional differences live in `docs/raft-driver-discipline.md`. Runs nightly in CI alongside the simulator, not per-PR (the comparison driver is non-trivial to maintain).
+- [ ] **`raft-rs` driver-discipline differential test** `tests/raft/driver_discipline.rs` (gated behind a `raft-driver-oracle` feature so the comparison driver is not pulled in by default). **Honest framing first**: if mango-raft uses `tikv/raft-rs` (the default per the workspace crate inventory), then both sides of this test share the same `raft-rs` implementation. This test cannot catch _Raft semantic bugs_ in raft-rs itself — by construction, two `RawNode`s built from the same crate at the same revision agree on Raft semantics. What it _can_ catch is **API-driver-discipline bugs**: mis-sequenced `propose` / `step` / `tick` calls, missed `Ready` handling, wrong `advance_apply` cadence, snapshot-application races. The "comparison driver" is a known-good minimal driver maintained alongside this test (initially modeled on the `examples/single_mem_node` and `examples/five_mem_node` examples in the upstream `raft-rs` repo at the pinned version), not a TiKV `tikv-server` binary. Run a workload of operations through both drivers with identical Raft configuration; assert the call sequence and `Ready` handling match. **What this test is NOT**: a substitute for Jepsen, the deterministic simulator, or the conformance suite. It is narrow API-discipline insurance against subtly mis-driving raft-rs, which is the single most common failure mode for new raft-rs adopters per the upstream issue tracker. Documented intentional differences live in `docs/raft-driver-discipline.md`. Runs nightly in CI alongside the simulator, not per-PR (the comparison driver is non-trivial to maintain).
 - [ ] **`loom` tests for the Raft shared-state primitives** — split into three narrowly-scoped tests because exhaustive `loom` exploration of the full apply-path triple would explode the state space (and end up `#[ignore]`-d). Each test models a single primitive and asserts a single invariant:
   - `crates/mango-raft/tests/loom/apply_channel.rs` — model the `mpsc::channel` between commit-detector and apply-loop; assert no message lost, no message applied twice.
   - `crates/mango-raft/tests/loom/snapshot_apply.rs` — model the snapshot-read-while-apply-writes ordering; assert snapshot consistency under concurrent apply.
@@ -946,7 +948,7 @@ KV is real. **Read-only only** — no mutations until Phase 16, which lands
 after auth (Phase 8) so destructive ops are gated by RBAC.
 
 This phase exists to (a) prove the **out-of-process** UI architecture
-(see "Architecture" below — the UI is a *separate binary*, never inside
+(see "Architecture" below — the UI is a _separate binary_, never inside
 `mango-server`), (b) pick the frontend stack via ADR before Phase 16
 commits to it, (c) give the project a visible artifact that demos well
 long before the full console.
@@ -961,7 +963,7 @@ hosted inside the `mango-server` process. Rationale:
    handler does not crash the storage server, does not affect Raft
    membership, does not stall heartbeats. A misbehaving UI request
    (e.g. export-as-JSON of a 10M-key range) competes for memory and
-   scheduler time with *itself*, not with Raft.
+   scheduler time with _itself_, not with Raft.
 2. **Dependency-tree isolation.** Adding `axum` + `tower-http` + the
    chosen frontend stack to `mango-server` would inflate its compile
    time, `cargo-deny` surface, and `cargo-audit` surface. A CVE in any
@@ -978,13 +980,13 @@ local dev; production users install only what they need.
 
 - [ ] **Frontend-stack ADR** in `.planning/adr/` (rust-expert + a frontend-design pass at plan time). Candidates: server-rendered HTML + HTMX, Rust→WASM (Leptos / Dioxus / Yew), React + Vite + TS, SvelteKit. Decision criteria, in order: **(a) fastest dev iteration**, **(b) smallest binary contribution**, **(c) no Node in the user's `cargo install` build path** (Node tooling, if any, runs only at release time; built artifacts are checked in or fetched, never built from source on user installs), **(d) first-meaningful-paint ≤ 1s on a simulated 1 Mbps connection**, **(e) team can carry the stack for ≥ 2 years**, **(f) stack supports a top-level error boundary that catches uncaught errors and reports them server-side without leaking stored values into the report payload**. The rust-expert's prior recommendation for the rest of the team's consideration: **HTMX + askama (or maud) for Phase 7.5** (read-only forms / tables; ~14 KB; zero build step; stays Rust-only); **Leptos with SSR + islands for Phase 16** (client-side state for the txn builder + topology view; ~150-400 KB WASM after `wasm-opt`; SSR keeps first-paint fast); SvelteKit-with-built-artifacts as the fallback if Leptos is vetoed by the frontend reviewer.
 - [ ] `crates/mango-ui` skeleton: a **separate binary** (`mango-ui`) built from `crates/mango-ui` that talks to mango via the Phase 6 gRPC client. **Not embedded in the `mango-server` process** — see "Architecture" above for the reasoning. Default port `:2381`, configurable.
-- [ ] **Operator opt-in required, even for localhost.** Starting `mango-ui` requires `--listen <addr>` set OR `[ui] listen = "..."` in the config OR `MANGO_UI_LISTEN` env. **Precedence matches the project-wide convention from Phase 6: CLI > env > file > default.** There is no auto-start mode. **The UI is OFF by default in every shipped artifact.** The `dev-ui` cargo feature (non-default) lets mango developers run `cargo run --features dev-ui --bin mango-ui` with a default localhost listener — this is for *mango contributors only* and never enabled in published binaries. **Enforcement mechanism**: a CI job runs `cargo build --release --bin mango-ui --no-default-features` and asserts via `cargo metadata --format-version 1 | jq '.resolve.nodes[] | select(.id | contains("mango-ui")) | .features'` that `dev-ui` is not in the activated set; release artifacts that fail this check are rejected. Documented bluntly in `docs/ui-deployment.md`: "the previous version of this spec said 'on by default in dev profile' — that is impossible to do honestly because Cargo build profiles are not visible at runtime, so anyone running `cargo install --debug mango-ui` would get the UI on without knowing it. The current rule is: opt-in everywhere, no exceptions."
+- [ ] **Operator opt-in required, even for localhost.** Starting `mango-ui` requires `--listen <addr>` set OR `[ui] listen = "..."` in the config OR `MANGO_UI_LISTEN` env. **Precedence matches the project-wide convention from Phase 6: CLI > env > file > default.** There is no auto-start mode. **The UI is OFF by default in every shipped artifact.** The `dev-ui` cargo feature (non-default) lets mango developers run `cargo run --features dev-ui --bin mango-ui` with a default localhost listener — this is for _mango contributors only_ and never enabled in published binaries. **Enforcement mechanism**: a CI job runs `cargo build --release --bin mango-ui --no-default-features` and asserts via `cargo metadata --format-version 1 | jq '.resolve.nodes[] | select(.id | contains("mango-ui")) | .features'` that `dev-ui` is not in the activated set; release artifacts that fail this check are rejected. Documented bluntly in `docs/ui-deployment.md`: "the previous version of this spec said 'on by default in dev profile' — that is impossible to do honestly because Cargo build profiles are not visible at runtime, so anyone running `cargo install --debug mango-ui` would get the UI on without knowing it. The current rule is: opt-in everywhere, no exceptions."
 - [ ] **Startup WARN banner** when the UI is enabled: "Mango UI is enabled on `<addr>`. The UI is read-only but exposes every key/value in the cluster to anyone who can reach this address. Do not store secrets in mango until Phase 8 (auth) is shipped and the cluster is auth-enabled. To disable, remove `--listen` / `[ui] listen`." Banner is printed to stderr and logged at WARN so it's visible in both interactive and structured-log shipping.
 - [ ] **Bind discipline**:
   - Default bind is **both `127.0.0.1:2381` AND `[::1]:2381`** as separate listeners (don't use `[::]:2381` — dual-stack behavior is OS-dependent and has surprised people for decades). On a dual-stack host, the operator who tries to reach `[::1]:2381` from their browser succeeds without needing to widen the bind.
   - Either listener can be disabled individually via config.
   - Any non-loopback bind requires both `--ui-allow-non-loopback-bind` (renamed from the previous awkward `--insecure-ui`; the new name describes what the operator is acknowledging) AND TLS configured (`--ui-tls-cert` + `--ui-tls-key`); refuse to start otherwise with an actionable error.
-  - **Container / pod warning** in `docs/ui-deployment.md`: in Docker, `127.0.0.1` is the *container's* loopback; use `-p 127.0.0.1:2381:2381` on the host side or `--network host` with mango-ui's own bind. In Kubernetes, every container in the same pod shares `127.0.0.1`; the UI MUST be disabled in pods that host untrusted sidecars.
+  - **Container / pod warning** in `docs/ui-deployment.md`: in Docker, `127.0.0.1` is the _container's_ loopback; use `-p 127.0.0.1:2381:2381` on the host side or `--network host` with mango-ui's own bind. In Kubernetes, every container in the same pod shares `127.0.0.1`; the UI MUST be disabled in pods that host untrusted sidecars.
   - Tested: a startup-config matrix asserts every (bind, tls, allow-non-loopback) combination either starts cleanly or refuses-and-exits-non-zero with the documented diagnostic.
 - [ ] **`docs/ui-readonly-warning.md`**: explicit "do not store secrets in mango until Phase 8 is shipped" — Kubernetes Secrets, Vault backend storage, application credentials, TLS private keys. Linked from the README and from the WARN banner.
 - [ ] **Observability — every UI route handler emits a `tracing` INFO span** under target `mango.ui` with stable field names: `route`, `method`, `user_id` (when authed), `status`, `duration_ms`, `audit_event_id` (where relevant). Spans propagate the request ID through to the backend gRPC calls so a single operator action is traceable end-to-end. Inherited by Phases 16 and 16.5. **Forward note for Phase 11**: any UI metric introduced when Phase 11's metrics work covers the UI surface follows the cardinality discipline rule from line 486 — no `session_id`, `user_id`, `key`, `prefix`, or `ui_instance_id` may become a metric label, ever.
@@ -1020,8 +1022,8 @@ member metadata.
 - [ ] Membership change as a Raft `ConfChange` (single-server change at a time, joint-consensus optional/later)
 - [ ] Learner node state: replicates the log but does not vote and does not count toward quorum
 - [ ] **Extend `ConfChange` to encode a `promotable: bool` flag on learner state.** `true` for a normal learner (can later be promoted to voter), `false` for a read-replica (Phase 14.5 deployment mode — never promotable). The promote-learner API rejects on `promotable == false` **at the state-machine level**, not at a server-side flag, so a misconfigured operator cannot accidentally promote a read-replica. Required dependency for Phase 14.5's `mango-server --role=read-replica`.
-- [ ] **Voter-floor enforced in the `ConfChange` apply path** (not at the CLI). Any `ConfChange` whose effect would drop the cluster's voter count below `quorum_floor` (default 3, configurable via cluster bootstrap) is rejected at the state machine. This catches voter removals, voter→learner demotions, and voter→read-replica demotions equivalently — and equivalently for *every* client of the gRPC `Cluster` service (the CLI, the web UI, third-party ops tools, older `mangoctl` versions). Rationale: the same lesson as `promotable: bool` — the state machine is the only thing every client must traverse, so it is the only correct enforcement boundary. The CLI's confirmation prompt remains for UX, but it is no longer the enforcement.
-- [ ] Promote-learner-to-voter API with safety check (learner must have caught up to within N entries of leader, *and* `promotable == true`)
+- [ ] **Voter-floor enforced in the `ConfChange` apply path** (not at the CLI). Any `ConfChange` whose effect would drop the cluster's voter count below `quorum_floor` (default 3, configurable via cluster bootstrap) is rejected at the state machine. This catches voter removals, voter→learner demotions, and voter→read-replica demotions equivalently — and equivalently for _every_ client of the gRPC `Cluster` service (the CLI, the web UI, third-party ops tools, older `mangoctl` versions). Rationale: the same lesson as `promotable: bool` — the state machine is the only thing every client must traverse, so it is the only correct enforcement boundary. The CLI's confirmation prompt remains for UX, but it is no longer the enforcement.
+- [ ] Promote-learner-to-voter API with safety check (learner must have caught up to within N entries of leader, _and_ `promotable == true`)
 - [ ] `Cluster` gRPC service: member list/add/remove/promote/update
 - [ ] `mangoctl member` subcommand group including `member add --learner` and `member promote`
 - [ ] Tests: 3-node cluster + add learner, learner catches up, promote, remove old member, no quorum lost
@@ -1058,7 +1060,7 @@ correct from day one.
 - [ ] Prometheus exposition on `/metrics` covering request counts/latencies per RPC, Raft proposals / leader changes / log lag, MVCC db size + revision + compacted-revision, lease counts, watcher counts, backend write-amplification, fsync latency
 - [ ] **Cardinality discipline**: every metric's label set is documented; no user-controlled values (key names, lease IDs) ever become labels
 - [ ] Per-RPC `#[instrument]` spans with stable field names; spans propagate through `spawn_blocking` correctly (capture `Span::current()` and re-enter inside the closure)
-- [ ] **Tracing emits OTel-format spans natively** (`tracing-opentelemetry` bridge wired in `mango.server`'s init). The OTLP exporter is **off by default**; setting `MANGO_OTLP_ENDPOINT` enables it. The win over etcd is *format quality* (etcd's klog output isn't easily ingestible by OTel pipelines; ours is, out of the box) — not transport-on-by-default, which would mean every install logs "OTLP export failed: connection refused" forever in environments without a collector.
+- [ ] **Tracing emits OTel-format spans natively** (`tracing-opentelemetry` bridge wired in `mango.server`'s init). The OTLP exporter is **off by default**; setting `MANGO_OTLP_ENDPOINT` enables it. The win over etcd is _format quality_ (etcd's klog output isn't easily ingestible by OTel pipelines; ours is, out of the box) — not transport-on-by-default, which would mean every install logs "OTLP export failed: connection refused" forever in environments without a collector.
 - [ ] Sample Grafana dashboard JSON committed to `dashboards/`, with a "mango vs etcd" comparison panel using the bench harness output
 - [ ] **Continuous benchmark CI job**: every merge to `main` runs the Phase 5 / Phase 6 benches and uploads to a tracked baseline; regressions fail the next PR's CI
 - [ ] Tests: hit the server, scrape `/metrics`, assert expected metric families exist with expected labels and bounded cardinality
@@ -1114,7 +1116,7 @@ same test gauntlet mango itself does.
 
 - [ ] `crates/mango-conformance` — a standalone crate that runs a defined set of KV / Watch / Lease / Raft semantic assertions against any binary that speaks the mango `.proto`. Reference implementation = mango itself; pluggable consensus and embedded mode (stretch) MUST pass it before claiming compatibility.
 - [ ] Test categories: KV linearizability, Watch event ordering and at-least-once delivery, Lease expiry timing within tolerance, Txn compare-and-swap semantics, Range pagination edge cases, error-shape stability.
-- [ ] **Ported etcd integration tests** under `crates/mango-conformance/tests/etcd-ported/`. The etcd repo's `tests/integration/` and `tests/e2e/` describe behavior, not implementation, and most cases translate to mango's typed client (the test asserts "Put then Get returns the value"; the language is irrelevant). Initial port targets the `clientv3/` integration tests for KV, Watch, Lease, Auth, and Maintenance. Each ported test carries a `// PORTED FROM: etcd@<sha>:<path>:<test_name>` provenance comment; a CI job (`scripts/check-etcd-port-provenance.sh`) asserts every file under `etcd-ported/` has the provenance line. **Three provenance states**: (a) referenced sha matches `benches/oracles/etcd/VERSION` → green; (b) referenced sha is *older* than the pinned etcd version → CI emits a `divergence-audit-needed` warning (does not block) requiring a human to confirm the test still tracks current etcd behavior or to re-port from the newer sha; (c) referenced sha is unknown to the pinned etcd repo → CI fails. **Tests that fail because mango is intentionally divergent are explicitly skipped** with the divergence documented in `docs/etcd-divergence.md` (matches the Phase 13 differential-fuzz divergence file). **Honest cost note**: Go-to-Rust test translation is not free — initial port estimated at ~2 engineer-weeks for the `clientv3/` core; expanded surface (auth, maintenance, e2e) is iterative. This is still cheaper than re-discovering the test cases, which is the whole point.
+- [ ] **Ported etcd integration tests** under `crates/mango-conformance/tests/etcd-ported/`. The etcd repo's `tests/integration/` and `tests/e2e/` describe behavior, not implementation, and most cases translate to mango's typed client (the test asserts "Put then Get returns the value"; the language is irrelevant). Initial port targets the `clientv3/` integration tests for KV, Watch, Lease, Auth, and Maintenance. Each ported test carries a `// PORTED FROM: etcd@<sha>:<path>:<test_name>` provenance comment; a CI job (`scripts/check-etcd-port-provenance.sh`) asserts every file under `etcd-ported/` has the provenance line. **Three provenance states**: (a) referenced sha matches `benches/oracles/etcd/VERSION` → green; (b) referenced sha is _older_ than the pinned etcd version → CI emits a `divergence-audit-needed` warning (does not block) requiring a human to confirm the test still tracks current etcd behavior or to re-port from the newer sha; (c) referenced sha is unknown to the pinned etcd repo → CI fails. **Tests that fail because mango is intentionally divergent are explicitly skipped** with the divergence documented in `docs/etcd-divergence.md` (matches the Phase 13 differential-fuzz divergence file). **Honest cost note**: Go-to-Rust test translation is not free — initial port estimated at ~2 engineer-weeks for the `clientv3/` core; expanded surface (auth, maintenance, e2e) is iterative. This is still cheaper than re-discovering the test cases, which is the whole point.
 - [ ] **Jepsen tests running against mango**, under `tests/jepsen/`. **Honest framing**: mango is not wire-compatible with etcd, so we cannot run `jepsen.etcd` unmodified — its client speaks etcd's `etcdserverpb`. The port is **"reuse Jepsen's nemesis library, generator combinators, and the Knossos / Elle linearizability checkers; write a fresh Clojure client against mango's `.proto`"**. The fresh-Clojure-client cost is **~1-2 engineer-weeks of Clojure for a Rust team** (gRPC + Clojure is well-trodden via `protojure`, but it is real engineering, not gluework). The alternative is **Jepsen's `local` / SSH mode driving a Rust test binary that speaks mango's gRPC client directly**, which keeps the Rust team in Rust at the cost of losing Clojure's nemesis ergonomics. **The ADR in `.planning/adr/0013-jepsen-integration.md` picks one path and documents the trade.** Either way, runs alongside the Phase 13 mango-native simulator-driven property tests; Jepsen's value is not the language — it is "the same property checker that broke etcd in 2014 cannot break mango in CI." Results published to the same GitHub Pages site as the native simulator results.
 - [ ] Conformance suite runs in CI against mango itself on every PR; passes are the merge gate for any future implementation claiming "mango-conformant."
 - [ ] Public conformance report published alongside Jepsen results in Phase 13.
@@ -1131,7 +1133,7 @@ optimizes against the integrated workload.
 - [ ] **io_uring backend on Linux, opt-in only, never default**. Required to demonstrate ≥ 2× improvement on the WAL-append microbench to ship at all. Documented kernel-version requirement (≥ 5.15 for the syscalls we use). Falls back to the async-io path with a startup warning if the kernel doesn't support it. **Active CVE policy**: `cargo-audit` config tracks io_uring-related kernel CVEs; we publish a security advisory and bump the documented minimum kernel version on any in-range CVE. Not enabled by default because (a) several cloud providers and security-conscious orgs disable io_uring at the kernel level, (b) it has an active CVE history, (c) the win is workload-shaped (large for small-IO, small for our batched-fsync WAL).
 - [ ] **NUMA awareness** for multi-socket boxes (pin Raft tick / apply / serve threads sensibly)
 - [ ] **Adaptive batching**: batch sizes auto-tune to maintain target p99 latency under varying load (etcd's batching is static)
-- [ ] **Bounded-staleness follower reads** — **per-RPC opt-in only, never default**. Client passes `MaxStaleness(d)` on a `Range` request; the follower refuses to serve if its applied-index lag exceeds the bound, and the response carries the actual staleness measured at serve time. Documented as a *weakening of linearizability* in `docs/consistency.md`; explicit warning that operators must NOT enable it globally for systems (Kubernetes, controllers) that depend on linearizable etcd reads. Etcd has no first-class equivalent; this is a real differentiator if shipped responsibly.
+- [ ] **Bounded-staleness follower reads** — **per-RPC opt-in only, never default**. Client passes `MaxStaleness(d)` on a `Range` request; the follower refuses to serve if its applied-index lag exceeds the bound, and the response carries the actual staleness measured at serve time. Documented as a _weakening of linearizability_ in `docs/consistency.md`; explicit warning that operators must NOT enable it globally for systems (Kubernetes, controllers) that depend on linearizable etcd reads. Etcd has no first-class equivalent; this is a real differentiator if shipped responsibly.
 - [ ] **Large-dataset bench** `benches/runner/large-dataset.sh`: load 8 GB / ≥ 100M revisions; measure range-query latency, compaction wall-clock, snapshot wall-clock, defrag wall-clock. Compare to etcd at the same dataset size. Operationalizes Large-scale-distributed bar #3. Numbers in `benches/results/phase-14/large-dataset.md`.
 - [ ] **Watcher-scale bench** `benches/runner/watcher-scale.sh`: open 100k concurrent watchers on a single server under a 1k-events/sec write workload. Assert: stable RSS, bounded CPU, p99 event-delivery latency ≤ 100ms. Operationalizes Large-scale-distributed bar #2. Numbers in `benches/results/phase-14/watcher-scale.md`.
 - [ ] Final integrated bench, runner script `benches/runner/ycsb.sh`: YCSB-A,B,C,D,E,F on a 3-node cluster against the pinned etcd in `benches/oracles/etcd/` on the hardware sig in `benches/runner/HARDWARE.md`. **Realistic acceptance bar: mango wins on YCSB-A (write-heavy) and YCSB-F (read-modify-write) throughput by ≥ 1.3×; ties or wins on YCSB-B/C/D/E throughput within ±10%; wins on p99 latency on at least 4 of the 6 workloads at 50% saturation.** The two workloads where mango may lose are documented with the structural reason in `benches/results/v0.1.0.md`. ("Wins on every workload" is fan-fic; etcd has been profiled by experts for a decade. We win where we have a structural edge — write-heavy paths via Rust + pipelined Raft + better storage engine — and we're honest about read-only point-lookups at small values, which favor bbolt's mmap'd B+tree.)
@@ -1163,7 +1165,7 @@ read-replica-state is real. The single-node read-path enablers
 they are required by Phase 6's per-core scaling bar and so cannot
 wait until 14.5.
 
-**Note on terminology**: "*sharded*" in this phase (e.g., the
+**Note on terminology**: "_sharded_" in this phase (e.g., the
 sharded `KeyIndex` referenced from Phase 2) means **in-process
 concurrent-map sharding for parallel reader access** — unrelated to
 the multi-shard cluster topology of "Tier 3," which is explicitly
@@ -1184,7 +1186,7 @@ not on the roadmap.
 
 ### Client-side cache with watch-driven invalidation
 
-- [ ] **Typed `WatchedCache<K, V>` in `mango-client`**: holds a key (or range) locally; opens a Watch against the server; serves `Get` from the local cache at the cache's *effective revision* `R_c`, which lags server-now by at most N events (where N is the per-watcher channel depth). The cache contract is "consistent at `R_c`, not at server-now" — documented in `mango-client` rustdoc and in `docs/consistency.md` as a relaxation that operators must explicitly opt into per cache instance.
+- [ ] **Typed `WatchedCache<K, V>` in `mango-client`**: holds a key (or range) locally; opens a Watch against the server; serves `Get` from the local cache at the cache's _effective revision_ `R_c`, which lags server-now by at most N events (where N is the per-watcher channel depth). The cache contract is "consistent at `R_c`, not at server-now" — documented in `mango-client` rustdoc and in `docs/consistency.md` as a relaxation that operators must explicitly opt into per cache instance.
 - [ ] **Memory bounds**: `WatchedCache::builder()` requires `max_entries` and `max_bytes` (defaults: 100k entries, 256 MiB). Eviction policy is LRU on entries, hard cap on bytes. On eviction of a key that is currently watched, the cache transitions that key to "miss-through" mode (every `Get` goes to wire) until the next watch event re-populates. Without this, a client watching `--prefix /` over a 100M-revision dataset OOMs — exactly the same class of bug as etcd's "watcher channel grows unbounded," moved to the client.
 - [ ] **Property test 1 — `tests/cache/watch_invalidation.rs::cache_server_equivalence_at_rc`**: under random `Put`/`Delete`/`Watch`/`Get` sequences, **for every key K and every cache-served read at the cache's effective revision `R_c`, the cache's response equals the server's response for K at `R_c`. The cache's effective revision lags server-now by at most N events.** This is the corrected property — the previous "no stale-positive" wording contradicted the cache's own contract.
 - [ ] **Property test 2 — `tests/cache/watch_invalidation.rs::reconnect_with_compaction_invalidates`**: watcher disconnects; server compacts past `cache.last_revision`; watcher reconnects and receives `ErrCompacted`. The cache MUST invalidate all entries (transition to empty, not stale-pinned) and re-bootstrap from a fresh server snapshot. Without this the cache serves a revision the server can no longer prove correct.
@@ -1197,7 +1199,7 @@ not on the roadmap.
 ### Acceptance: the Tier 2 north-star bar
 
 The acceptance benches close with a process commitment: if any bar
-slips at bench time, the bar is restated *in the same release* as the
+slips at bench time, the bar is restated _in the same release_ as the
 evidence — README's positioning table and ROADMAP bar #7 update
 together. No quiet downgrade.
 
@@ -1223,7 +1225,7 @@ assumptions are violated.
 - [ ] **Constant-time-comparison test** — split into PR-time source check and release-gate timing measurement, because statistical timing tests are CI-flaky on shared runners (jitter from neighbors, thermal throttling, scheduler effects):
   - **PR-time source check** `tests/security/constant_time.rs`: for every `==` on `&[u8]` in `auth*` / `crypto*` / `token*` / `hash_chain*` modules, assert the underlying call goes through `subtle::ConstantTimeEq` (compile-time / source-grep equivalent of the Phase 0.5 dylint). Fast, deterministic, CI-safe.
   - **Release-gate timing measurement** `tests/security/constant_time_timing.rs` (separate workflow `.github/workflows/timing-bench.yml`, runs on a self-hosted bare-metal runner, gated as part of the 7-day chaos run): the actual statistical timing test with **100k samples per prefix length**; asserts timing-distribution overlap within 2σ. Failures block the release; PR CI does not depend on it. Matches how rustls / ring test constant-time: source verification per PR, occasional bare-metal timing measurement as a release gate.
-  Operationalizes the Security side-channel bar with the appropriate split between cheap (per-PR) and expensive (release-gate) enforcement.
+    Operationalizes the Security side-channel bar with the appropriate split between cheap (per-PR) and expensive (release-gate) enforcement.
 - [ ] **Single-node failure chaos test** `tests/chaos/single_node_failure.rs`: under sustained Put load, `SIGKILL` + `kernel_panic` (via `/proc/sysrq-trigger c` in a container) + `disk_yank` (unmount the data-dir filesystem) one node at a time; assert the cluster's recovery time to the same workload is ≤ 0.7× etcd's. Operationalizes Reliability bar #5.
 - [ ] **Disk-EIO chaos test** `tests/chaos/disk_eio.rs`: inject `EIO` on every syscall family the backend uses; assert no silent data loss, no panic, every error is reported through the typed error enum.
 - [ ] **Memory profiling under load**: Massif / dhat profile, no leaks, RSS bounded under sustained load — see the long-running chaos item below for the required duration.
@@ -1267,7 +1269,7 @@ admin) live in **Phase 16.5**, which depends on Phases 9 and 10.
   - **Password handling**: `autocomplete="current-password"`; never logged; never returned in any error message; constant-time server-side comparison.
   - **Login-form CSRF**: token issued on the GET, validated on the POST (the synchronizer-token-bound-to-session pattern can't apply to the login itself because there's no session yet).
   - **Session cookies**: `HttpOnly; Secure; SameSite=Strict; Path=/` (the `Secure` attribute is gated on TLS being configured — on cleartext localhost it is omitted with a startup-banner warning).
-- [ ] **Server-side session revocation list in the Raft state machine** (so it survives leader change). UI **access tokens are short-lived** (15 min default — long enough that a brief network hiccup doesn't log the operator out mid-edit, short enough that a stolen token has a small window; 8 h refresh token max). Tokens carry a session-id claim. Every backend request consults the revocation set at the auth interceptor — *not* just at the resource check. **Refresh requests also consult the revocation set; a refresh issued for a revoked session-id returns 401 immediately**, otherwise revoking a session would silently resurrect for another access-token TTL. "Log out everywhere" adds the user's session-ids; admin "revoke user" — which in Phase 16 means the `mangoctl auth revoke <user>` command from Phase 8, becoming the in-UI action when Phase 16.5 ships — adds all of that user's active session-ids atomically with the user-removal. Tested: revoke admin user, assert their in-flight UI session can no longer make any mutating call within one revocation-propagation tick, and assert their next refresh attempt is rejected.
+- [ ] **Server-side session revocation list in the Raft state machine** (so it survives leader change). UI **access tokens are short-lived** (15 min default — long enough that a brief network hiccup doesn't log the operator out mid-edit, short enough that a stolen token has a small window; 8 h refresh token max). Tokens carry a session-id claim. Every backend request consults the revocation set at the auth interceptor — _not_ just at the resource check. **Refresh requests also consult the revocation set; a refresh issued for a revoked session-id returns 401 immediately**, otherwise revoking a session would silently resurrect for another access-token TTL. "Log out everywhere" adds the user's session-ids; admin "revoke user" — which in Phase 16 means the `mangoctl auth revoke <user>` command from Phase 8, becoming the in-UI action when Phase 16.5 ships — adds all of that user's active session-ids atomically with the user-removal. Tested: revoke admin user, assert their in-flight UI session can no longer make any mutating call within one revocation-propagation tick, and assert their next refresh attempt is rejected.
 - [ ] **RBAC enforcement in the UI mirrors the backend** — and the UI treats the button-disabled state as **cosmetic and best-effort**; the authoritative check is the backend on every request. Three property tests:
   - **(a)** every UI mutating action that the backend would reject is also disabled in the UI for that user (UI-too-permissive guard);
   - **(b)** every action enabled in the UI for a user is accepted by the backend (UI-too-restrictive guard);
