@@ -17,3 +17,10 @@ disallowed-types = [
     { path = "std::sync::Mutex", reason = "use parking_lot::Mutex (no poisoning, faster) or tokio::sync::Mutex (async-aware); both bypass std's poisoning footgun" },
     { path = "std::sync::RwLock", reason = "use parking_lot::RwLock or tokio::sync::RwLock for the same reason" },
 ]
+
+# Keep in sync with rust-version in Cargo.toml and the pinned
+# toolchain in .github/workflows/ci.yml's msrv job. Enables
+# clippy::incompatible_msrv (denied in Cargo.toml) to flag any
+# stdlib API call newer than MSRV at PR time, in addition to the
+# `cargo check @ 1.80` job catching it at compile time.
+msrv = "1.80"
