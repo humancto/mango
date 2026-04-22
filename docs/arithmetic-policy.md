@@ -82,7 +82,9 @@ verify the bound from the comment should ask for the `checked_*` form.
 `Instant` ordering drives timeout dispatch in Raft election timers,
 lease expiry, and watch progress. A wrapped deadline silently reorders
 events — exactly the shape of a correctness bug we cannot debug from
-logs.
+logs. The choice of `Instant` (not `SystemTime`) for every protocol
+decision is the [monotonic-clock policy](time.md); this section covers
+the arithmetic on it.
 
 ```rust
 let deadline = now
