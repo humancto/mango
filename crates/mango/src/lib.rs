@@ -12,7 +12,8 @@ mod tests {
         clippy::expect_used,
         clippy::panic,
         clippy::indexing_slicing,
-        clippy::unnecessary_literal_unwrap
+        clippy::unnecessary_literal_unwrap,
+        clippy::arithmetic_side_effects
     )]
 
     use super::*;

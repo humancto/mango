@@ -22,12 +22,11 @@ missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 
 # Hardening — foot-guns denied workspace-wide. Test modules override
-# the four that tests legitimately need (unwrap_used, expect_used,
-# panic, indexing_slicing) via an inner `#![allow(...)]` at the test-
-# mod boundary. `clippy::arithmetic_side_effects` is intentionally NOT
-# here — it requires the workspace arithmetic-primitive policy (next
-# roadmap item) to land first, or every counter increment becomes an
-# `#[allow]` retrofit.
+# the lints that tests legitimately need via an inner `#![allow(...)]`;
+# see `crates/mango/src/lib.rs`.
+# arithmetic_side_effects: see docs/arithmetic-policy.md for the
+# accompanying policy (checked_* for protocol counters, saturating_*
+# for budgets, wrapping_* for modular math).
 unwrap_used = { level = "deny", priority = 1 }
 expect_used = { level = "deny", priority = 1 }
 panic = { level = "deny", priority = 1 }
@@ -36,6 +35,7 @@ todo = { level = "deny", priority = 1 }
 indexing_slicing = { level = "deny", priority = 1 }
 cast_possible_truncation = { level = "deny", priority = 1 }
 cast_sign_loss = { level = "deny", priority = 1 }
+arithmetic_side_effects = { level = "deny", priority = 1 }
 dbg_macro = { level = "deny", priority = 1 }
 print_stdout = { level = "deny", priority = 1 }
 print_stderr = { level = "deny", priority = 1 }
