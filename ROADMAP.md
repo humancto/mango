@@ -304,11 +304,18 @@ named test are auto-`REVISE`.
      delivers ≥ 1M ops/sec** on an 80/20 read/write mix at 1KB values
      on the canonical `benches/runner/HARDWARE.md`. Reads are served
      locally on the learner under a documented `MaxStaleness(d)`
-     bound; writes stay quorum-bound at Tier 1 ceilings.
+     bound; writes stay quorum-bound at Tier 1 ceilings. Roughly
+     **up to ~2× over etcd's serializable-read ceiling** of
+     ~500K-1M ops/sec — bounded-staleness is etcd's stronger suit
+     (it's already serving reads off followers locally), so the
+     multiplier here is naturally smaller than on linearizable.
      *Test:* `benches/runner/read-scale-out.sh --read-mode=bounded-staleness` (Phase 14.5).
-   - **Tier 2a 95/5 mix: ≥ 1.5M ops/sec** on the same topology. This
-     is the workload K8s-class operators actually run; calling it out
-     separately so the bar isn't perceived as cherry-picked at 80/20.
+   - **Tier 2a 95/5 mix: ≥ 1.5M ops/sec** on the same topology
+     (~1.5-3× over etcd serializable, depending on where in the
+     ~500K-1M etcd range the comparison lands on the same hardware).
+     This is the workload K8s-class operators actually run; calling
+     it out separately so the bar isn't perceived as cherry-picked
+     at 80/20.
      *Test:* `benches/runner/read-scale-out.sh --read-mode=bounded-staleness --mix=95/5` (Phase 14.5).
    - **Tier 2b (linearizable ReadIndex reads): ≥ 600K ops/sec** on the
      same 80/20 mix and topology. The honest ceiling — every read
@@ -332,18 +339,19 @@ named test are auto-`REVISE`.
      equivalence at the cached revision, reconnect-with-compaction,
      event-ordering across reconnect — see Phase 14.5).
      *Test:* `tests/cache/watch_invalidation.rs` and siblings (Phase 14.5).
-   - **Process commitment, mechanically enforced**: if any of the Tier
-     2 bars above slips at bench time, the bar gets restated **in the
-     same release** as the evidence — no quiet downgrade. Enforcement
-     is a CI workflow `.github/workflows/positioning-claim-consistency.yml`
-     (added in Phase 12, Release engineering) that ingests the headline
-     numbers from `benches/results/phase-14.5/*.md` and `rg`s the
-     README positioning table and this north-star section for any
-     numeric figure mentioning ops/sec, learners, or voters. A
-     mismatch between bench number and quoted figure fails the
-     release-tag workflow. The mechanism is not optional — the entire
-     point of the commitment is that aspirational author-goodwill
-     commitments fail in practice. (See Phase 12.)
+   - **Process commitment**: if any of the Tier 2 bars above slips at
+     bench time, the bar gets restated **in the same release** as the
+     evidence — no quiet downgrade. Phase 12 includes a design task
+     for a CI gate that enforces this mechanically; until that task
+     ships, the commitment is reviewer-enforced (the rust-expert
+     auto-`REVISE`s any release-tag PR whose README + bar #7 +
+     `benches/results/phase-14.5/*.md` headline numbers don't
+     triple-match). Calling this out honestly: a mechanically
+     enforced gate is the goal, but writing "mechanism" without
+     having designed the schema, metric-map, tolerance policy, and
+     prose-coverage rules was itself an instance of the failure mode
+     the commitment is meant to prevent. The design task is what
+     turns the commitment into a mechanism; it is not the mechanism.
 8. **Operability.** Production-grade defaults; predictable behavior at
    the limits.
    - Every metric documented in `docs/metrics.md` with declared label
@@ -982,7 +990,7 @@ Make mango installable.
 - [ ] Versioning: SemVer + `CHANGELOG.md` updated per release
 - [ ] **On-disk format versioning**: a `data-dir/VERSION` file declares the on-disk format. Mango refuses to start against a newer-format dir or a too-old-format dir, with an actionable error; `mangoctl migrate <data-dir>` performs forward migrations. CI runs an upgrade matrix (N → N+1) on a populated cluster before every release.
 - [ ] **Hot-restart / rolling-upgrade SLA**: a 3-node cluster can be rolling-restarted with no client-visible downtime; tested in CI by a workload runner that asserts zero failed Puts during the upgrade. This makes etcd's "informally works" into a tested guarantee.
-- [ ] **Positioning-claim consistency gate** `.github/workflows/positioning-claim-consistency.yml`: runs on every PR that touches `README.md`, `ROADMAP.md`, or `benches/results/**`, and on every release-tag workflow. Parses the headline numbers from `benches/results/phase-14.5/*.md` (Tier 2 ops/sec, learner counts, latencies) and the README positioning table and ROADMAP north-star bar #7 + Phase 14.5 acceptance section. **Fails CI if any quoted figure in README or ROADMAP is not present in (or contradicts) the most recent bench result file for the same metric.** Operationalizes the "no quiet downgrade" process commitment in bar #7 — the mechanism is what makes the commitment real, not the prose. (The PR that introduced this commitment shipped with a 10× internal contradiction between README and ROADMAP on etcd's read ceiling, which was caught in review only because of an explicit cross-document audit. This gate prevents the next one.)
+- [ ] **Positioning-claim consistency gate — design task**. Goal: a CI workflow that fails on any release-tag PR where README's positioning table, ROADMAP's bar #7, and the latest `benches/results/phase-14.5/*.md` headline numbers do not triple-match. **Design output (lands before implementation, in `.planning/phase-12/positioning-claim-gate.md`)**: (a) machine-readable schema for `benches/results/**/*.md` headline numbers (frontmatter or fenced JSON block); (b) metric-ID convention used in both bench-result files and `<!-- metric-id: ... -->` annotations on README/ROADMAP figures so the gate has a deterministic mapping; (c) tolerance policy (e.g. quoted figure must be ≤ measured figure when prefixed `≥`, within ±5% otherwise); (d) prose coverage rules (which paragraphs of README and ROADMAP are in scope; explicitly include README's "Tier 2 targets" prose section, not just the table); (e) etcd-oracle exemption (etcd numbers come from `benches/oracles/etcd/` runs, not mango benches). Implementation is a follow-up PR. Reason for the design-first split: the original framing of this item shipped as workflow-shaped aspiration without specifying any of the above, and was caught as such on second-pass review. Designing the gate before building it forces the schema decisions out of the workflow author's head and into a reviewable artifact.
 - [ ] `mango cluster up --nodes 3` one-command local cluster bring-up in ≤ 10s (per dev-ergonomics axis)
 - [ ] `0.1.0` release tag
 
@@ -1048,14 +1056,15 @@ served from any replica that has caught up**, and most KV workloads
 are read-heavy (typical 80/20, often 95/5 in K8s-class deployments).
 This phase ships the Tier 2 north-star bars: a 5-voter + 5-learner
 cluster delivers ≥ 1M ops/sec on an 80/20 mix in **bounded-staleness**
-read mode (a ~1.5-2× win over etcd's serializable-read ceiling, with
-the win compounding on read-heavier mixes), and ≥ 600K ops/sec on the
-same mix in **linearizable ReadIndex** mode (a ~5-10× win over etcd's
-ReadIndex ceiling, with strong consistency preserved end-to-end). The
-two ratios differ because etcd is far closer to the bandwidth ceiling
-on serializable reads than on linearizable ones, so the win is
-naturally larger in the stronger consistency mode. Lands pre-1.0;
-v1.0 is the Tier 2 release.
+read mode (**up to ~2× over etcd's serializable-read ceiling** of
+~500K-1M ops/sec; the win grows on read-heavier mixes — see the 95/5
+bullet in bar #7), and ≥ 600K ops/sec on the same mix in
+**linearizable ReadIndex** mode (**~5-10× over etcd's ReadIndex
+ceiling** of ~50-150K ops/sec, with strong consistency preserved
+end-to-end). The two ratios differ because etcd is far closer to the
+bandwidth ceiling on serializable reads than on linearizable ones,
+so the win is naturally larger in the stronger consistency mode.
+Lands pre-1.0; v1.0 is the Tier 2 release.
 
 Sequenced after Phase 14 (perf push) so single-node hot-path
 optimizations are in place, and after Phase 9 (membership +

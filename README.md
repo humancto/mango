@@ -31,9 +31,14 @@ throughput than etcd ships today. If your bottleneck is "I need 10M+
 ops/sec on application data," look at FoundationDB, TiKV, or a hosted
 service — that's a different product category and not a mango goal.
 
-See [`ROADMAP.md`](./ROADMAP.md) for the v1.0 contract (Tier 1 +
-Tier 2: ~20× etcd on read-heavy workloads via a 5-voter +
-5-learner cluster).
+See [`ROADMAP.md`](./ROADMAP.md) for the v1.0 contract: Tier 1
+(single-cluster, etcd-shaped) plus Tier 2 (read-scale-out via
+learner replicas + client caching). Tier 2 targets are **up to
+~5-10× etcd on linearizable ReadIndex reads** and **up to ~2× on
+bounded-staleness reads**, both measured on a 5-voter + 5-learner
+cluster on the canonical bench hardware. Per-mode bars and the
+underlying math are in `ROADMAP.md` north-star bar #7 and
+Phase 14.5.
 
 ## Status
 
