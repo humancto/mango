@@ -105,11 +105,15 @@ Dropping a field is effectively never compatible.
 - **Branch protection:** `bench-harness` CI job is advisory until
   `main` is protected and required-checks include it (tracked from
   previous PR review).
-- **Signature v2 trigger:** when `hardware-signature.sh` exceeds
-  150 lines OR the first NUMA / hugepages / cgroup-aware field is
-  requested, port the signature emitter to a Rust binary
-  (`benches/runner/hwsig`) and keep the shell version as a
-  reference implementation during the transition.
+- **Rust-port trigger:** port the signature emitter to a Rust
+  binary (`benches/runner/hwsig`) when **any** of the following
+  hits — a third target OS (Windows/BSD), the first structured
+  field (NUMA / hugepages / cgroup-aware / PMU), or
+  `hardware-signature.sh` passing ~300 non-comment lines. This PR
+  lands at ~264 non-comment lines, inside the "shell is fine"
+  band. See `.planning/adr/0001-bench-oracle-harness.md` decision 1
+  for the full rationale. At port time, the shell version becomes
+  a reference implementation during the transition.
 
 ## macOS coverage
 

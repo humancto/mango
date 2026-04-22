@@ -45,15 +45,28 @@ scaffold.
 The harness is plumbing around shell-native concerns (`curl`,
 `sha256sum`/`shasum`, `sysctl`, `/proc/cpuinfo`, `lsblk`, `diskutil`).
 Rewriting those in Rust is ceremony without payoff at this scale
-(~300 lines total). Reading shell-pipeline output _from_ Rust would
-still require most of the same platform branches, just with more
-surface area.
+(~300 lines total across `hardware-signature.sh` + `hwsig-lib.sh`).
+Reading shell-pipeline output _from_ Rust would still require most
+of the same platform branches, just with more surface area.
 
-**Trigger to port to Rust:** when `hardware-signature.sh` exceeds
-~150 lines OR the first NUMA / hugepages / cgroup-aware field is
-requested. At that point the shell version becomes a reference
-implementation during the transition, and the Rust version lives at
-`benches/runner/hwsig`.
+**Trigger to port to Rust**, whichever comes first:
+
+- A third target OS (Windows/BSD) is added — platform branching
+  stops being cheap once you outgrow the Linux/Darwin duet.
+- The first NUMA / hugepages / cgroup-aware / PMU field is
+  requested — these need structured parsing, not line grep.
+- `hardware-signature.sh` exceeds ~300 non-comment lines, or the
+  test scripts outgrow ~500 lines of shell assertions.
+
+This PR lands at ~264 non-comment lines in `hardware-signature.sh`
+(+72 in `hwsig-lib.sh`), well inside the "shell is fine" band. The
+earlier ~150-line draft trigger was replaced with the criteria
+above after PR review flagged the inconsistency between "~300
+lines total" and "exceeds 150" in the same decision.
+
+At port time, the shell version becomes a reference
+implementation during the transition, and the Rust version lives
+at `benches/runner/hwsig`.
 
 ### 2. TOFU (trust-on-first-use) for the etcd pin, defended by two hashes
 
@@ -63,9 +76,15 @@ adversary compromised the release simultaneously with or before our
 pin, we trust the attacker.
 
 **Decision:** pin the tarball sha AND the SHA256SUMS file's own sha.
-An attacker would need to substitute content that hashes correctly
-against _both_ pinned values, which is cryptographically infeasible.
-This narrows — but does not eliminate — the TOFU window.
+Note the two hashes do **not** compose into a stronger cryptographic
+property — one SHA-256 preimage is already infeasible to forge. The
+second hash is defense-in-depth against a _different_ failure mode:
+a CDN cache or mirror that serves an inconsistent pair (correct
+tarball + stale SHA256SUMS, or vice versa). That detects mirror
+drift and release-artifact tampering where only one file was
+replaced. Against a full release compromise that swaps both files
+in lockstep, pre-TOFU, we are still trusting the attacker — the
+second hash narrows but does not close the TOFU window.
 
 **Not done:** cosign / sigstore signatures, PGP verification, CI-bot
 counter-signing. Phase 12+ release-attestation work will subsume this
@@ -183,8 +202,8 @@ Phase 0.5+ territory.
   not in submodule history.
 - **Cargo bench crate from day one** — dead code. Phase 2+ adds it
   when there's something to bench.
-- **Rust binary for the signature** — premature; <150 lines of shell
-  is more auditable than its Rust equivalent. Porting trigger named
-  above.
+- **Rust binary for the signature** — premature; ~300 lines of shell
+  across `hardware-signature.sh` + `hwsig-lib.sh` is more auditable
+  than its Rust equivalent. Porting trigger named in decision 1.
 - **No tiers, one big "recommended hardware" doc** — guarantees the
   first multi-node PR litigates the spec under deadline pressure.

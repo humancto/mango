@@ -61,10 +61,19 @@ To narrow the window, we pin **two independent hashes** in `VERSIONS`:
 - `ETCD_SHA256_<os>_<arch>`: the per-platform tarball/zip sha.
 - `ETCD_SHA256SUMS_SHA256`: the sha of the `SHA256SUMS` file itself.
 
-An attacker substituting the tarball would fail the first hash.
-Substituting both tarball and `SHA256SUMS` would fail the second.
-Finding a tarball plus a `SHA256SUMS` that collide on both pinned
-hashes simultaneously is cryptographically infeasible.
+The two hashes do **not** compose into a stronger cryptographic
+property — forging either one already requires a SHA-256 preimage,
+which is infeasible. The second hash is defense-in-depth against a
+_different_ class of failure: a CDN cache or mirror serving an
+inconsistent pair (correct tarball + stale `SHA256SUMS`, or vice
+versa), or a partial release-artifact swap where only one file is
+tampered. The cross-check catches those.
+
+Against a full release compromise that substitutes both the tarball
+and `SHA256SUMS` in lockstep before our pin was taken, both hashes
+were taken from the attacker's artifacts — we are still trusting
+the attacker. That window is what TOFU means and what sigstore /
+PGP would close.
 
 Real attestation (TPM quote, sigstore/cosign signatures of the
 release, CI-bot counter-signing) is out of scope for this scaffold.

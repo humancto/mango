@@ -24,7 +24,7 @@ This plan is the post-review revision. Showstoppers S1/S2/S3 and bugs B1–B4 ar
 - **R1**: drop `nvme` field (misleading — SATA SSDs also have `rotational=0`). Replace with `storage=<device-model>` from `lsblk -d -o MODEL` / `diskutil info`. Leave TODO for `fsync_us_p50` (Phase 2+).
 - **R2**: Tier 1 now requires documented turbo/frequency pinning, isolcpus, TSC invariance (`constant_tsc + nonstop_tsc`), queue scheduler, memory channel count. Tier 2 adds a clock-sync requirement (PTP preferred, chrony fallback). All captured in signature fields: `tsc=`, `turbo=`, `mem_channels=`, `scheduler=`, `cpu_mhz_max=`, `virt=`, `storage=`.
 - **R4**: `BENCH_TIER` unset is a hard error when argv contains the token `bench`, soft warning otherwise.
-- **R5**: concrete Rust-port trigger named: "when `hardware-signature.sh` exceeds 150 lines OR the first NUMA/hugepages field is requested."
+- **R5**: concrete Rust-port trigger named: any of (third target OS, first structured field like NUMA/hugepages/cgroup/PMU, `hardware-signature.sh` passing ~300 non-comment lines). Earlier "~150 lines" draft trigger was raised to 300 after the PR review flagged self-contradiction against the ADR's "~300 lines total" line count. See ADR decision 1.
 - **M2/M3**: new Tests 4 and 5 — VERSIONS ↔ HARDWARE.md platform coverage, and canonicalization round-trip.
 - **M5**: ADR committed at `.planning/adr/0001-bench-oracle-harness.md`.
 
