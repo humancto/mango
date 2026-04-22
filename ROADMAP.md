@@ -313,8 +313,11 @@ named test are auto-`REVISE`.
    - **Tier 2b (linearizable ReadIndex reads): ≥ 600K ops/sec** on the
      same 80/20 mix and topology. The honest ceiling — every read
      pays a leader-confirm round trip, even with ReadIndex batching.
-     Still ~10× etcd's per-cluster ceiling with strong consistency
-     preserved.
+     Roughly **5-10× etcd's published per-cluster ReadIndex ceiling
+     of ~50-150K reads/sec**, with strong consistency preserved. The
+     "5-10×" range reflects the spread in published etcd numbers
+     across hardware generations; mango's bar is fixed at ≥ 600K, the
+     comparison ratio is informational.
      *Test:* `benches/runner/read-scale-out.sh --read-mode=linearizable` (Phase 14.5).
    - **Read-throughput scaling with learner count**: throughput at N
      learners is **≥ 0.7 × N × (single-voter read throughput), up to
@@ -329,12 +332,18 @@ named test are auto-`REVISE`.
      equivalence at the cached revision, reconnect-with-compaction,
      event-ordering across reconnect — see Phase 14.5).
      *Test:* `tests/cache/watch_invalidation.rs` and siblings (Phase 14.5).
-   - **Process commitment**: if any of the Tier 2 bars above slips at
-     bench time (e.g., the linear-scaling bar fails at N > 5 instead
-     of N > 7), the bar gets restated **in the same release** as the
-     evidence — no quiet downgrade. README's positioning table and
-     this section update together so the public claim and the bench
-     are never out of sync.
+   - **Process commitment, mechanically enforced**: if any of the Tier
+     2 bars above slips at bench time, the bar gets restated **in the
+     same release** as the evidence — no quiet downgrade. Enforcement
+     is a CI workflow `.github/workflows/positioning-claim-consistency.yml`
+     (added in Phase 12, Release engineering) that ingests the headline
+     numbers from `benches/results/phase-14.5/*.md` and `rg`s the
+     README positioning table and this north-star section for any
+     numeric figure mentioning ops/sec, learners, or voters. A
+     mismatch between bench number and quoted figure fails the
+     release-tag workflow. The mechanism is not optional — the entire
+     point of the commitment is that aspirational author-goodwill
+     commitments fail in practice. (See Phase 12.)
 8. **Operability.** Production-grade defaults; predictable behavior at
    the limits.
    - Every metric documented in `docs/metrics.md` with declared label
@@ -670,7 +679,7 @@ Phase 6 ships gRPC publicly.
 - [ ] Add `deny.toml` and a `cargo-deny` CI job (license + advisory + duplicate-version checks; ban `git`-deps without explicit allowlist; ban `openssl-sys` per the Security axis — use `rustls`).
 - [ ] Add `cargo-audit` CI job (RustSec advisories) running on push, PR, and a nightly schedule. **Nightly schedule auto-files a GitHub issue on any new advisory**, even if no PR is open, so we don't sit on advisories between PRs.
 - [ ] Add a `cargo-msrv` job pinning the minimum supported Rust version (start at 1.80, bump deliberately) so we don't accidentally raise it.
-- [ ] **Bench oracle harness scaffold**: `benches/oracles/etcd/` checks in a script that downloads etcd v3.5.x at a pinned version + sha256, plus `benches/runner/HARDWARE.md` documenting the canonical hardware spec we run comparisons on, plus `benches/runner/run.sh` that prints a hardware signature alongside every result. Without this, every later "beats etcd by Nx" claim has no oracle.
+- [ ] **Bench oracle harness scaffold**: `benches/oracles/etcd/` checks in a script that downloads etcd v3.5.x at a pinned version + sha256, plus `benches/runner/HARDWARE.md` documenting the canonical hardware spec we run comparisons on, plus `benches/runner/run.sh` that prints a hardware signature alongside every result. Without this, every later "beats etcd by Nx" claim has no oracle. **`HARDWARE.md` MUST declare two hardware tiers**: (a) **Tier 1 / single-node bench rig** — single host, NVMe SSD, ≥ 16 cores, ≥ 64 GB RAM, sufficient for Phases 2-13 single-node and 3-node benches; (b) **Tier 2 / multi-node fleet** — ≥ 10 hosts (5 voters + 5 learners), ≥ 25 GbE intra-cluster bandwidth, root access for `tc` / `iptables` (or a `toxiproxy` install) to drive the Phase 14.5 chaos tests. If the Tier 2 fleet is unavailable, Phase 14.5 acceptance benches cannot ship and the Tier 2 release-gate fails (Phase 12 positioning-claim consistency gate).
 - [ ] **Monotonic-clock policy**: workspace doc note in `docs/time.md` declaring "all protocol-relevant time math uses `Instant` (monotonic), never `SystemTime`. Wallclock is used only for human-facing logs and lease TTL display, never for protocol decisions. Leap seconds: documented as N/A. NTP step tolerance: tested with ±5s clock jumps in Phase 13."
 - [ ] **Crash-only design declaration** in `docs/architecture/crash-only.md`: storage and server layers assume the process can be killed at any instant; clean shutdown is an optimization, never a correctness requirement. WAL-then-apply ordering and `data-dir/VERSION` recovery (Phase 12) make process restart equivalent to crash recovery. Every storage / Raft PR must satisfy "this would also be correct if killed at any point."
 - [ ] Create `crates/mango-proto` skeleton with `tonic-build` and a hello-world `.proto` that compiles
@@ -725,13 +734,15 @@ backend.
 
 - [ ] Define `Revision { main: i64, sub: i64 }` and the on-disk key encoding (`key_index` + `key`-bucket layout, mirror etcd's split conceptually)
 - [ ] Implement `KeyIndex` (in-memory tree of keys → list of generations of revisions) with put / tombstone / compact / restore-from-disk
-- [ ] **Sharded in-memory `KeyIndex`** as `[parking_lot::Mutex<HashMap<Bytes, KeyHistory>>; 64]`, hashed by `ahash(key) & 63`. The single-mutex design will not pass Phase 6's per-core scaling bar (`≥ 14× at 16 cores` on the read-only workload — Concurrency axis #2); a global mutex saturates the read path well before 14×. Hand-rolled (not `dashmap`) because of `dashmap`'s CVE history (RUSTSEC-2022-0002 et al.), `unsafe_code = "forbid"` ethos, easier `loom`-testability, and a tighter `cargo-vet` audit surface.
+- [ ] **Sharded in-memory `KeyIndex`** as `[parking_lot::RwLock<HashMap<Bytes, KeyHistory>>; 64]`, hashed by `ahash::RandomState` seeded once at process start from a CSPRNG and shared across all 64 shards. **Why `RwLock` and not `Mutex`**: the watcher-cache target workload is "watch one key, read it repeatedly" — adversarially hot keys land in one shard, where `Mutex` would serialize all readers. `RwLock` lets concurrent readers on the same shard parallelize at the cost of a small write penalty (~10ns per `write()` under `parking_lot`'s implementation), which is the right trade for a read-heavy KV. **Why `ahash` per-process random seed**: prevents key-collision DoS where an attacker who can predict keys (e.g., paths under `/registry/`, lease IDs through clients) targets one shard and serializes its readers. The single-mutex design also fails Phase 6's per-core scaling bar (`≥ 14× at 16 cores` on the read-only workload — Concurrency axis #2). Hand-rolled (not `dashmap`) because of `dashmap`'s CVE history (RUSTSEC-2022-0002 et al.), `unsafe_code = "forbid"` ethos, easier `loom`-testability, and a tighter `cargo-vet` audit surface.
 - [ ] **`loom` test for the sharded key index** in `crates/mango-mvcc/tests/loom/sharded_index.rs`: model concurrent put + range + compact across two shards; assert no torn reads, no missed compactions, no deadlock under arbitrary interleaving.
+- [ ] **Hostile-key DoS test** in `crates/mango-mvcc/tests/security/keyindex_dos.rs`: with the `ahash` seed fixed to a known value (test-only API), confirm that an attacker who *knows* the seed can construct N keys colliding into one shard and bring per-shard read latency to its single-`RwLock` ceiling. Then re-seed with a fresh CSPRNG-derived value and confirm the same key set distributes across shards within statistical bounds (no shard holds > 2× the mean key count). Validates that production seeding defeats the attack.
+- [ ] **Note on Phase 2 acceptance vs Phase 6 verification**: Phase 2's acceptance for these structures is the `loom` test (correctness) and the snapshot-reclamation bench (resource bounds). The full per-core scaling verification (`≥ 14× at 16 cores`) cannot run until Phase 6's gRPC stack ships and the integrated bench harness exists. Phase 2 ships green on correctness; Phase 6 ships green on the perf number that depends on these structures.
 - [ ] Implement the MVCC `KV` API: `Range`, `Put`, `DeleteRange`, `Txn` (compare + then/else ops), `Compact`
 - [ ] Read transactions return a consistent snapshot at a chosen revision
 - [ ] **Lock-free snapshot publication via `arc_swap::ArcSwap<Snapshot>`**. Readers acquire the latest snapshot with a single `Acquire` load; the MVCC apply loop swaps in a new `Arc<Snapshot>` after each batch; old `Arc`s drop when the last reader releases. Required for the Concurrency axis #2 read-only per-core bar — a snapshot mutex is the same kind of bottleneck the sharded `KeyIndex` removes, in a different position. **API discipline**: `Range` over more than 1000 keys MUST use `arc_swap::ArcSwap::load_full()` (returning a plain `Arc`), not `load()` (returning a `Guard`), so the slot is not pinned for the duration of the scan. Documented in the `mango-mvcc` rustdoc.
 - [ ] **Property test in `crates/mango-mvcc/tests/properties/snapshot_consistency.rs`**: under concurrent reads + writes, every reader sees a snapshot that is either "the snapshot at read-time" or "a snapshot that committed before read-time." No torn snapshots.
-- [ ] **`benches/runner/snapshot-reclamation.sh`**: sustained writes at 100K/sec for 60s while 16 reader threads each hold a snapshot for 1ms / 10ms / 100ms (three sweeps). **Assert**: reclamation latency p99 ≤ 1ms after slowest reader drops, RSS bounded by `(slowest_reader_hold × write_rate × snapshot_size) × 1.5`. Catches the `ArcSwap` Guard-pinning footgun before it surfaces in production. Numbers in `benches/results/phase-2/snapshot-reclamation.md`.
+- [ ] **`benches/runner/snapshot-reclamation.sh`**: sustained writes at 100K/sec for 60s while 16 reader threads each hold a snapshot for 1ms / 10ms / 100ms (three sweeps). **Assert**: reclamation latency p99 ≤ 1ms after slowest reader drops, and RSS bounded by `snapshot_baseline_bytes + (slowest_reader_hold_seconds × write_rate_per_second × bytes_per_write_delta) × 1.5`, where `bytes_per_write_delta` is the per-write retained delta size (typically ~1KB for the bench's 1KB values + per-revision metadata, *not* the full snapshot size). At 100K writes/sec × 0.1s × ~1KB × 1.5 ≈ 15 MB delta retained at the 100ms-hold sweep, on top of a typical multi-GB snapshot baseline. Catches the `ArcSwap` Guard-pinning footgun before it surfaces in production. Numbers in `benches/results/phase-2/snapshot-reclamation.md`.
 - [ ] Compaction: physically removes old revisions; `Range` against a compacted revision returns `ErrCompacted`
 - [ ] **Online compaction with bounded impact** — etcd's compaction can pause readers; mango compacts in the background with bounded CPU (≤ 25% of one core) and read p99 during compaction within **1.5× of steady-state read p99**. Bench gate in `benches/mvcc/` confirms; numbers committed to `benches/results/phase-2/compaction.md`. (Stronger claims like "zero impact" are aspirational and engine-dependent — this is the honest target that still beats etcd, whose major compactions cause much larger spikes.)
 - [ ] Property tests: random ops + random snapshot reads match a model implementation (proptest, 10k+ cases, shrinking on)
@@ -914,11 +925,13 @@ member metadata.
 - [ ] Membership change as a Raft `ConfChange` (single-server change at a time, joint-consensus optional/later)
 - [ ] Learner node state: replicates the log but does not vote and does not count toward quorum
 - [ ] **Extend `ConfChange` to encode a `promotable: bool` flag on learner state.** `true` for a normal learner (can later be promoted to voter), `false` for a read-replica (Phase 14.5 deployment mode — never promotable). The promote-learner API rejects on `promotable == false` **at the state-machine level**, not at a server-side flag, so a misconfigured operator cannot accidentally promote a read-replica. Required dependency for Phase 14.5's `mango-server --role=read-replica`.
+- [ ] **Voter-floor enforced in the `ConfChange` apply path** (not at the CLI). Any `ConfChange` whose effect would drop the cluster's voter count below `quorum_floor` (default 3, configurable via cluster bootstrap) is rejected at the state machine. This catches voter removals, voter→learner demotions, and voter→read-replica demotions equivalently — and equivalently for *every* client of the gRPC `Cluster` service (the CLI, the web UI, third-party ops tools, older `mangoctl` versions). Rationale: the same lesson as `promotable: bool` — the state machine is the only thing every client must traverse, so it is the only correct enforcement boundary. The CLI's confirmation prompt remains for UX, but it is no longer the enforcement.
 - [ ] Promote-learner-to-voter API with safety check (learner must have caught up to within N entries of leader, *and* `promotable == true`)
 - [ ] `Cluster` gRPC service: member list/add/remove/promote/update
 - [ ] `mangoctl member` subcommand group including `member add --learner` and `member promote`
 - [ ] Tests: 3-node cluster + add learner, learner catches up, promote, remove old member, no quorum lost
 - [ ] **Test that promoting a `promotable: false` learner is rejected at the state-machine level** in `tests/reliability/membership_change.rs::promote_read_replica_rejected`: add a learner with `promotable == false`, attempt promote, assert the `ConfChange` is rejected by the apply path (not just the gRPC layer) and cluster state is unchanged.
+- [ ] **Test that voter-floor enforcement is at the state-machine level** in `tests/reliability/membership_change.rs::voter_floor_enforced_at_state_machine`: with a 3-voter cluster (at the floor), submit a `ConfChange` directly via the gRPC `Cluster` service (bypassing the CLI's confirmation prompt) that would demote one voter to a read-replica. Assert the apply path rejects with a typed `VoterFloorViolation` error, cluster state is unchanged, no leader change. Repeat with a direct voter-removal `ConfChange` and assert the same rejection.
 - [ ] **No-leader-flap test** `tests/reliability/membership_change.rs::no_leader_flap_under_membership_change`: healthy 3-node cluster, run a 1-member-add-then-promote cycle under sustained Put load; assert zero leader changes during the cycle. Operationalizes Reliability bar #2.
 
 ## Phase 10 — Snapshot, backup, defrag, maintenance
@@ -969,6 +982,7 @@ Make mango installable.
 - [ ] Versioning: SemVer + `CHANGELOG.md` updated per release
 - [ ] **On-disk format versioning**: a `data-dir/VERSION` file declares the on-disk format. Mango refuses to start against a newer-format dir or a too-old-format dir, with an actionable error; `mangoctl migrate <data-dir>` performs forward migrations. CI runs an upgrade matrix (N → N+1) on a populated cluster before every release.
 - [ ] **Hot-restart / rolling-upgrade SLA**: a 3-node cluster can be rolling-restarted with no client-visible downtime; tested in CI by a workload runner that asserts zero failed Puts during the upgrade. This makes etcd's "informally works" into a tested guarantee.
+- [ ] **Positioning-claim consistency gate** `.github/workflows/positioning-claim-consistency.yml`: runs on every PR that touches `README.md`, `ROADMAP.md`, or `benches/results/**`, and on every release-tag workflow. Parses the headline numbers from `benches/results/phase-14.5/*.md` (Tier 2 ops/sec, learner counts, latencies) and the README positioning table and ROADMAP north-star bar #7 + Phase 14.5 acceptance section. **Fails CI if any quoted figure in README or ROADMAP is not present in (or contradicts) the most recent bench result file for the same metric.** Operationalizes the "no quiet downgrade" process commitment in bar #7 — the mechanism is what makes the commitment real, not the prose. (The PR that introduced this commitment shipped with a 10× internal contradiction between README and ROADMAP on etcd's read ceiling, which was caught in review only because of an explicit cross-document audit. This gate prevents the next one.)
 - [ ] `mango cluster up --nodes 3` one-command local cluster bring-up in ≤ 10s (per dev-ergonomics axis)
 - [ ] `0.1.0` release tag
 
@@ -1033,11 +1047,15 @@ ceiling — that's physics, not implementation). But **reads can be
 served from any replica that has caught up**, and most KV workloads
 are read-heavy (typical 80/20, often 95/5 in K8s-class deployments).
 This phase ships the Tier 2 north-star bars: a 5-voter + 5-learner
-cluster delivers ≥ 1M ops/sec on an 80/20 mix in bounded-staleness
-read mode (~20× etcd's per-cluster ceiling on read-heavy workloads),
-and ≥ 600K ops/sec on the same mix in linearizable ReadIndex mode
-(~10× etcd, with strong consistency preserved). Lands pre-1.0; v1.0
-is the Tier 2 release.
+cluster delivers ≥ 1M ops/sec on an 80/20 mix in **bounded-staleness**
+read mode (a ~1.5-2× win over etcd's serializable-read ceiling, with
+the win compounding on read-heavier mixes), and ≥ 600K ops/sec on the
+same mix in **linearizable ReadIndex** mode (a ~5-10× win over etcd's
+ReadIndex ceiling, with strong consistency preserved end-to-end). The
+two ratios differ because etcd is far closer to the bandwidth ceiling
+on serializable reads than on linearizable ones, so the win is
+naturally larger in the stronger consistency mode. Lands pre-1.0;
+v1.0 is the Tier 2 release.
 
 Sequenced after Phase 14 (perf push) so single-node hot-path
 optimizations are in place, and after Phase 9 (membership +
@@ -1057,7 +1075,7 @@ not on the roadmap.
 
 - [ ] **`mango-server --role=read-replica`** joins the cluster as a non-voter that does not count toward quorum. Same Raft log replication as a learner (Phase 9), but registered with `promotable: false` in the `ConfChange` so the cluster state machine itself rejects accidental promotion (not just a server-side flag). Documented as the Tier 2 read-scale-out primitive. Depends on the `promotable: bool` ConfChange item in Phase 9.
 - [ ] **Linearizable reads on read-replicas via ReadIndex**: replica accepts `Range` requests, sends a ReadIndex request to the leader, waits for its applied-index ≥ leader's commit-index at the time of the request, then serves locally. Adds one round-trip to read latency vs leader-served reads. Per-RPC the client can request "linearizable" (default) or "bounded-staleness" (Phase 14 follower-reads).
-- [ ] **`mangoctl member add --read-replica`** and matching `mangoctl member demote-to-read-replica` / `promote-to-voter`. **Demoting a voter to read-replica reduces standing fault tolerance** (5 voters tolerate 2 failures; 4 voters tolerate 1). The CLI surfaces this in the confirmation prompt (showing before/after voter count and tolerance) and **refuses with an error if the resulting voter count would drop below 3**. Promoting back to voter is the same code path as learner promotion (and requires `promotable: true`, which a demoted-voter inherits — read-replicas added via `member add --read-replica` get `promotable: false` and need a separate config-change to make them eligible).
+- [ ] **`mangoctl member add --read-replica`** and matching `mangoctl member demote-to-read-replica` / `promote-to-voter`. **Demoting a voter to read-replica reduces standing fault tolerance** (5 voters tolerate 2 failures; 4 voters tolerate 1). The CLI surfaces this in the confirmation prompt (showing before/after voter count, before/after fault tolerance, and the cluster's `quorum_floor`) for UX. **Enforcement of the voter floor lives in the Phase 9 `ConfChange` apply path**, not in the CLI — so a direct gRPC client, a third-party ops tool, the web UI, or an older `mangoctl` cannot bypass it. Promoting back to voter is the same code path as learner promotion (and requires `promotable: true`, which a demoted-voter inherits — read-replicas added via `member add --read-replica` get `promotable: false` and need a separate config-change to make them eligible).
 
 ### Recent-revision cache (server-side)
 
@@ -1073,7 +1091,7 @@ not on the roadmap.
 - [ ] **Property test 1 — `tests/cache/watch_invalidation.rs::cache_server_equivalence_at_rc`**: under random `Put`/`Delete`/`Watch`/`Get` sequences, **for every key K and every cache-served read at the cache's effective revision `R_c`, the cache's response equals the server's response for K at `R_c`. The cache's effective revision lags server-now by at most N events.** This is the corrected property — the previous "no stale-positive" wording contradicted the cache's own contract.
 - [ ] **Property test 2 — `tests/cache/watch_invalidation.rs::reconnect_with_compaction_invalidates`**: watcher disconnects; server compacts past `cache.last_revision`; watcher reconnects and receives `ErrCompacted`. The cache MUST invalidate all entries (transition to empty, not stale-pinned) and re-bootstrap from a fresh server snapshot. Without this the cache serves a revision the server can no longer prove correct.
 - [ ] **Property test 3 — `tests/cache/watch_invalidation.rs::ordering_preserved_across_reconnect`**: simulate watch disconnect with in-flight `Get`s and a concurrent reconnect-then-event burst. Assert that no `Get` returns a value strictly older than a previously returned value for the same key from the same `WatchedCache` instance (per-key monotonic-read consistency at the client).
-- [ ] **Property test 4 — `tests/cache/watch_invalidation.rs::lease_expiry_invalidates`**: a leased key disappears via lease expiry (separate event class from `DeleteRange`). The cache MUST subscribe to lease events for any leased key it has cached, or treat leased keys as cache-bypass. Otherwise leased keys are stale-positive forever after expiry.
+- [ ] **Property test 4 — `tests/cache/watch_invalidation.rs::leased_keys_are_cache_bypass`**: a leased key disappears via lease expiry (a separate event class from `DeleteRange` that is not always carried on a Watch stream for the affected key). To avoid stale-positive results after lease expiry, **`WatchedCache` does not cache leased keys at all** — every `Get` for a key currently associated with a lease goes to wire. Implementation: on cache insert, check the response's `lease` field; skip the cache path if non-zero. The test asserts (a) a leased key never appears in the cache's internal map, (b) repeated `Get`s on a leased key always hit the wire, (c) when a lease expires server-side the cache observes the consequent `Get` returning "not found" without any internal invalidation step. (Subscribing to lease events is the alternative implementation; cache-bypass is simpler, has no edge cases around watch-reconnect, and is correct by construction. Picking one path here so the test asserts a single behavior, not a behavioral OR.)
 - [ ] **Chaos test — `tests/chaos/watched_cache_partition.rs`**: partition the watcher's connection for 30s under sustained writes, then heal. Assert: cache's view at heal-time is either fully refreshed or in miss-through mode for the affected keys; no key returns a value older than the partition window.
 - [ ] **Memory-bound test — `tests/cache/memory_bound.rs`**: fill cache to 2× `max_entries` over a 1-hour synthetic run; assert RSS bounded by `max_bytes × 1.5` (1.5× allowance for allocator slop), zero panics, and eviction hit rate stays within 5% of the LRU theoretical optimum.
 - [ ] Bench: 90% read / 10% write workload with `WatchedCache` for the read path; cache hit rate ≥ 90% on the hot key set; effective read throughput at the client is **≥ 10× direct-Range throughput** because most reads never hit the wire.
@@ -1085,13 +1103,13 @@ slips at bench time, the bar is restated *in the same release* as the
 evidence — README's positioning table and ROADMAP bar #7 update
 together. No quiet downgrade.
 
-- [ ] **Hardware prerequisite**: `benches/runner/HARDWARE.md` for the Tier 2 acceptance benches requires **≥ 25 GbE** (or equivalent intra-cluster bandwidth). At 200K writes/sec × 1KB × 9 receivers (4 followers + 5 learners) the leader's WAL egress is ~1.8 GB/s, which saturates 10 GbE after framing. If the bench hardware can only do 10 GbE, the bench restates the write-throughput ceiling accordingly. (Raft log compression and pipelined replication reduce per-byte cost but do not eliminate the bandwidth floor.)
+- [ ] **Hardware prerequisite (mandatory)**: `benches/runner/HARDWARE.md` for the Tier 2 acceptance benches **MUST** provide **≥ 25 GbE** intra-cluster bandwidth. At 200K writes/sec × 1KB × 9 receivers (4 followers + 5 learners) the leader's WAL egress is ~1.8 GB/s, which saturates 10 GbE after framing — Raft log compression and pipelined replication reduce per-byte cost but do not eliminate the bandwidth floor. **10 GbE bench runs are diagnostic only and do not constitute a Tier 2 release-gate measurement.** The release-tag workflow (Phase 12 positioning-claim consistency gate) verifies the bench results' hardware sig against `HARDWARE.md` and fails if a 10 GbE run is referenced as a Tier 2 acceptance number.
 - [ ] **`benches/runner/read-scale-out.sh --read-mode=bounded-staleness`**: 5-voter + 5-learner cluster on the canonical hardware, 80/20 read/write workload at 1KB values, bounded-staleness reads on the learner tier; **delivers ≥ 1M ops/sec sustained**, p99 latency ≤ 50 ms. Numbers in `benches/results/phase-14.5/read-scale-out-bounded-staleness.md`. Operationalizes Large-scale-distributed Tier 2a bar #1.
 - [ ] **`benches/runner/read-scale-out.sh --read-mode=bounded-staleness --mix=95/5`**: same topology, 95/5 read/write mix (the K8s operator workload); **delivers ≥ 1.5M ops/sec sustained**, p99 latency ≤ 30 ms. Numbers in `benches/results/phase-14.5/read-scale-out-95-5.md`. Operationalizes Tier 2a bar #2.
 - [ ] **`benches/runner/read-scale-out.sh --read-mode=linearizable`**: same topology, 80/20 mix, linearizable ReadIndex on the learner tier (every read pays a leader-confirm round-trip); **delivers ≥ 600K ops/sec sustained**, p99 latency ≤ 100 ms. Numbers in `benches/results/phase-14.5/read-scale-out-linearizable.md`. Operationalizes Tier 2b bar.
 - [ ] **`benches/runner/learner-scale.sh`**: same hardware, sweep learner count 1..10, bounded-staleness mode, measure read throughput at each step. **Throughput at N learners ≥ 0.7 × N × (single-voter read throughput), up to N = 7 learners.** Past N=7 the leader becomes the membership-and-replication bottleneck; the bench documents the actual flatline point. Numbers in `benches/results/phase-14.5/learner-scale.md`. Operationalizes the linear-scaling Tier 2 bar.
 - [ ] **`tests/chaos/leader_kill_during_read_scaleout.rs`**: kill the leader at t=30s during a steady read-scale-out bench; assert read throughput recovers to ≥ 80% of steady-state within 5s, no read returns an error other than `Unavailable` (retryable), no read returns stale data past `MaxStaleness` bound.
-- [ ] **`tests/chaos/learner_partition.rs`**: partition one learner at t=30s; assert (i) the partitioned learner refuses linearizable reads with a typed `Unavailable` error rather than serving stale, (ii) on rejoin it catches up without flooding the leader (per the Phase 5 catch-up traffic bound), (iii) total cluster throughput degrades by ≤ 1/N during the partition.
+- [ ] **`tests/chaos/learner_partition.rs`**: partition one learner at t=30s for a 60s window; assert (i) the partitioned learner refuses linearizable reads with a typed `Unavailable` error rather than serving stale, (ii) on rejoin it catches up without flooding the leader (per the Phase 5 catch-up traffic bound), (iii) **total cluster throughput, measured as the rolling 10s average between t=partition+10s and t=partition+50s (excluding the first 10s of client-rebalance transient and the last 10s before heal), degrades by ≤ 1/N from steady-state**, where N is the active learner count. The 10s exclusion at start is required because in-flight requests to the partitioned learner time out, retries fan out, and p99 spikes — none of which is a steady-state signal.
 
 ## Phase 15 — Hardening
 
