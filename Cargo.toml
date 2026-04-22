@@ -41,6 +41,7 @@ print_stdout = { level = "deny", priority = 1 }
 print_stderr = { level = "deny", priority = 1 }
 await_holding_lock = { level = "deny", priority = 1 }
 await_holding_refcell_ref = { level = "deny", priority = 1 }
+disallowed_types = { level = "deny", priority = 1 }
 
 [profile.release]
 lto = "thin"
