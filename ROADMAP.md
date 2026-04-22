@@ -432,6 +432,63 @@ bar is "this beats etcd."**
   If a follow-up is needed, it goes on the roadmap as a new item, not as
   a comment in the code.
 
+## Crate inventory & non-rolled stack
+
+**Default: use the proven crate. Hand-rolling requires an ADR.**
+
+Every load-bearing subsystem in mango has a Rust ecosystem crate that is
+already battle-tested at scale by another distributed system. Adopting
+those crates removes years of bug-finding from the critical path; the
+single largest execution risk for mango is hand-rolling something the
+ecosystem has already solved. The table below is the **default stack**.
+A PR that proposes hand-rolling, replacing, or adding an alternative to
+any row requires an ADR in `.planning/adr/` justifying the deviation
+against the same five questions the rust-expert applies (correctness,
+maintenance burden, audit surface, performance evidence, supply chain).
+The auto-`REVISE` triggers list (above) treats "rolled own X" without
+an ADR as a blocker.
+
+The reference systems column is the production user whose existence is
+the evidence the crate is good enough. If the reference user
+discontinues the crate, the row gets re-evaluated.
+
+| Subsystem | Crate (default) | Reference system | Notes |
+|---|---|---|---|
+| Async runtime | `tokio` | ~everyone in async Rust | The default; `glommio` / `monoio` only with an ADR justifying thread-per-core. |
+| gRPC server + client | `tonic` + `prost` | Linkerd2-proxy, Databricks, Cloudflare | The de-facto stack. No alternative considered. |
+| HTTP (UI server) | `axum` + `tower-http` | Cloudflare, Fly.io | Standard tokio-stack HTTP. |
+| Raft consensus | `tikv/raft-rs` | TiKV (10× etcd write throughput in prod) | See Phase 5 ADR — `openraft` is the documented alternative; hand-roll requires an ADR demonstrating both crates fail one of the three Phase 5 criteria. |
+| Storage engine | `redb` | iroh, several Rust DBs | Pure-Rust COW B-tree, design-inspired by bbolt; ~10kloc auditable surface; passes the `unsafe_code = "forbid"` ethos. `rust-rocksdb` is the documented alternative for write-heavy workloads where the C++ blast surface is acceptable; hand-roll requires an ADR. See Phase 1 ADR. |
+| TLS | `rustls` + `rustls-platform-verifier` | Cloudflare, AWS, Linkerd | `openssl-sys` is banned via `cargo-deny` (security-axis bar). Pure Rust, formally-verified primitives via `aws-lc-rs` / `*ring*`. |
+| Tracing | `tracing` + `tracing-subscriber` + `tracing-opentelemetry` | Linkerd, Databricks | Standard observability stack. |
+| Metrics | `metrics` + `metrics-exporter-prometheus` | Grafana, others | Facade-based so backend swaps are cheap; OTel bridge already in roadmap. |
+| Concurrency primitives | `parking_lot` (sync), `tokio::sync` (async), `arc-swap`, `crossbeam` | Bevy, polars, TiKV | `std::sync::Mutex` / `RwLock` banned by `clippy::disallowed_types` (Phase 0). |
+| Hashing (DoS-resistant) | `ahash` (per-process random seed) | Bevy, polars | Already specified in Phase 2 sharded `KeyIndex`. |
+| Property testing | `proptest` | Tokio, sled, redb | The default; `quickcheck` only for legacy interop. |
+| Fuzzing | `cargo-fuzz` (libFuzzer) + `bolero` | RustSec advisories, ring | `bolero` for property/fuzz unification on the parser surfaces. |
+| Concurrency model checking | `loom` | Tokio internals | Already in Phase 0.5; per-primitive scope discipline applies. |
+| **Deterministic simulation** | **`madsim`** | **RisingWave (caught hundreds of distributed bugs pre-ship)** | **Drop-in `tokio` replacement with deterministic time / network / RNG. Adopting it makes the Phase 5 + Phase 13 deterministic-simulator items "integrate a runtime," not "build a simulator." See Phase 0.5 + Phase 5.** |
+| Network fault injection (live) | `toxiproxy` (binary) or `turmoil` (in-process) | Shopify, Tokio team | Live fault injection for Phase 14.5 chaos tests; `turmoil` for in-process scenarios. |
+| Randomized concurrency search | `shuttle` | AWS | Complement to `loom`; randomized scheduler instead of exhaustive. Optional, weekly nightly. |
+| UB detection | `Miri` | Rust project | Already in Phase 0.5; tree-borrows + strict-provenance enabled. |
+| Bounded model checking | `kani` | AWS S2N, Firecracker | Optional release-gate verification for safety-critical modules. |
+| Secret handling | `secrecy` (zeroizing wrappers) + `subtle` (constant-time) | rustls, ring | Already specified in security-axis bars. |
+| Bytes / serialization | `bytes`, `serde`, `prost` (proto), `bincode` (internal) | Everyone | Standard. `serde` for human-facing config; `prost` on the wire; `bincode` for internal-only on-disk records that benefit from speed (with explicit version byte). |
+| CLI | `clap` (derive) | Most modern Rust CLIs | Standard. |
+
+**Reference systems we will actively mine (not just depend on):**
+
+- **TiKV** — Raft usage patterns, snapshot handling, region split logic, CHANGELOG read end-to-end before each subsystem PR. Pinned as a behavioral oracle for Phase 5 (see the Phase 5 differential test).
+- **RisingWave** — `madsim` test patterns; their published "bugs `madsim` caught" writeups feed our test design.
+- **Databend** — `openraft` usage as the alternative-implementation control case.
+- **etcd itself** — its integration test suite is a free correctness corpus; ported to mango in Phase 13.5.
+- **Aphyr's Jepsen etcd test** — runs unmodified against mango binaries from Phase 13.
+
+**The "use, don't write" default in two specific places that matter most:**
+
+1. **Raft is the highest-stakes hand-roll.** TiKV's git log demonstrates a decade of bug-fixing in raft-rs, half of which a fresh implementation would re-discover. The Phase 5 ADR's burden of proof is on hand-rolling, not on adopting raft-rs.
+2. **The deterministic simulator is the highest-leverage adoption.** `madsim` is a Cargo dependency, not a multi-month engineering project. Adopting it in Phase 0.5 (rather than building one in Phase 13) collapses the simulator-related items in Phases 5 and 13 from "build the harness" to "write the tests." This is the single largest schedule risk reduction available pre-implementation.
+
 ## Out of scope (for now)
 
 - Wire compatibility with real etcd's `etcdserverpb` (clients written for
@@ -646,6 +703,7 @@ checklist tractable.
 - A claim against any north-star bar without naming the test that
   verifies it.
 - A new dependency on `openssl-sys` (use `rustls`).
+- A hand-rolled implementation of any subsystem listed in the workspace **Crate inventory** (see "Crate inventory & non-rolled stack") without an accompanying ADR in `.planning/adr/` justifying the deviation. Adding an *alternative* to a row (e.g., a second async runtime, a second TLS stack) is the same trigger.
 - A non-constant-time comparison (`==` on `&[u8]`) in code touching
   credentials, tokens, or hash chains (use the `subtle` crate).
 - A new `pub` symbol without a doctest.
@@ -703,6 +761,7 @@ allowed to slip past Phase 5 — the rust-expert is instructed to refuse any
 Phase 6 PR that lands before Phase 0.5 is complete.
 
 - [ ] **`loom` as a workspace dev-dependency**: every crate that introduces a shared-state primitive (channel, lock, atomic) ships at least one `loom`-based model-checking test under `tests/loom/`. CI runs `cargo test --features loom-test --release` (cfg-gated so it only builds under the feature) on push and PR. **Scope discipline**: `loom` tests model *individual primitives* (a single channel, a single lock, a single atomic), not entire subsystems — exhaustive exploration scales exponentially in primitive count. Subsystem-level interleavings live in the Phase 13 deterministic simulator.
+- [ ] **`madsim` as a workspace dev-dependency** (the deterministic-simulator runtime). Crates that need to be sim-testable conditionally compile against `madsim::tokio` instead of `tokio` under a `sim` cfg flag (`#[cfg(madsim)] use madsim::tokio; #[cfg(not(madsim))] use tokio;`). Workspace `Cargo.toml` declares `madsim = "0.2"` as a dev-dependency and the `[patch.crates-io]` table re-routes `tokio`, `tonic`, `tokio-rustls`, `rand`, and `std::time` to madsim's deterministic shims under the `sim` cfg, per `madsim`'s [integration guide](https://docs.rs/madsim). **Why now and not Phase 5 / 13**: every later phase that ships an async primitive needs to be sim-testable, and retrofitting `cfg(madsim)` across an existing crate is more expensive than adding it from line 1. Adopting `madsim` in Phase 0.5 turns the Phase 5 "deterministic simulation testing harness" item from "build it" into "write tests against it," which is the single largest schedule-risk reduction in the roadmap. **Scope**: `mango-raft`, `mango-mvcc`, `mango-server`, `mango-client` MUST be `madsim`-compatible by the time their respective phases ship. The crate inventory table above enumerates `madsim` as the default deterministic-simulator runtime; alternatives (`turmoil`, `shuttle`) are complementary tools, not replacements.
 - [ ] **Test watchdog via `cargo-nextest`**: `.config/nextest.toml` declares per-test-class timeouts (`unit = 30s`, `integration = 5min`, `loom = 30min`, `chaos = 24h`). CI runs `cargo nextest run --profile ci`; tests exceeding their class timeout are killed and reported as failed. Per-test 10×-baseline regressions are surfaced via `nextest`'s flake-detector and `tests/watchdog-baselines.json` (updated in the same PR that legitimately makes a test slower). **Why nextest, not a custom harness or proc macro**: a custom harness would lose `cargo test --filter` and IDE integration; a proc macro relies on every test author remembering to use it. `nextest` does the wrapping natively and is the standard tool.
 - [ ] **Miri CI workflow** at `.github/workflows/miri.yml`: nightly Miri run across the curated subset of tests touching `unsafe` / pointer arithmetic; fails on any UB. **`MIRIFLAGS` includes both `-Zmiri-strict-provenance` AND `-Zmiri-tree-borrows`** (the latter is the stricter aliasing model becoming default in nightly Miri). Per PR: Miri runs only on changed crates that contain `unsafe` blocks. Per release: Miri runs on the full curated subset.
 - [ ] **Workspace `unsafe`-count tracker via `cargo-geiger`**: CI runs `cargo geiger --output-format=Json --workspace --all-targets` and asserts the `unsafe_used.functions.unsafe_` + `unsafe_used.exprs.unsafe_` + `unsafe_used.item_impls.unsafe_` counts (across mango crates) do not grow without an approving `unsafe-growth-approved` PR label. Baseline in `unsafe-baseline.json`, updated in the same PR that legitimately adds an `unsafe` block. Bonus: `cargo-geiger` also flags transitive `unsafe` density per dep, used as a supply-chain signal in the `cargo-vet` review.
@@ -789,7 +848,7 @@ The hardest phase. Decide between `tikv/raft-rs`, `openraft`, or hand-roll;
 the `rust-expert` decides at plan time. Wrap whatever we pick behind a
 `Consensus` trait so the upper layers don't care.
 
-- [ ] ADR in `.planning/adr/` choosing the Raft implementation (rust-expert decides at plan-review time). **Decision criterion: faster leader-failover recovery than etcd, lower steady-state CPU, and a clean path to deterministic-simulation testing. If no off-the-shelf crate hits all three, we hand-roll.**
+- [ ] ADR in `.planning/adr/0005-raft-implementation.md` confirming the Raft implementation. **Default per the workspace crate inventory: `tikv/raft-rs`** (TiKV is the existence proof — 10× etcd write throughput in production with this exact crate; a decade of bug-fixing already paid for). **Burden of proof is on deviation, not adoption.** The ADR's job is to verify, against the three criteria below, that raft-rs still meets them today; if it does, the ADR is one page and the answer is "raft-rs." Adopting `openraft` requires the ADR to document a specific raft-rs failure on at least one criterion that openraft passes. Hand-rolling requires the ADR to document failures of *both* off-the-shelf crates against *all three* criteria, plus a written acknowledgement of the multi-year maintenance commitment. **Decision criteria (unchanged)**: (1) faster leader-failover recovery than etcd, (2) lower steady-state CPU, (3) a clean path to deterministic-simulation testing under `madsim` (Phase 0.5).
 - [ ] `crates/mango-raft` skeleton with the chosen crate (or hand-rolled module structure)
 - [ ] Single-node Raft: proposals get applied to a state-machine trait; the state-machine is wired to the MVCC store
 - [ ] WAL: append every entry before applying; replay on startup; **bounded WAL space** with retention by size + time, oldest segment recycled or deleted post-snapshot. Documented behavior when WAL disk fills (refuse new proposals, raise `WAL_FULL` alarm).
@@ -797,13 +856,14 @@ the `rust-expert` decides at plan time. Wrap whatever we pick behind a
 - [ ] 3-node cluster over TCP transport: leader election, log replication, follower catch-up
 - [ ] Linearizable reads via ReadIndex (no stale reads from followers without quorum-check)
 - [ ] **Pipelined log replication + batch commit** — one of mango's core perf wins over etcd; bench gate vs single-flight replication baseline
-- [ ] **Deterministic simulation testing harness from day one** — fake clock + fake network + seeded RNG; every Raft test in this phase runs in the simulator, not against real wallclock + real sockets. (The Phase 13 robustness work extends this; it does not start it.)
+- [ ] **Deterministic simulation testing on `madsim` from day one** — `mango-raft` builds and tests under both real `tokio` (CI default) and `madsim` (CI `sim` profile). Every Raft test in this phase has a sibling under `tests/sim/` that runs the same scenario through `madsim`'s deterministic clock + network + RNG. The integration cost is paid once (Phase 0.5's `madsim` workspace adoption did the cfg-flag plumbing) so this item is "write the tests," not "build the harness." Seeds for any failing scenario are checked into `tests/sim/regressions/` so every fix lands with its reproducer. (Phase 13 extends this to the full server; it does not start it.)
 - [ ] Network-partition tests in the simulator: 2/1 split, 1/1/1 split, leader isolation, asymmetric partitions, message reordering; assert no split-brain, no lost committed entries
 - [ ] Crash-recovery tests in the simulator: kill follower mid-replication, kill leader mid-commit, restart, cluster converges
 - [ ] **`cargo fuzz` target for WAL record decode** (per the Reviewer's contract: parser fuzz lives where the parser does). CI plumbing in Phase 15.
 - [ ] Bench in `benches/raft/`: 3-node cluster on local loopback, 1KB Put values, runner script `benches/runner/raft.sh` invoking `etcd-benchmark put --conns=100 --clients=1000 --total=100000 --val-size=1024` against the pinned etcd in `benches/oracles/etcd/` and the equivalent against mango on the hardware sig in `benches/runner/HARDWARE.md`. **Mango beats etcd by ≥ 1.5× on throughput and ≤ 0.7× on p99 commit latency.** Numbers committed to `benches/results/phase-5/raft.md`.
 - [ ] **Failover bench** `benches/runner/failover.sh`: 3-node cluster under sustained 1KB Put load; `SIGKILL` the leader; measure wall-clock time until the cluster accepts a quorum-write again. **Mango's failover time ≤ 0.7× etcd's** under identical conditions. Numbers committed to `benches/results/phase-5/failover.md`. Operationalizes the Performance "leader-failover-to-quorum-write" bar.
 - [ ] **Cluster-size scaling bench** `benches/runner/cluster-size.sh`: same workload as `raft.sh` but across {3, 5, 7} voters; document throughput delta vs cluster size and compare to etcd. Operationalizes the Large-scale-distributed bar #1. Numbers in `benches/results/phase-5/cluster-size.md`.
+- [ ] **TiKV behavioral oracle for Raft semantics** `tests/raft/tikv_oracle.rs` (gated behind a `tikv-oracle` feature so the TiKV dependency is not pulled in by default). Run a workload of `propose` / `step` / `tick` operations through both `mango-raft` and a TiKV `RawNode` instance with identical Raft configuration; assert observable outputs (committed index, leader transitions, message-out sequence) match within the documented set of intentional differences. Catches semantic drift the behavioral test suite alone misses, because it tests against the reference user of the same crate, not against a written specification. Justification — TiKV's prod scale is the only existence proof we have that raft-rs is being driven correctly; running mango against it ensures we haven't subtly mis-driven the API. Documented intentional differences live in `docs/raft-vs-tikv.md`. Runs nightly in CI alongside Jepsen, not per-PR (the dependency surface is large).
 - [ ] **`loom` tests for the Raft shared-state primitives** — split into three narrowly-scoped tests because exhaustive `loom` exploration of the full apply-path triple would explode the state space (and end up `#[ignore]`-d). Each test models a single primitive and asserts a single invariant:
   - `crates/mango-raft/tests/loom/apply_channel.rs` — model the `mpsc::channel` between commit-detector and apply-loop; assert no message lost, no message applied twice.
   - `crates/mango-raft/tests/loom/snapshot_apply.rs` — model the snapshot-read-while-apply-writes ordering; assert snapshot consistency under concurrent apply.
@@ -1010,7 +1070,7 @@ etcd has a famous robustness test suite (Jepsen-style: random failures +
 linearizability checking). Mango must match it and exceed it. The Phase 5
 DST harness already exists; this phase scales it up.
 
-- [ ] Extend the Phase 5 deterministic simulator to model the full server (KV + Watch + Lease + Raft + storage), not just Raft alone
+- [ ] Extend the Phase 5 `madsim`-based simulator to model the full server (KV + Watch + Lease + Raft + storage) under deterministic time / network / RNG, not just Raft alone. `mango-server` and `mango-client` build under `cfg(madsim)` per the Phase 0.5 workspace adoption; the full-server simulator wires them together and exposes a `Cluster::new(seed)` API for property-test authors. Every fault-injector knob below operates against the simulated network / disk / clock, so test runs are bit-for-bit reproducible from a seed.
 - [ ] Fault injector: drop / delay / duplicate / reorder messages, kill processes mid-fsync, partition the network with one-way / asymmetric / flaky links, corrupt individual disk pages, return `EIO` from any syscall, clock skew between nodes
 - [ ] Linearizability checker (Porcupine-style or wrap an existing crate) over recorded histories; runs on every simulator trace
 - [ ] Long-running fuzz harness: random workload + random faults; CI nightly job runs it for ≥30 minutes per seed across ≥10 seeds in parallel; failures auto-file a GitHub issue with the seed
@@ -1027,6 +1087,8 @@ same test gauntlet mango itself does.
 
 - [ ] `crates/mango-conformance` — a standalone crate that runs a defined set of KV / Watch / Lease / Raft semantic assertions against any binary that speaks the mango `.proto`. Reference implementation = mango itself; pluggable consensus and embedded mode (stretch) MUST pass it before claiming compatibility.
 - [ ] Test categories: KV linearizability, Watch event ordering and at-least-once delivery, Lease expiry timing within tolerance, Txn compare-and-swap semantics, Range pagination edge cases, error-shape stability.
+- [ ] **Ported etcd integration tests** under `crates/mango-conformance/tests/etcd-ported/`. The etcd repo's `tests/integration/` and `tests/e2e/` describe behavior, not implementation, and most cases translate directly to mango's typed client (the test asserts "Put then Get returns the value"; the language is irrelevant). Initial port targets the `clientv3/` integration tests for KV, Watch, Lease, Auth, and Maintenance. Each ported test carries a `// PORTED FROM: etcd@<sha>:<path>:<test_name>` provenance comment; a CI job (`scripts/check-etcd-port-provenance.sh`) asserts every file under `etcd-ported/` has the provenance line and the referenced sha matches the pinned etcd in `benches/oracles/etcd/VERSION`. **Tests that fail because mango is intentionally divergent are explicitly skipped with the divergence documented in `docs/etcd-divergence.md`** (matches the Phase 13 differential-fuzz divergence file). This is free correctness coverage — etcd already paid for the test design.
+- [ ] **Jepsen etcd test running unmodified against mango** under `tests/jepsen/etcd-port/`. Aphyr's `jepsen.etcd` test is etcd-API-shaped and mango is not wire-compatible, so the port is "reuse the test scenarios and the linearizability checker, swap the client" — not "make jepsen.etcd pass against mango." Runs alongside the Phase 13 mango-native Jepsen run; the two together give us "the same property checker that broke etcd in 2014 cannot break mango in CI." Results published to the same GitHub Pages site as the native Jepsen run.
 - [ ] Conformance suite runs in CI against mango itself on every PR; passes are the merge gate for any future implementation claiming "mango-conformant."
 - [ ] Public conformance report published alongside Jepsen results in Phase 13.
 
