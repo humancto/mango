@@ -1,0 +1,6 @@
+# Downloaded artifacts from fetch.sh. Never committed.
+cache/
+*.tar.gz
+*.zip
+etcd-v*/
+SHA256SUMS
