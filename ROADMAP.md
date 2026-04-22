@@ -470,6 +470,18 @@ DST harness already exists; this phase scales it up.
 - [ ] **Public Jepsen run published in CI**: real Jepsen test driving real mango binaries; results uploaded as a GitHub Pages site so claims about correctness are externally verifiable
 - [ ] Document failure modes found and fixed in `docs/robustness/`
 
+## Phase 13.5 — Conformance suite
+
+Without a conformance suite, the post-1.0 stretch goals (embedded mode,
+pluggable consensus) have no guardrail when they land. Pinning the
+semantic contract now means every future implementation must pass the
+same test gauntlet mango itself does.
+
+- [ ] `crates/mango-conformance` — a standalone crate that runs a defined set of KV / Watch / Lease / Raft semantic assertions against any binary that speaks the mango `.proto`. Reference implementation = mango itself; pluggable consensus and embedded mode (stretch) MUST pass it before claiming compatibility.
+- [ ] Test categories: KV linearizability, Watch event ordering and at-least-once delivery, Lease expiry timing within tolerance, Txn compare-and-swap semantics, Range pagination edge cases, error-shape stability.
+- [ ] Conformance suite runs in CI against mango itself on every PR; passes are the merge gate for any future implementation claiming "mango-conformant."
+- [ ] Public conformance report published alongside Jepsen results in Phase 13.
+
 ## Phase 14 — Performance push
 
 A dedicated phase to chase the quantitative "beat etcd" numbers across
