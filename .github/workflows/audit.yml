@@ -1,0 +1,69 @@
+# Mango RustSec advisory gate.
+#
+# Four triggers:
+#   - push to main       — re-check after every merge.
+#   - pull_request       — block merge on critical advisories
+#                          (path-filtered to dep-graph changes to
+#                          avoid wasted CI on docs-only PRs).
+#   - schedule (nightly) — the differentiator over cargo-deny:
+#                          advisories published AFTER a merge still
+#                          surface here. rustsec/audit-check auto-
+#                          files a GitHub issue on the scheduled
+#                          trigger only.
+#   - workflow_dispatch  — lets us manually fire the scheduled path
+#                          post-merge to prove the issue-creation
+#                          mechanism end-to-end, without waiting up
+#                          to 24h for the first cron firing.
+#
+# Posture note: rustsec/audit-check v2.0.0 fails the check ONLY on
+# `critical` advisories (informational: null). Yanked, unmaintained,
+# and unsound remain the strict gate of `cargo-deny check advisories`
+# in ci.yml — intentional asymmetry documented in
+# .planning/0-8-cargo-audit.plan.md.
+#
+# Why a separate workflow from ci.yml: the scheduled run needs
+# `issues: write`, which the fmt/clippy/test/deny jobs must not have.
+# Split keeps the permission scope surgical.
+
+name: audit
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - ".github/workflows/audit.yml"
+  schedule:
+    # 07:23 UTC daily — offset from the on-the-hour queue GitHub
+    # throttles. After most US/EU advisory-publication windows,
+    # before the working day in both.
+    - cron: "23 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write  # rustsec/audit-check files an issue on schedule findings
+
+concurrency:
+  # Pin the schedule trigger to its own group so two nightlies cannot
+  # overlap (the action's dedup is a GitHub search — eventually-
+  # consistent — so concurrent runs could both decide "no existing
+  # issue" and double-file). Push/PR keep the default ref-scoped group.
+  group: ${{ github.workflow }}-${{ github.event_name == 'schedule' && 'schedule' || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  audit:
+    name: cargo-audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      # On schedule / workflow_dispatch, checkout defaults to the
+      # default branch tip (main). On push, the pushed SHA. On PR,
+      # the merge commit. All three are correct for an audit run.
+      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998  # v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
