@@ -10,6 +10,10 @@
 [graph]
 # Single-target today; expand when cross-compilation lands.
 targets = [{ triple = "x86_64-unknown-linux-gnu" }]
+# CI overrides with `--all-features` (see `.github/workflows/ci.yml`)
+# so every feature any downstream can enable is checked. This default
+# applies to a local `cargo deny check` without flags — useful when
+# iterating on `deny.toml` without waiting on feature resolution.
 all-features = false
 
 [output]
@@ -61,15 +65,16 @@ skip = []
 skip-tree = []
 wildcards = "deny"
 # Crate-level bans. Security axis mandates rustls — no OpenSSL path.
-# Belt-and-suspenders: ban the direct (`openssl-sys`), high-level
-# (`openssl`), vendored-build (`openssl-src`), and cross-platform-TLS
-# (`native-tls`) entrypoints, because any of them can pull OpenSSL
-# into the graph and a transitive ban produces a confusing error.
+# Belt-and-suspenders: ban every common entrypoint that can pull
+# OpenSSL into the graph, because a transitive ban produces a
+# confusing error message. `crate = ...` is the modern canonical form
+# (older `name = ...` still accepted but deprecated in 0.19.x).
 deny = [
-    { name = "openssl-sys", reason = "Security axis mandates rustls; no OpenSSL in the tree." },
-    { name = "openssl", reason = "Use rustls." },
-    { name = "openssl-src", reason = "Vendored OpenSSL build — same ban class." },
-    { name = "native-tls", reason = "Pulls OpenSSL on Linux by default; use rustls." },
+    { crate = "openssl-sys", reason = "Security axis mandates rustls; no OpenSSL in the tree." },
+    { crate = "openssl", reason = "Use rustls." },
+    { crate = "openssl-src", reason = "Vendored OpenSSL build — same ban class." },
+    { crate = "native-tls", reason = "Pulls OpenSSL on Linux by default; use rustls." },
+    { crate = "libssh2-sys", reason = "Drags OpenSSL via libgit2's ssh path; use a pure-Rust SSH stack or avoid git-over-SSH in-process." },
 ]
 
 [sources]
