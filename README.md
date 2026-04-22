@@ -1,5 +1,7 @@
 # mango
 
+[![ci](https://github.com/humancto/mango/actions/workflows/ci.yml/badge.svg)](https://github.com/humancto/mango/actions/workflows/ci.yml)
+
 A distributed, reliable key-value store written in Rust. Mango is a ground-up
 port of [etcd](https://github.com/etcd-io/etcd) — same problem space, same
 guarantees (linearizable KV over Raft, watch streams, leases, MVCC), but a
