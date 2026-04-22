@@ -42,6 +42,10 @@ print_stderr = { level = "deny", priority = 1 }
 await_holding_lock = { level = "deny", priority = 1 }
 await_holding_refcell_ref = { level = "deny", priority = 1 }
 disallowed_types = { level = "deny", priority = 1 }
+# Pairs with `msrv = "1.80"` in clippy.toml: flags any stdlib API
+# call newer than MSRV at PR time, complementing the `cargo check
+# @ 1.80` job that catches it at compile time.
+incompatible_msrv = { level = "deny", priority = 1 }
 
 # Release profile. overflow-checks = true is the runtime backstop for
 # the compile-time clippy::arithmetic_side_effects lint

@@ -82,6 +82,44 @@ jobs:
         # `fail-fast: false` knob, which doesn't apply (no matrix yet).
         run: cargo test --workspace --all-targets --locked --no-fail-fast
 
+  msrv:
+    # MSRV enforcement. `cargo check` on the pinned 1.80 toolchain
+    # proves the workspace compiles on MSRV; the drift-detection
+    # script proves the pin here and the rust-version in Cargo.toml
+    # agree. Decouples the declaration (manifest) from the gate
+    # (this job), then ties them back together with the script.
+    name: msrv (cargo check @ 1.80)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      # `toolchain: "1.80"` is rustup's shorthand — it resolves to
+      # whatever 1.80.z rustup's manifest has at install time
+      # (currently 1.80.1). That's the right amount of pinning for
+      # MSRV enforcement: "minimum 1.80-family," not an exact patch.
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable (action)
+        with:
+          toolchain: "1.80"
+      - name: verify workflow MSRV matches Cargo.toml
+        # scripts/test-msrv-pin.sh is the single source of the drift
+        # check — committed, runnable locally, and invoked here.
+        run: bash scripts/test-msrv-pin.sh
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          # Pinned MSRV in the cache key so a future MSRV bump
+          # invalidates this job's cache cleanly without a manual rev.
+          prefix-key: v0-msrv-1.80
+          shared-key: ""
+      - name: cargo fetch
+        run: cargo fetch --locked
+      - name: cargo check (workspace, all targets, MSRV toolchain)
+        # `cargo check`, not build/test: MSRV cares about compilation
+        # feasibility, not artifact production or runtime semantics.
+        # `--all-targets` includes tests/benches/examples so the full
+        # source tree is typechecked on MSRV, matching the practice in
+        # tokio / serde / hyper / reqwest.
+        run: cargo check --workspace --all-targets --locked
+
   deny:
     # Supply-chain policy gate: licenses, RustSec advisories, banned
     # crates (openssl-*, native-tls), duplicate versions, git-deps.
