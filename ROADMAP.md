@@ -373,6 +373,28 @@ User-facing CLI mirroring `etcdctl`'s ergonomics: `put`, `get`, `del`,
 - [ ] `endpoint status`, `endpoint health`
 - [ ] Integration tests against an in-process cluster: every subcommand exercised
 
+## Phase 7.5 — Web UI (read-only browse mode)
+
+Ships an early, narrowly-scoped slice of the eventual full operational
+console (Phase 16) so users get localhost-browse value as soon as KV is
+real. **Read-only only** — no mutations until the full UI in Phase 16
+which lands after auth (Phase 8) so destructive ops are gated by RBAC.
+
+This phase is intentionally small. It exists to (a) prove the embedded
+HTTP server pattern, (b) pick the frontend stack via ADR before the
+bigger phase commits to it, (c) give the project a visible artifact
+that demos well long before the full console.
+
+- [ ] **Frontend-stack ADR** in `.planning/adr/` (rust-expert + frontend-design pass at plan time): pick between server-rendered HTML+HTMX, Rust→WASM (Leptos/Dioxus/Yew), React+Vite+TS, SvelteKit. Decision criterion: **fastest dev iteration + smallest binary contribution + no Node in the mango build pipeline by default** (Node tooling, if any, runs only at release time and the built artifacts are checked-in or fetched, never built from source in the user's `cargo install`).
+- [ ] `crates/mango-ui` skeleton: an `axum` HTTP server embedded in `mango-server`, serving on a separate port (default `:2381`, configurable). Off by default in `--profile release`, on by default in `--profile dev`, controllable via `--ui-listen` flag.
+- [ ] **Localhost-only by default**: binds to `127.0.0.1:2381` unless `--ui-listen 0.0.0.0:2381` is passed explicitly. A non-localhost bind without `--insecure-ui` (or without TLS configured) refuses to start. No accidental internet exposure.
+- [ ] Browse view: prefix-search keys, paginated list, view value + revision + lease + version. Renders binary values as hex with a UTF-8 toggle.
+- [ ] Range query view: from / to keys, limit, sort order; results paginated.
+- [ ] Cluster status view (read-only): cluster ID, member list, leader, raft index, db size — driven by the Phase 6 `Status` endpoint.
+- [ ] `mangoctl ui` subcommand: spawns the same UI binary against a configured external cluster (for ops users who don't want to enable the embedded UI in prod).
+- [ ] Integration tests with `axum-test` (or equivalent): every UI route returns the expected shape; no XSS in value rendering (stored-XSS test with a malicious value); no panics on malformed input (fuzz target on the search query parser, per Reviewer's contract).
+- [ ] Bench: UI page loads ≤ 100ms p99 against a 1M-key cluster (the browse list is paginated; this measures pagination + render). Etcd has no equivalent; this sets the bar for Phase 16.
+
 ## Phase 8 — Authentication & authorization
 
 etcd's auth model: users, roles, role-based key-range permissions, password
@@ -511,6 +533,59 @@ assumptions are violated.
 - [ ] **Chaos test in CI** (weekly): real cluster, real network, random faults via toxiproxy or equivalent; failures block the next release. Runs for ≥ 1 hour and fails on any panic from non-test code (this is what mechanically enforces the north-star "no panics in steady state" claim).
 - [ ] **Security review**: third-party (or at minimum, sensitive-data-auditor + security-reviewer subagents) review of the full surface before 1.0
 - [ ] **Threat model document** in `docs/security/threat-model.md` covering the trust boundaries (client ↔ server, peer ↔ peer, operator ↔ disk) and mitigations
+
+## Phase 16 — Web UI (full operational console)
+
+The localhost web UI is a real ergonomics win over etcd, which has only
+`etcdctl`. Third-party tools like etcdkeeper exist but are barely
+maintained, missing features, and not first-party trustable. Mango ships
+the UI as a first-class, supported, security-reviewed surface.
+
+Builds on the read-only browse mode from Phase 7.5. Sequenced after
+Phase 8 (auth) so destructive ops are gated by RBAC, after Phase 9
+(membership) so the topology view is real, after Phase 10 (maintenance)
+so alarms and snapshot ops have UIs, and after Phase 11 (observability)
+so metrics dashboards have data to render.
+
+### Editing
+
+- [ ] **Put / Edit value**: in-line value editor with revision check ("the value changed under you" detection via `If(mod_revision == X)` Txn). Confirmation required for overwrites of leased keys. Audit-log entry on every successful Put.
+- [ ] **Delete key / range**: confirmation modal with the exact set of keys that will be deleted (range expanded to a preview list, capped at N for huge ranges). Two-click for single key, type-the-prefix-to-confirm for range delete.
+- [ ] **Txn builder**: visual builder for `Compare → Then/Else`; renders the equivalent `mangoctl txn` command alongside so users learn the CLI by clicking. Dry-run mode shows what would happen without committing.
+- [ ] **Bulk import / export**: upload a JSON or CSV of key/value pairs, preview, commit as a single Txn (subject to mango's max-txn-ops). Export the current range view as JSON or CSV.
+
+### Live data
+
+- [ ] **Watch streams**: subscribe to a key range, see events arrive in real time, pause / resume / clear, filter by event type. Backed by the Phase 6 server-streaming Watch RPC, with the bounded backpressure policy from Phase 6 enforced (slow UI consumer disconnects rather than OOMs the server). Limited to N concurrent watches per UI session, configurable.
+- [ ] **Live metrics inline**: every detail view (key, lease, member) shows a small sparkline of the relevant Prometheus metric inline. Driven by the same `/metrics` endpoint scraped over short polling, NOT a separate firehose stream.
+
+### Cluster / operations
+
+- [ ] **Cluster topology view**: live diagram of members, leader / follower / learner roles, raft index per member, replication lag, link health. Refreshes on a 2s timer (configurable; documented as eventually consistent — never claim leader from this view).
+- [ ] **Member operations** (auth-gated): add member, add learner, promote learner, remove member. Confirmation flows match `mangoctl member` semantics. Refuses operations that would lose quorum, with clear error.
+- [ ] **Alarms panel**: live list of `NOSPACE` / `CORRUPT` / `WAL_FULL` alarms; one-click `disarm` (auth-gated, audit-logged).
+- [ ] **Maintenance panel**: trigger snapshot save (downloads the snapshot file to the operator's browser), trigger compaction at a chosen revision, trigger online defrag. Each operation shows progress and audit-logs the trigger.
+
+### Auth + RBAC
+
+- [ ] **Login flow** when cluster auth is enabled: same users / passwords / tokens as the cluster; UI session token is short-lived (configurable, default 1h) and revocable by the user via "log out everywhere."
+- [ ] **RBAC enforcement in the UI mirrors the backend**: a user without `write` on a key range sees the value but the Edit / Delete buttons are disabled with an inline reason ("you do not have `write` on `/foo/`"). The button-disabled state is cosmetic; the backend rejects regardless. Tested by two property tests: (a) every UI mutating action that the backend would reject is also disabled in the UI for that user, (b) every action that's enabled in the UI for a user is accepted by the backend.
+- [ ] **User / role management UI** (admin-only): list users, create / delete user, grant / revoke role, list roles, create role with key-range permissions. Mirrors the Phase 8 `Auth` gRPC service exactly.
+- [ ] **Audit-log viewer** (admin-only): paginated, searchable view of the Phase 8 hash-chained audit log, with tamper-detection check shown inline. Read-only — the audit log is append-only by design.
+
+### Hardening (the UI is a fresh attack surface)
+
+- [ ] **Same security review** as the gRPC surface in Phase 15: sensitive-data-auditor + security-reviewer subagents pass. CSRF tokens on every mutating endpoint. Strict CSP. No third-party CDNs (everything served from the embedded binary). XSS-tested via stored values containing JS; SSRF-tested via custom value URLs.
+- [ ] **`cargo fuzz` target** on the UI's HTTP request parsers (per Reviewer's contract: parser fuzz lives where the parser does; CI plumbing in Phase 15).
+- [ ] **DoS knobs**: max request size, max concurrent UI sessions per IP, rate-limit per session. Defaults documented; tested with a misbehaving-client harness.
+- [ ] **Config knob to disable the UI entirely** for production deployments that prefer external dashboards. Default in `--profile release` is OFF.
+- [ ] **Threat model addendum** in `docs/security/threat-model.md` covering the UI specifically (browser ↔ UI server, UI server ↔ mango server, operator ↔ stored values rendered in browser).
+
+### Bench + acceptance
+
+- [ ] Page load ≤ 200ms p99 for every view against a 10M-key cluster. Watch event delivery to the UI within 100ms p99 of arrival at the server. Metric in `benches/results/phase-16/ui.md`.
+- [ ] Full Playwright (or `fantoccini` if we go pure Rust) end-to-end test suite: every workflow exercised — login, browse, edit, delete with confirmation, watch a key, member add, alarm disarm. Runs against an in-process 3-node cluster in CI.
+- [ ] **Beats etcdkeeper on every axis** (the closest existing third-party tool): more features, first-party support, security-reviewed, no separate install, RBAC-aware. Documented in `docs/comparisons/web-ui.md`.
 
 ---
 
