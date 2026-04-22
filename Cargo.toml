@@ -43,11 +43,41 @@ await_holding_lock = { level = "deny", priority = 1 }
 await_holding_refcell_ref = { level = "deny", priority = 1 }
 disallowed_types = { level = "deny", priority = 1 }
 
+# Release profile. overflow-checks = true is the runtime backstop for
+# the compile-time clippy::arithmetic_side_effects lint
+# (see docs/arithmetic-policy.md). Defense in depth: the lint catches
+# arithmetic at PR time; this flag catches anything that slipped past
+# (macro-generated math, `#[allow]`-marked sites, etc.) and converts
+# silent wrap into a panic. Combined with panic = "abort" and the
+# crash-only design (docs/architecture/crash-only.md, future item),
+# the failure mode is: overflow -> panic -> abort -> supervisor
+# restart -> WAL recovery, not silent data corruption.
+#
+# NOT affected by overflow-checks (wrap at runtime regardless):
+# - atomic RMW ops (AtomicU64::fetch_add etc.) — lower to LLVM
+#   atomicrmw which wraps by definition; use checked_add inside a
+#   fetch_update for logical checks.
+# - `as` casts — never checked. Use try_from / checked_* variants.
+# - wrapping_* / saturating_* / checked_* / overflowing_* intrinsics —
+#   their contract is explicit, bypassed intentionally.
+#
+# Cost: ~1-3% on arithmetic-heavy hot paths (folklore number; measure
+# on real Raft/serde workloads when Phase 14 perf work lands). If a
+# specific dep relies on release-mode wrap and CI goes red on a dep
+# bump, surgical escape is:
+#   [profile.release.package.<name>]
+#   overflow-checks = false
+# Audit candidates on first bump: ahash, fxhash, siphasher,
+# twox-hash, crc32fast, zstd-safe.
+#
+# [profile.bench] inherits from release, so benches get overflow
+# checks too. Override there when measuring raw throughput.
 [profile.release]
 lto = "thin"
 codegen-units = 1
 panic = "abort"
 strip = "symbols"
+overflow-checks = true
 
 [profile.dev]
 opt-level = 0
