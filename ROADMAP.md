@@ -10,81 +10,273 @@ not bound by its Go-isms.
 **Mango is a mature, production-grade distributed KV store that beats etcd
 on every axis we care about.** Not a toy port. Not a learning exercise. Not
 "good enough." Every plan, every PR, every architectural decision is judged
-against the bar below. If a change merely matches etcd, that is a regression
-relative to the goal — find the win.
+against the bars below. If a change merely matches etcd, that is a
+regression relative to the goal — find the win.
 
-The six axes mango must beat etcd on. Every claim has a comparison oracle
-and a measurable threshold — the comparison oracle is the **pinned etcd
-binary** in `benches/oracles/etcd/` (etcd v3.5.x; exact version pinned per
-release in `benches/oracles/etcd/VERSION`), running on the **same hardware
-class** described in `benches/runner/HARDWARE.md`, driven by the **bench
-runner scripts** under `benches/runner/`. "etcd's published numbers" is
-never an acceptable oracle; we run the comparison ourselves.
+### What Rust gives us that Go etcd cannot
 
-1. **Performance** — vs etcd v3.5.x on the same hardware, driven by the
-   committed runner scripts:
+Mango is not "etcd, but rewritten." It is etcd's problem space attacked with
+a language whose primitives lift specific etcd footguns out of existence
+*at compile time*. These are the structural advantages every plan should
+think in terms of:
+
+- **No GC.** Etcd's tail latency is shaped by Go's stop-the-world GC pauses,
+  which are small but real and *unbounded* under memory pressure. Rust has
+  deterministic destruction (RAII), so tail latency is bounded by what we
+  do in our own code, never by a runtime collector. This is the single
+  largest structural lever for the p99 bars below.
+- **Memory safety without a runtime.** Use-after-free, double-free, data
+  races on shared memory, buffer overflows — *not possible* in safe Rust.
+  CVEs in this class become impossible-by-construction, not
+  impossible-after-careful-review.
+- **Fearless concurrency via `Send` / `Sync`.** Sharing data across threads
+  without proper synchronization is a *compile error*, not a Friday-night
+  page. Etcd's Go race-detector catches these dynamically and only when a
+  race actually occurs in a test run; Rust catches the *category* before
+  the binary exists.
+- **Zero-cost abstractions.** Iterators, futures, generics, traits all
+  compile to the same code we'd hand-write. We pay nothing for clean APIs.
+- **Explicit failure as a value, not an exception.** `Result<T, E>` makes
+  every fallible operation visible at the call site. Etcd has Go's error-
+  return convention but no compiler enforcement that errors are handled;
+  Rust enforces it.
+- **Async without a hidden runtime.** We pick the executor (Tokio); we know
+  exactly which thread does what; we can pin Raft tick / apply / serve
+  threads explicitly (Phase 14 NUMA item). Etcd is at the mercy of Go's
+  goroutine scheduler.
+- **`unsafe` is rare, named, and audited.** `unsafe_code = "forbid"` at the
+  workspace root means there are *zero* unsafe blocks unless a module
+  explicitly opts in. Every opt-in module is named, has a `# Safety`
+  comment block on every `unsafe` block, is Miri-tested. Etcd has neither
+  the concept nor the audit trail.
+- **Cargo-native supply chain hygiene.** SHA-pinned actions, `cargo-deny`,
+  `cargo-audit`, `cargo-vet`, SBOM via `cargo-cyclonedx`. The Go ecosystem
+  has analogues; Rust's are more complete and CI-native.
+
+These are the *mechanism*. The bars below are the *measurement*. Every
+plan's first paragraph should name which mechanism it leverages and which
+bar it moves.
+
+### The bars (each axis has a comparison oracle, a measurable threshold, and a named test that gates merge)
+
+The comparison oracle for every "vs etcd" claim is the **pinned etcd binary**
+in `benches/oracles/etcd/` (etcd v3.5.x; exact version pinned per release in
+`benches/oracles/etcd/VERSION`), running on the **same hardware class**
+described in `benches/runner/HARDWARE.md`, driven by the **bench runner
+scripts** under `benches/runner/`. "etcd's published numbers" is never an
+acceptable oracle; we run the comparison ourselves.
+
+Every bar lists the **named test** that gates it. If a PR claims to move a
+bar, the named test must exist (or be updated by the same PR) and must
+pass on the comparison-oracle hardware. PRs that claim a bar without a
+named test are auto-`REVISE`.
+
+1. **Performance — Blazing fast.** Rust's no-GC + zero-cost abstractions
+   are the structural lever.
    - 1KB Put throughput on a 3-node loopback cluster: **≥ 1.5× etcd's**.
+     *Test:* `benches/runner/raft.sh` (Phase 5).
    - p99 client latency at 50% of mango's saturation: **≤ 0.7× etcd's**
      at the same absolute QPS.
-   - Resident set size at idle (3-node cluster, empty data dir): **≤ 0.7×
-     etcd's**.
-   - Cold start (process exec → first successful Put accepted): **≤ 0.7×
-     etcd's**.
+     *Test:* `benches/runner/grpc.sh` (Phase 6).
+   - Resident set size at idle (3-node cluster, empty data dir):
+     **≤ 0.7× etcd's**.
+     *Test:* `benches/runner/idle-rss.sh` (Phase 6).
+   - Cold start (process exec → first successful Put accepted):
+     **≤ 0.7× etcd's**.
+     *Test:* `benches/runner/cold-start.sh` (Phase 6).
    - Leader-failover-to-quorum-write time after `SIGKILL` of the leader:
      **≤ 0.7× etcd's**.
-2. **Correctness** — verifiable by external parties:
-   - Public Jepsen run published in CI (Phase 13), with results uploaded
-     to a GitHub Pages site so the claim is externally checkable.
-   - Deterministic simulator (Phase 5 onwards) replays every reported
-     bug from a seed.
-   - Property tests for every state machine; the simulator runs every
-     property test under a panic hook that fails on any panic from
-     non-test code.
-3. **Operability** — measured by:
-   - Every metric documented in `docs/metrics.md` with declared label set
-     and cardinality bound; CI test scrapes `/metrics` and asserts each
-     family's distinct label-value count stays below its declared bound
-     under a 10k-key workload.
-   - `mango --check-config <path>` validates the entire config and exits
-     non-zero on any conflict; tested against a malformed-config corpus.
-   - Follower restart against a 10M-revision cluster causes ≤ 1.2× the
-     steady-state network ingress on the leader for ≤ 30s (no
+     *Test:* `benches/runner/failover.sh` (Phase 5).
+2. **Concurrency & parallelism.** Rust's `Send` / `Sync` + Tokio's
+   structured concurrency mean we get correct parallel scaling without
+   the GC scheduler artifacts that bound etcd's per-node throughput.
+   - Per-core scaling efficiency on a single node: throughput at 16
+     cores is **≥ 12× throughput at 1 core** (etcd's Go-runtime
+     scheduling typically delivers ~6-9× under the same workload).
+     *Test:* `benches/runner/per-core-scaling.sh` (Phase 6).
+   - Zero deadlocks under fuzzed concurrent workloads — enforced at
+     compile time by `clippy::await_holding_lock`, at test time by
+     `loom`-based model-checking tests for every shared-state primitive,
+     and at runtime by a CI watchdog that fails any test exceeding 10×
+     its baseline duration.
+     *Tests:* per-crate `loom` tests; `tests/watchdog.rs` (Phase 0
+     lints + Phase 5 onwards `loom` tests).
+   - Lock-poisoning is unrepresentable in our code: `parking_lot`
+     mutexes (no poisoning) or `tokio::sync` (no poisoning); CI lint
+     bans `std::sync::Mutex`/`RwLock` in non-test code.
+     *Test:* clippy custom-lint config in Phase 0.
+3. **Reliability.** Graceful degradation, no thundering herds, no
+   cascading failures, bounded recovery time. Rust's typed errors +
+   the absence of unchecked exceptions mean every failure mode is
+   enumerated.
+   - Follower restart against a 10M-revision cluster causes **≤ 1.2×
+     the steady-state network ingress on the leader for ≤ 30s** (no
      thundering herd).
-   - No leader-flap storms during membership change: zero leader changes
-     during a 1-member-add-then-promote cycle on a healthy 3-node
-     cluster, asserted in CI.
-4. **Safety** — mechanically enforceable:
+     *Test:* `benches/runner/follower-restart.sh` + assertion in
+     `tests/reliability/follower_catchup.rs` (Phase 5).
+   - Zero leader changes during a 1-member-add-then-promote cycle on a
+     healthy 3-node cluster.
+     *Test:* `tests/reliability/membership_change.rs` (Phase 9).
+   - Single-node disk-full scenario: server enters read-only mode,
+     raises `NOSPACE`, **never crashes, never corrupts**, recovers
+     cleanly when space is freed.
+     *Test:* `tests/reliability/disk_full.rs` + `tests/chaos/disk_eio.rs`
+     (Phase 1 + Phase 15).
+   - Slow client cannot stall the server: bounded per-stream send
+     buffer with documented disconnect policy; zero memory growth
+     under a misbehaving-client harness.
+     *Test:* `tests/dos/slow_loris.rs`, `tests/dos/oversized_frames.rs`
+     (Phase 6).
+   - Recovery from any single-node failure (process kill, kernel
+     panic, disk yank) within **≤ 0.7× etcd's recovery time** to the
+     same workload.
+     *Test:* `tests/chaos/single_node_failure.rs` (Phase 15).
+4. **Correctness — Distributed-systems grade.** Linearizability is
+   the load-bearing claim; we verify it externally.
+   - Public Jepsen run published in CI (Phase 13), results uploaded
+     to a GitHub Pages site so the claim is externally checkable.
+     *Test:* `tests/jepsen/` (Phase 13).
+   - Deterministic simulator (Phase 5 onwards) replays every reported
+     bug from a seed; every fix lands with the seed in the regression
+     suite.
+     *Test:* `tests/simulator/regression/` (Phase 5).
+   - Property tests for every state machine — Raft transitions, MVCC
+     visibility, lease state, watcher state — under proptest with
+     shrinking; the simulator runs every property test under a panic
+     hook that fails on any panic from non-test code.
+     *Tests:* `tests/properties/<state-machine>.rs` per crate.
+   - Linearizability checker (Porcupine-style) over every recorded
+     simulator history.
+     *Test:* `tests/linearizability/` (Phase 13).
+5. **Safety — Memory-safe by construction.** Use-after-free, data
+   race, double-free, buffer overflow: not possible in safe Rust. We
+   enforce the rest mechanically.
    - `unsafe_code = "forbid"` workspace-wide except in audited, named
      modules with documented invariants and a `# Safety` comment block
-     on every `unsafe` block.
-   - Supply-chain hardening: SHA-pinned actions, `cargo-deny`,
-     `cargo-audit`, `cargo-vet`, SBOM via `cargo-cyclonedx`.
-   - **No panics in steady state**, operationalized as: `[profile.release]
-     overflow-checks = true`; clippy denies `unwrap_used`, `expect_used`,
-     `panic`, `unimplemented`, `todo`, `indexing_slicing`,
-     `arithmetic_side_effects`, `cast_possible_truncation`,
-     `cast_sign_loss` in non-test code; Phase 13 simulator runs with a
-     panic hook that fails the test on any panic from non-test code;
-     Phase 15 chaos test runs ≥1 hour and fails on any panic.
-   - Every public fallible op returns a typed crate-local `Error` enum;
-     `Box<dyn Error>` in a public API is an auto-`REVISE`.
-5. **Developer ergonomics** — measured by:
+     on every `unsafe` block. Per-PR sign-off cites Miri output
+     (`MIRIFLAGS=-Zmiri-strict-provenance cargo +nightly miri test
+     -p <crate>`) or a written justification for why Miri doesn't
+     apply (e.g. FFI).
+     *Test:* CI step counts `unsafe` blocks across the workspace and
+     fails if it grows without an approving label.
+   - **No panics in steady state**, operationalized as:
+     `[profile.release] overflow-checks = true`; clippy denies
+     `unwrap_used`, `expect_used`, `panic`, `unimplemented`, `todo`,
+     `indexing_slicing`, `arithmetic_side_effects`,
+     `cast_possible_truncation`, `cast_sign_loss` in non-test code;
+     Phase 13 simulator runs with a panic hook that fails the test on
+     any panic from non-test code; Phase 15 chaos test runs **≥ 7
+     days continuously** before each release and fails on any panic.
+     *Tests:* clippy config (Phase 0); `tests/simulator/panic_hook.rs`
+     (Phase 13); `tests/chaos/long_running.rs` (Phase 15).
+   - Every public fallible op returns a typed crate-local `Error`
+     enum; `Box<dyn Error>` in a public API is auto-`REVISE`.
+     *Test:* `cargo public-api --diff` (Phase 0) plus a CI grep
+     against `Box<dyn` in `pub fn` signatures.
+   - Miri runs on a curated subset of tests (the ones touching unsafe
+     blocks or pointer arithmetic) on every push to `main` and once
+     per PR night.
+     *Test:* `.github/workflows/miri.yml` (Phase 15).
+6. **Security — Defense-in-depth.** Memory safety is necessary but
+   not sufficient. Supply chain, network, disk, and operator are all
+   trust boundaries.
+   - **Supply-chain**: SHA-pinned actions; `cargo-deny` (license,
+     advisory, duplicate-version, ban-git-deps); `cargo-audit`
+     (RustSec); `cargo-vet` (transitive-dep audits); SBOM via
+     `cargo-cyclonedx` published with every release.
+     *Tests:* `.github/workflows/supply-chain.yml` (Phase 0).
+   - **Cryptographic correctness**: TLS via `rustls` (memory-safe TLS,
+     formally-verified crypto primitives via `*ring*` / `aws-lc-rs`);
+     never `openssl` (CVE history, C codebase). All key material
+     handled via `secrecy::Secret<T>` so it's zeroized on drop.
+     *Tests:* `tests/crypto/zeroize.rs`; `cargo-deny` ban list
+     prohibits `openssl-sys`.
+   - **Disk-corruption detection**: every backend write is checksummed
+     (XXH3 or BLAKE3); reads verify; mismatch raises `CORRUPT` and
+     refuses to serve stale-checksum pages.
+     *Test:* `tests/security/disk_corruption.rs` (Phase 15).
+   - **DoS hardening at the gRPC layer**: max-message-size, max-concurrent-
+     streams, http2 keepalive, per-conn rate limit. Defaults documented
+     and tested with a misbehaving-client harness.
+     *Test:* `tests/dos/grpc_hostile_client.rs` (Phase 6).
+   - **Threat model** in `docs/security/threat-model.md` covering
+     client ↔ server, peer ↔ peer, operator ↔ disk; every threat has
+     a named mitigation and a test (or a documented "accepted risk"
+     justification).
+     *Test:* `docs/security/threat-model.md` is reviewed by
+     `sensitive-data-auditor` + `security-reviewer` subagents before
+     1.0 (Phase 15).
+   - **Side-channel awareness**: constant-time comparison for all
+     credential / token / hash-chain checks; `subtle` crate enforced
+     via clippy custom-lint; CI test for non-constant-time use of
+     `==` on `&[u8]` in security-relevant modules.
+     *Test:* `tests/security/constant_time.rs` (Phase 8 + 15).
+7. **Large-scale distributed.** Etcd is famously stretched at large
+   cluster size (≥ 7 voters), large dataset (multi-GB), and large
+   watcher counts. We target the upper edges as first-class.
+   - **5-voter and 7-voter** clusters tested in CI with the same
+     workload as 3-voter; throughput delta documented and bounded
+     (Raft has fundamental quorum-size cost; we minimize it via
+     pipelined replication).
+     *Test:* `benches/runner/cluster-size.sh` (Phase 5 + 9).
+   - **100k concurrent watchers** on a single server: stable RSS,
+     bounded CPU, p99 event delivery latency **≤ 100ms** under a
+     1k-events/sec write workload.
+     *Test:* `benches/runner/watcher-scale.sh` (Phase 3 + 14).
+   - **8 GB on-disk dataset** with **≥ 100M revisions**: range
+     queries, compaction, snapshot, defrag all complete within the
+     same per-op latency bounds as a small dataset.
+     *Test:* `benches/runner/large-dataset.sh` (Phase 2 + 14).
+   - **Long-running stability**: 7-day continuous run at 5k writes/sec
+     ships a stability report (Phase 15).
+     *Test:* `tests/chaos/long_running.rs` (Phase 15).
+8. **Operability.** Production-grade defaults; predictable behavior at
+   the limits.
+   - Every metric documented in `docs/metrics.md` with declared label
+     set and cardinality bound; CI test scrapes `/metrics` and asserts
+     each family's distinct label-value count stays below its declared
+     bound under a 10k-key workload.
+     *Test:* `tests/observability/metric_cardinality.rs` (Phase 11).
+   - `mango --check-config <path>` validates the entire config and
+     exits non-zero on any conflict; tested against a malformed-
+     config corpus.
+     *Test:* `tests/config/check_config.rs` (Phase 6).
+   - All structured logs use stable `mango.*` tracing target names;
+     `tracing-opentelemetry` bridge wired natively so logs are
+     OTel-ingestible out of the box.
+     *Test:* `tests/observability/log_targets.rs` (Phase 11).
+9. **Developer ergonomics.** Mango should be pleasant to contribute to
+   and pleasant to operate.
    - CI cold ≤ 5 min, warm ≤ 90s (CI-asserted via job duration check
      starting Phase 11).
+     *Test:* `.github/workflows/ci-duration-budget.yml` (Phase 11).
    - `mango cluster up --nodes 3` brings up a working local cluster in
      ≤ 10s and prints connection info.
+     *Test:* `tests/cli/cluster_up.rs` (Phase 12).
    - `cargo doc --open` for `mango-client` shows zero `prost`/`tonic`
      types in the public API surface (CI-checked via a doc-extracted
      allowlist).
+     *Test:* `tests/api/no_proto_leakage.rs` (Phase 7).
    - `cargo public-api --diff` clean against the previous tagged release
      unless the PR is tagged `breaking-change`.
-6. **Storage efficiency** — vs the same-data-load etcd cluster:
-   - On-disk size after the same workload: **≤ 0.7× etcd's** (with
-     mango's default compression on, etcd's default off — both
-     defaults).
-   - Compaction: bounded CPU (≤ 25% of one core during compaction) and
-     read p99 during compaction within **1.5× of steady-state read
-     p99**.
+     *Test:* `.github/workflows/public-api-diff.yml` (Phase 0 warn,
+     Phase 6 gate).
+10. **Storage efficiency.** Smaller, faster compaction, no read stalls.
+    - On-disk size after the same workload: **≤ 0.7× etcd's** (with
+      mango's default compression on, etcd's default off — both
+      defaults).
+      *Test:* `benches/runner/disk-size.sh` (Phase 1 + 2).
+    - Compaction: bounded CPU (≤ 25% of one core during compaction)
+      and read p99 during compaction within **1.5× of steady-state
+      read p99**.
+      *Test:* `benches/runner/compaction-impact.sh` (Phase 2).
+
+### Cross-cutting principle: **Tested or it doesn't exist.**
+
+Every bar above lists a named test. The test must exist (committed,
+runnable locally, runnable in CI) before the corresponding feature is
+considered "done." A bar without a named test is *not a bar*; it's
+marketing. The Reviewer's contract enforces this — see below.
 
 When two approaches both work, pick the one that wins on at least one axis
 without losing on the others. When a winning-on-X approach loses on Y,
@@ -141,38 +333,82 @@ If any of these become must-haves later, add them as new phases at the end.
 
 ## Definition of Done (every phase)
 
-A phase is not "done" — and items inside it are not mergeable — unless all of
-the following hold for the surface the phase introduces. The expert agent
-enforces this list in plan + diff review.
+A phase is not "done" — and items inside it are not mergeable — unless all
+of the following hold for the surface the phase introduces. The expert
+agent enforces this list in plan + diff review.
 
-- **Tested.** Property tests for every data structure or protocol op (not
-  unit tests). Integration tests for every cross-crate boundary. Crash /
-  recovery tests for anything that touches disk. Concurrency tests for
-  anything that touches `async` or threads.
+- **Tested.** Every test class below is required where applicable. Missing
+  any one is auto-`REVISE`.
+  - **Unit tests** for every public function (table-driven where the
+    input space allows).
+  - **Property tests** (`proptest`, with shrinking) for every data
+    structure, codec, or protocol op. Property tests are the *default*;
+    unit tests are the exception, used only when the input space is
+    genuinely a small enum.
+  - **Integration tests** for every cross-crate boundary in
+    `<crate>/tests/`.
+  - **Crash / recovery tests** for anything that touches disk: kill the
+    process at every interesting program point (between WAL append and
+    fsync, between fsync and apply, mid-snapshot-write, etc.), reopen,
+    assert no torn state and no committed data lost.
+  - **Concurrency tests** for anything that touches `async` or threads:
+    `loom`-based model-checking tests for every shared-state primitive
+    introduced (channels, locks, atomics). The `loom` test exhaustively
+    explores interleavings up to a configurable depth.
+  - **Fuzz targets** (`cargo fuzz`) for every parser surface (codecs,
+    config files, snapshot files, WAL records, gRPC bodies, query
+    parsers). Per the Reviewer's contract: parser fuzz lives in the
+    phase that introduces the parser. CI plumbing for the nightly fuzz
+    run lives in Phase 15.
+  - **Miri** runs on every test that touches `unsafe` or pointer
+    arithmetic; PRs that add `unsafe` cite Miri output (or a written
+    no-Miri justification) in the description.
+  - **Test watchdog**: any test exceeding 10× its baseline duration is
+    failed by CI as a likely deadlock or livelock. Implemented in
+    `tests/watchdog.rs` (Phase 0).
 - **Benchmarked.** Criterion bench for every hot path with a baseline
-  number recorded in the plan. Where etcd has a public benchmark for the
-  equivalent feature, mango must beat it on the same hardware (document
-  the comparison in `benches/README.md`); where it does not, mango sets
-  the baseline.
+  number recorded in the plan and committed to `benches/results/<phase>/`.
+  Where etcd has a comparable bench (we always run it ourselves against
+  the pinned `benches/oracles/etcd/` binary on the hardware sig from
+  `benches/runner/HARDWARE.md`), mango must beat it per the relevant
+  north-star bar; where it does not, mango sets its own baseline. Bench
+  numbers are tracked in CI (Phase 11) and regressions of more than 2σ
+  fail the next PR's CI.
 - **Observable.** Every public op emits a `tracing` span at INFO with
-  stable target name and stable field names. Every error path logs at
-  WARN or ERROR with enough context to debug from the log alone.
-  Hot-path metrics added to the Prometheus exposition (Phase 11 wires
-  the endpoint; phases before that emit through the `metrics` facade so
-  the wiring is plumbing-only).
+  stable target name (`mango.<crate>`) and stable field names. Every
+  error path logs at WARN or ERROR with enough context to debug from
+  the log alone. Hot-path metrics added to the Prometheus exposition
+  through the `metrics` facade so Phase 11's wiring is plumbing-only.
+  Spans propagate through `spawn_blocking` correctly (capture
+  `Span::current()` and re-enter inside the closure).
 - **Failure-safe.** No `unwrap()` / `expect()` / `panic!()` /
-  `unimplemented!()` / `todo!()` in non-test code. Every fallible op
-  returns a typed error in a crate-local `Error` enum. `unsafe` is
-  forbidden workspace-wide; per-module opt-in requires a `# Safety`
-  comment block on every `unsafe` block and a sign-off line in the PR
-  description.
+  `unimplemented!()` / `todo!()` / `dbg!()` in non-test code (clippy
+  enforces — Phase 0). Every fallible op returns a typed error in a
+  crate-local `Error` enum; `Box<dyn Error>` in a public API is
+  auto-`REVISE`. `unsafe` is forbidden workspace-wide; per-module
+  opt-in requires a `# Safety` comment block on every `unsafe` block
+  and a Miri-output sign-off line in the PR description. **No
+  `std::sync::Mutex` / `RwLock` in non-test code** (clippy enforces) —
+  use `parking_lot` (no poisoning) or `tokio::sync` (no poisoning,
+  async-aware). **No lock guard held across `.await`**
+  (`clippy::await_holding_lock` enforces).
+- **Concurrency-correct.** Every PR that introduces shared mutable
+  state declares its synchronization strategy in the description and
+  ships a `loom` test for it. PRs that introduce a new `Arc<Mutex<T>>`
+  must explain in one line why a redesign (channel, actor, single-
+  owner) wasn't possible — auto-`REVISE` otherwise. PRs that introduce
+  spawned tasks must store the `JoinHandle` or document the fire-and-
+  forget justification.
 - **Documented.** Public items have rustdoc with at least one example
-  that compiles (doctest). User-facing config and CLI flags documented
-  in the `docs/` site (Phase 12 builds the site; phases before that
-  ship docs as `.md` next to the code).
+  that compiles (doctest); `cargo doc --no-deps -D warnings` is CI-
+  gated (Phase 0). User-facing config and CLI flags documented in
+  `docs/` (Phase 12 builds the site; earlier phases ship docs as `.md`
+  next to the code).
 - **Backwards-compatible at the API boundary** once Phase 6 ships gRPC
-  publicly. Until then, every breaking change is fine but must be
-  flagged in the PR description.
+  publicly: `cargo public-api --diff` clean against the previous tagged
+  release; on-disk format versioned via `data-dir/VERSION` with an
+  upgrade matrix tested in CI (Phase 12). Until Phase 6, every
+  breaking change is fine but must be flagged in the PR description.
 
 ## Reviewer's contract (the rust-expert agent)
 
@@ -182,43 +418,80 @@ is the decision rule the agent applies on every plan + diff review.
 ### `APPROVE` requires all of:
 
 1. The plan or PR description **declares which north-star axis the change
-   moves** (or honestly declares it as plumbing, e.g. CI / formatting).
-2. **For perf-claiming PRs:** before/after Criterion numbers, with the
-   comparison oracle named (etcd version, bench command, hardware sig
-   from `benches/runner/HARDWARE.md`), committed under
-   `benches/results/<phase>/`.
+   moves and names the specific bar + named test it verifies** (or
+   honestly declares it as plumbing, e.g. CI / formatting). "Moves
+   performance" is not enough; "moves Performance bar #2 (p99 at 50%
+   saturation, verified by `benches/runner/grpc.sh`)" is.
+2. **For perf-claiming PRs:** before/after Criterion numbers from the
+   named runner script, with the comparison oracle's etcd version + bench
+   command + hardware sig from `benches/runner/HARDWARE.md`, committed
+   under `benches/results/<phase>/`. The numbers must clear the bar's
+   threshold, not merely improve.
 3. **For correctness-claiming PRs:** at least one new property test or
    simulator scenario that would have caught the previous bug or class
-   of bug.
-4. **For unsafe code:** every `unsafe` block has a `// SAFETY:` comment
+   of bug. For Raft / MVCC / Lease / Watch state machines, the test runs
+   inside the Phase 5 / Phase 13 deterministic simulator, with the seed
+   committed.
+4. **For concurrency-claiming PRs (anything touching shared state, async,
+   or threads):** at least one new `loom` test exhaustively exploring
+   the introduced interleavings. PRs that introduce shared state without
+   a `loom` test are auto-`REVISE`.
+5. **For unsafe code:** every `unsafe` block has a `// SAFETY:` comment
    naming the invariant; PR description has a sign-off line citing Miri
-   output (`MIRIFLAGS=... cargo +nightly miri test -p <crate>`) or a
-   written justification for why Miri doesn't apply (e.g. FFI).
-5. **For new public API:** at least one doctest, `#[must_use]` where
+   output (`MIRIFLAGS=-Zmiri-strict-provenance cargo +nightly miri test
+   -p <crate>`) or a written justification for why Miri doesn't apply
+   (e.g. FFI). The workspace `unsafe` count cannot grow without an
+   approving PR label.
+6. **For security-claiming PRs:** named test(s) covering the threat
+   being mitigated (auth, crypto, DoS, supply-chain, side-channel,
+   memory). For new auth / crypto code, a constant-time-comparison
+   test where the comparison touches credential or hash material.
+7. **For reliability-claiming PRs:** named test in `tests/reliability/`
+   or `tests/chaos/` that exercises the failure mode and asserts the
+   bound (recovery time, no data loss, bounded resource use).
+8. **For scale-claiming PRs:** the relevant `benches/runner/*-scale.sh`
+   runs to completion within the bar's threshold on the canonical
+   hardware.
+9. **For new public API:** at least one doctest, `#[must_use]` where
    applicable, considered `#[non_exhaustive]` for new enums, and
    `cargo public-api --diff` output in the PR.
-6. **CI green:** clippy clean (no `#[allow]` without a comment), tests
-   green including doctests, fmt clean, deny clean, audit clean.
-7. **No new `TODO` / `FIXME` / `unimplemented!()` / `todo!()`** introduced.
-8. The change either moves a north-star axis with measured evidence, or
-   is honestly declared as plumbing (#1).
+10. **CI green:** clippy clean (no `#[allow]` without a comment), tests
+    green including doctests, fmt clean, deny clean, audit clean,
+    `loom` tests passing where applicable, `cargo public-api --diff`
+    clean (or `breaking-change` labeled).
+11. **No new `TODO` / `FIXME` / `unimplemented!()` / `todo!()`** introduced.
+12. The change either moves a north-star axis with measured evidence
+    against a named test, or is honestly declared as plumbing (#1).
 
 ### Auto-`REVISE` triggers (no thinking required):
 
 - A new metric label that takes a user-controlled value (key, lease ID,
-  user ID, etc.).
+  user ID, session ID, prefix, etc.).
 - `.unwrap()` / `.expect()` / `panic!()` / `todo!()` / `unimplemented!()`
-  outside `#[cfg(test)]` (clippy enforces once Phase 0 lint config lands).
-- A new `unsafe` block without a `// SAFETY:` comment.
-- A `tokio::sync::Mutex` or `std::sync::Mutex` lock guard held across an
-  `.await`.
+  / `dbg!()` outside `#[cfg(test)]` (clippy enforces once Phase 0 lint
+  config lands).
+- A new `unsafe` block without a `// SAFETY:` comment, or growth of the
+  workspace `unsafe` count without an approving PR label.
+- A `tokio::sync::Mutex` or `std::sync::Mutex` or `std::sync::RwLock`
+  lock guard held across an `.await` (`clippy::await_holding_lock`).
+- New use of `std::sync::Mutex` / `std::sync::RwLock` in non-test code
+  (use `parking_lot` for sync, `tokio::sync` for async — neither
+  poisons, both are faster).
 - A new `Box<dyn Error>` in a public API.
 - A spawned task without a `JoinHandle` stored or a documented
   fire-and-forget justification.
 - A new `Arc<Mutex<T>>` without a one-line note explaining why a
-  redesign wasn't possible.
-- A bench-claiming PR without numbers, or with numbers from an unnamed
-  oracle.
+  redesign (channel, actor, single-owner) wasn't possible.
+- A new shared-state primitive (channel, lock, atomic) without a `loom`
+  test exhaustively exploring its interleavings.
+- A bench-claiming PR without numbers, with numbers from an unnamed
+  oracle, or with numbers that don't clear the relevant bar's threshold.
+- A claim against any north-star bar without naming the test that
+  verifies it.
+- A new dependency on `openssl-sys` (use `rustls`).
+- A non-constant-time comparison (`==` on `&[u8]`) in code touching
+  credentials, tokens, or hash chains (use the `subtle` crate).
+- A new `pub` symbol without a doctest.
 
 ### `APPROVE_WITH_NITS` is for:
 
@@ -245,7 +518,13 @@ hardening, the bench oracle harness, and a place to put proto definitions.
 
 - [x] Set up CI (GitHub Actions): `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test --workspace`, on push and PR
 - [ ] Add `rustfmt.toml` and `.editorconfig` so formatting is unambiguous
-- [ ] **Lint hardening**: workspace `Cargo.toml` denies `clippy::unwrap_used`, `clippy::expect_used`, `clippy::panic`, `clippy::unimplemented`, `clippy::todo`, `clippy::indexing_slicing`, `clippy::arithmetic_side_effects`, `clippy::cast_possible_truncation`, `clippy::cast_sign_loss`, `clippy::dbg_macro`, `clippy::print_stdout`, `clippy::print_stderr`, `clippy::await_holding_lock` in non-test code (`#[cfg(not(test))]`); allow them in tests. This is what operationalizes the north-star "no panics in steady state" bar.
+- [ ] **Lint hardening**: workspace `Cargo.toml` denies `clippy::unwrap_used`, `clippy::expect_used`, `clippy::panic`, `clippy::unimplemented`, `clippy::todo`, `clippy::indexing_slicing`, `clippy::arithmetic_side_effects`, `clippy::cast_possible_truncation`, `clippy::cast_sign_loss`, `clippy::dbg_macro`, `clippy::print_stdout`, `clippy::print_stderr`, `clippy::await_holding_lock` in non-test code (via the `[workspace.lints.clippy]` table + `#[cfg_attr(test, allow(...))]` at test boundaries); allow them in tests. Operationalizes the north-star "no panics in steady state" bar.
+- [ ] **Concurrency-primitive ban**: workspace clippy custom config + `cargo-deny` advisory bans **all use of `std::sync::Mutex` and `std::sync::RwLock` in non-test code**. Use `parking_lot` (sync, no poisoning, faster) or `tokio::sync` (async-aware, no poisoning). Mechanically enforced via clippy custom-lint or a CI grep test against `std::sync::(Mutex|RwLock)` in `pub` modules.
+- [ ] **`loom` as a workspace dev-dependency**: every crate that introduces a shared-state primitive (channel, lock, atomic) ships at least one `loom`-based model-checking test under `tests/loom/`. CI runs `cargo test --features loom-test --release` (cfg-gated so it only builds under the feature) on push and PR; `loom` exhaustively explores interleavings up to a configurable depth.
+- [ ] **Test watchdog**: `tests/watchdog.rs` wraps every `#[test]` with a per-test timeout; any test exceeding 10× its previously-recorded baseline duration is failed by CI as a likely deadlock or livelock. Baselines stored in `tests/watchdog-baselines.json` and updated in the same PR that legitimately makes a test slower.
+- [ ] **Miri CI workflow** at `.github/workflows/miri.yml`: nightly Miri run across the curated subset of tests touching `unsafe` / pointer arithmetic; fails on any UB. Per PR: Miri runs only on changed crates that contain `unsafe` blocks. Per release: Miri runs on the full curated subset.
+- [ ] **Workspace `unsafe`-count tracker**: a CI step counts `unsafe` blocks across the workspace (via `rg -c '\bunsafe\s*\{'`) and fails if the count grows without an approving `unsafe-growth-approved` PR label. Forces every new `unsafe` block to be reviewed deliberately.
+- [ ] **Constant-time comparison enforcement**: `subtle` is the workspace's blessed constant-time-comparison crate; a CI custom test rejects `==` on `&[u8]` in any module under `crates/*/src/**/auth*`, `**/crypto*`, `**/token*`, `**/hash_chain*`. Operationalizes the north-star Security side-channel bar.
 - [ ] **Release-profile overflow checks**: `[profile.release] overflow-checks = true` in workspace `Cargo.toml`. Catches arithmetic panics in production, not just debug. Documented trade-off (~1-3% perf hit) accepted.
 - [ ] Add `deny.toml` and a `cargo-deny` CI job (license + advisory + duplicate-version checks; ban `git`-deps without explicit allowlist)
 - [ ] Add `cargo-audit` CI job (RustSec advisories) running on push, PR, and a nightly schedule; failures block merge
@@ -275,6 +554,8 @@ phase 2.
 - [ ] Property tests: random put/get/delete/range sequences match an in-memory `BTreeMap` oracle (proptest, 10k+ cases)
 - [ ] Crash-recovery test: kill mid-write via a panic, reopen, assert no torn state and no committed data lost
 - [ ] Crash-recovery test under simulated fsync failure (return `EIO`) — backend either commits cleanly or reports failure; no silent data loss
+- [ ] **Disk-full reliability test** `tests/reliability/disk_full.rs`: fill the data dir to 100%, attempt a write; assert the server enters read-only mode, raises `NOSPACE`, never crashes, never corrupts; free space; assert the server recovers cleanly and accepts writes. Operationalizes Reliability bar #3.
+- [ ] **Disk-size bench** `benches/runner/disk-size.sh`: load `benches/workloads/storage.toml`'s standard workload into mango (default compression on) and into etcd (default compression off — both defaults). Compare on-disk size. **Mango ≤ 0.7× etcd's**, per the Storage-efficiency bar. Numbers in `benches/results/phase-1/disk-size.md`.
 - [ ] Bench harness in `benches/storage/`: write-throughput (1KB values, batched and unbatched), read-latency p50/p95/p99 (hot and cold cache), range-scan-throughput (100 / 10k / 100k keys), on-disk size after the workload in `benches/workloads/storage.toml`. Comparison oracle is the Go binary at `benches/oracles/bbolt/` on the hardware sig in `benches/runner/HARDWARE.md`. **Mango must win on at least one metric, lose on none. Numbers committed to `benches/results/phase-1/`.**
 - [ ] Block-level compression (LZ4 or zstd, configurable) — disabled by default for parity bench, enabled for the size-comparison number
 
@@ -338,7 +619,11 @@ the `rust-expert` decides at plan time. Wrap whatever we pick behind a
 - [ ] Network-partition tests in the simulator: 2/1 split, 1/1/1 split, leader isolation, asymmetric partitions, message reordering; assert no split-brain, no lost committed entries
 - [ ] Crash-recovery tests in the simulator: kill follower mid-replication, kill leader mid-commit, restart, cluster converges
 - [ ] **`cargo fuzz` target for WAL record decode** (per the Reviewer's contract: parser fuzz lives where the parser does). CI plumbing in Phase 15.
-- [ ] Bench in `benches/raft/`: 3-node cluster on local loopback, 1KB Put values, runner script `benches/runner/raft.sh` invoking `etcd-benchmark put --conns=100 --clients=1000 --total=100000 --val-size=1024` against the pinned etcd in `benches/oracles/etcd/` and the equivalent against mango on the hardware sig in `benches/runner/HARDWARE.md`. **Mango beats etcd by ≥ 1.5× on throughput and ≤ 0.7× on p99 commit latency, and recovers from a `SIGKILL`'d leader in ≤ 0.7× of etcd's recovery time.** Numbers committed to `benches/results/phase-5/raft.md`.
+- [ ] Bench in `benches/raft/`: 3-node cluster on local loopback, 1KB Put values, runner script `benches/runner/raft.sh` invoking `etcd-benchmark put --conns=100 --clients=1000 --total=100000 --val-size=1024` against the pinned etcd in `benches/oracles/etcd/` and the equivalent against mango on the hardware sig in `benches/runner/HARDWARE.md`. **Mango beats etcd by ≥ 1.5× on throughput and ≤ 0.7× on p99 commit latency.** Numbers committed to `benches/results/phase-5/raft.md`.
+- [ ] **Failover bench** `benches/runner/failover.sh`: 3-node cluster under sustained 1KB Put load; `SIGKILL` the leader; measure wall-clock time until the cluster accepts a quorum-write again. **Mango's failover time ≤ 0.7× etcd's** under identical conditions. Numbers committed to `benches/results/phase-5/failover.md`. Operationalizes the Performance "leader-failover-to-quorum-write" bar.
+- [ ] **Cluster-size scaling bench** `benches/runner/cluster-size.sh`: same workload as `raft.sh` but across {3, 5, 7} voters; document throughput delta vs cluster size and compare to etcd. Operationalizes the Large-scale-distributed bar #1. Numbers in `benches/results/phase-5/cluster-size.md`.
+- [ ] **`loom` test for the Raft state-machine apply path** in `crates/mango-raft/tests/loom/apply_path.rs`: model the leader / follower / state-machine triple under concurrent message arrival + apply + snapshot, exhaustively check no committed entry is dropped or applied twice. Operationalizes the Concurrency "zero deadlocks" bar for the highest-stakes shared-state primitive in the codebase.
+- [ ] **Reliability test** `tests/reliability/follower_catchup.rs` + supporting `benches/runner/follower-restart.sh`: 10M-revision cluster, kill a follower, restart, measure leader's egress bandwidth and time-to-rejoin-quorum. Asserts: ≤ 1.2× steady-state network ingress on the leader for ≤ 30s. Operationalizes Reliability bar #1.
 
 ## Phase 6 — gRPC server: KV + Watch + Lease
 
@@ -357,6 +642,11 @@ is the binary you actually run.
 - [ ] **`cargo fuzz` targets for**: every `.proto` decode path, the config TOML parser, and gRPC request-body decoders (per Reviewer's contract — fuzz lives where the parser does; CI plumbing in Phase 15).
 - [ ] Integration tests: spin up a 3-node mango cluster in-process, run KV + Watch + Lease scenarios end-to-end
 - [ ] End-to-end bench at the gRPC boundary, runner script `benches/runner/grpc.sh`: 3-node cluster on hardware sig in `benches/runner/HARDWARE.md`, real client (mango-client and `etcd-benchmark put` against etcd v3.5.x in `benches/oracles/etcd/`), 1KB Put at saturation. **Beats etcd by ≥ 1.5× on throughput and ≤ 0.7× on p99 latency at 50% of saturation.** Numbers committed to `benches/results/phase-6/grpc.md`.
+- [ ] **Idle RSS bench** `benches/runner/idle-rss.sh`: 3-node cluster, empty data dir, no traffic for 60s; record RSS via `/proc/self/status` and compare to etcd's same setup. **Mango's RSS ≤ 0.7× etcd's**, per the Performance bar. Numbers in `benches/results/phase-6/idle-rss.md`.
+- [ ] **Cold-start bench** `benches/runner/cold-start.sh`: process exec → first successful Put accepted by the cluster, measured wall-clock; compared to etcd's same setup. **Mango's cold start ≤ 0.7× etcd's**, per the Performance bar. Numbers in `benches/results/phase-6/cold-start.md`.
+- [ ] **Per-core scaling bench** `benches/runner/per-core-scaling.sh`: single-node cluster, sweep `tokio` worker-thread count 1..N where N = host core count, measure 1KB Put throughput at each step. **Throughput at 16 cores ≥ 12× throughput at 1 core**, per the Concurrency bar. Compares to etcd at the same `GOMAXPROCS` settings; numbers in `benches/results/phase-6/per-core-scaling.md`. Demonstrates that mango's no-GC + structured concurrency translates into actual hardware utilization.
+- [ ] **Slow-loris and oversized-frame DoS tests** `tests/dos/slow_loris.rs` + `tests/dos/oversized_frames.rs` + `tests/dos/grpc_hostile_client.rs`: misbehaving-client harness that opens many slow connections, sends oversized HTTP/2 frames, opens then abandons streams. Asserts: server RSS bounded, p99 latency for legitimate clients unchanged, all hostile connections rejected with the documented status code. Operationalizes the Reliability "slow client cannot stall the server" bar.
+- [ ] **Config-validation test** `tests/config/check_config.rs`: corpus of malformed configs (unknown keys, type mismatches, mutually-exclusive flags); each entry asserts `mango --check-config` exits non-zero with the expected diagnostic. Operationalizes the Operability `--check-config` bar.
 
 ## Phase 7 — `mangoctl` CLI client
 
@@ -372,6 +662,7 @@ User-facing CLI mirroring `etcdctl`'s ergonomics: `put`, `get`, `del`,
 - [ ] `lease` subcommand group
 - [ ] `endpoint status`, `endpoint health`
 - [ ] Integration tests against an in-process cluster: every subcommand exercised
+- [ ] **No-proto-leakage test** `tests/api/no_proto_leakage.rs`: extract `mango-client`'s public API surface via `cargo public-api` or `rustdoc-json` and assert zero `prost::*` / `tonic::*` types appear. Operationalizes the Developer-ergonomics bar.
 
 ## Phase 7.5 — Web UI (read-only browse mode)
 
@@ -458,6 +749,7 @@ member metadata.
 - [ ] `Cluster` gRPC service: member list/add/remove/promote/update
 - [ ] `mangoctl member` subcommand group including `member add --learner` and `member promote`
 - [ ] Tests: 3-node cluster + add learner, learner catches up, promote, remove old member, no quorum lost
+- [ ] **No-leader-flap test** `tests/reliability/membership_change.rs`: healthy 3-node cluster, run a 1-member-add-then-promote cycle under sustained Put load; assert zero leader changes during the cycle. Operationalizes Reliability bar #2.
 
 ## Phase 10 — Snapshot, backup, defrag, maintenance
 
@@ -491,6 +783,9 @@ correct from day one.
 - [ ] Sample Grafana dashboard JSON committed to `dashboards/`, with a "mango vs etcd" comparison panel using the bench harness output
 - [ ] **Continuous benchmark CI job**: every merge to `main` runs the Phase 5 / Phase 6 benches and uploads to a tracked baseline; regressions fail the next PR's CI
 - [ ] Tests: hit the server, scrape `/metrics`, assert expected metric families exist with expected labels and bounded cardinality
+- [ ] **Metric-cardinality test** `tests/observability/metric_cardinality.rs`: drive a 10k-key workload, scrape `/metrics`, assert each family's distinct label-value count stays below the bound declared in `docs/metrics.md`. Operationalizes the Operability cardinality bar.
+- [ ] **Log-targets test** `tests/observability/log_targets.rs`: capture tracing output during a representative workload, assert every emitted span uses one of the documented `mango.*` target names (no default Rust module paths leaking through). Operationalizes the Operability stable-target-names bar.
+- [ ] **CI duration-budget workflow** `.github/workflows/ci-duration-budget.yml`: collects job durations from the last N main-branch CI runs; fails the next PR if the rolling average cold time exceeds 5 min or warm time exceeds 90s. Operationalizes the Developer-ergonomics CI-time bar.
 
 ## Phase 12 — Release engineering
 
@@ -553,6 +848,8 @@ optimizes against the integrated workload.
 - [ ] **NUMA awareness** for multi-socket boxes (pin Raft tick / apply / serve threads sensibly)
 - [ ] **Adaptive batching**: batch sizes auto-tune to maintain target p99 latency under varying load (etcd's batching is static)
 - [ ] **Bounded-staleness follower reads** — **per-RPC opt-in only, never default**. Client passes `MaxStaleness(d)` on a `Range` request; the follower refuses to serve if its applied-index lag exceeds the bound, and the response carries the actual staleness measured at serve time. Documented as a *weakening of linearizability* in `docs/consistency.md`; explicit warning that operators must NOT enable it globally for systems (Kubernetes, controllers) that depend on linearizable etcd reads. Etcd has no first-class equivalent; this is a real differentiator if shipped responsibly.
+- [ ] **Large-dataset bench** `benches/runner/large-dataset.sh`: load 8 GB / ≥ 100M revisions; measure range-query latency, compaction wall-clock, snapshot wall-clock, defrag wall-clock. Compare to etcd at the same dataset size. Operationalizes Large-scale-distributed bar #3. Numbers in `benches/results/phase-14/large-dataset.md`.
+- [ ] **Watcher-scale bench** `benches/runner/watcher-scale.sh`: open 100k concurrent watchers on a single server under a 1k-events/sec write workload. Assert: stable RSS, bounded CPU, p99 event-delivery latency ≤ 100ms. Operationalizes Large-scale-distributed bar #2. Numbers in `benches/results/phase-14/watcher-scale.md`.
 - [ ] Final integrated bench, runner script `benches/runner/ycsb.sh`: YCSB-A,B,C,D,E,F on a 3-node cluster against the pinned etcd in `benches/oracles/etcd/` on the hardware sig in `benches/runner/HARDWARE.md`. **Realistic acceptance bar: mango wins on YCSB-A (write-heavy) and YCSB-F (read-modify-write) throughput by ≥ 1.3×; ties or wins on YCSB-B/C/D/E throughput within ±10%; wins on p99 latency on at least 4 of the 6 workloads at 50% saturation.** The two workloads where mango may lose are documented with the structural reason in `benches/results/v0.1.0.md`. ("Wins on every workload" is fan-fic; etcd has been profiled by experts for a decade. We win where we have a structural edge — write-heavy paths via Rust + pipelined Raft + better storage engine — and we're honest about read-only point-lookups at small values, which favor bbolt's mmap'd B+tree.)
 
 ## Phase 15 — Hardening
@@ -563,12 +860,17 @@ assumptions are violated.
 
 - [ ] **CI plumbing for the per-phase fuzz targets** added in Phases 2 / 5 / 6 / 10 (MVCC key codec, WAL record decoder, `.proto` decoders, config TOML parser, gRPC body decoders, snapshot decoder): nightly job runs each for ≥ 30 minutes per seed across ≥ 10 seeds in parallel, with persistent corpora under `fuzz/corpus/<target>/`. Failures auto-file a GitHub issue with the seed and the crashing input. Optional OSS-Fuzz integration as a follow-up.
 - [ ] Audit pass: every state machine (Raft state transitions, lease state, MVCC visibility, watcher state) has property tests; backfill any phase that shipped without them (the Definition of Done says they're required, but this is the explicit verification step).
-- [ ] **Disk corruption detection**: every backend write is checksummed (XXH3 or BLAKE3); reads verify; mismatch raises `CORRUPT` alarm and refuses to serve stale-checksum pages
+- [ ] **Disk corruption detection** + named test `tests/security/disk_corruption.rs`: every backend write is checksummed (XXH3 or BLAKE3); reads verify; mismatch raises `CORRUPT` alarm and refuses to serve stale-checksum pages. Test injects bit-flips at various offsets and asserts every flip is detected.
 - [ ] **Anti-entropy**: periodic cross-replica HashKV check; mismatch raises `CORRUPT` alarm and pinpoints the diverging key range
-- [ ] **Memory profiling under load**: Massif / dhat profile, no leaks, RSS bounded under sustained load — ship a "running for 7 days at 5k writes/sec" stability report
-- [ ] **Chaos test in CI** (weekly): real cluster, real network, random faults via toxiproxy or equivalent; failures block the next release. Runs for ≥ 1 hour and fails on any panic from non-test code (this is what mechanically enforces the north-star "no panics in steady state" claim).
+- [ ] **Crypto zeroize-on-drop test** `tests/crypto/zeroize.rs`: assert every secret-bearing type uses `secrecy::Secret<T>` (or equivalent zeroizing wrapper); a Miri-backed test verifies the underlying bytes are zeroed when the wrapper is dropped. Operationalizes the Security cryptographic-correctness bar.
+- [ ] **Constant-time-comparison test** `tests/security/constant_time.rs`: for every `==` on `&[u8]` in `auth*` / `crypto*` / `token*` / `hash_chain*` modules, assert the underlying call goes through `subtle::ConstantTimeEq`. Statistical timing test: run 10k comparisons of varying-prefix-match inputs; the timing distribution must be indistinguishable (within noise floor) across prefix lengths. Operationalizes the Security side-channel bar.
+- [ ] **Single-node failure chaos test** `tests/chaos/single_node_failure.rs`: under sustained Put load, `SIGKILL` + `kernel_panic` (via `/proc/sysrq-trigger c` in a container) + `disk_yank` (unmount the data-dir filesystem) one node at a time; assert the cluster's recovery time to the same workload is ≤ 0.7× etcd's. Operationalizes Reliability bar #5.
+- [ ] **Disk-EIO chaos test** `tests/chaos/disk_eio.rs`: inject `EIO` on every syscall family the backend uses; assert no silent data loss, no panic, every error is reported through the typed error enum.
+- [ ] **Memory profiling under load**: Massif / dhat profile, no leaks, RSS bounded under sustained load — see the long-running chaos item below for the required duration.
+- [ ] **Long-running chaos test** `tests/chaos/long_running.rs`: real cluster, real network, random faults via toxiproxy or equivalent; runs for **≥ 7 days continuously** before each release (was 1 hour — bumped to match the Safety bar's "≥ 7 days continuously" claim). Fails on any panic from non-test code (mechanically enforces the north-star "no panics in steady state" claim). The shorter weekly CI job continues to run for ≥ 1 hour as a regression gate; the 7-day run is the release gate.
+- [ ] **Simulator panic-hook test** `tests/simulator/panic_hook.rs`: install a panic hook that captures the seed and stack on any panic from a non-test crate; the simulator's nightly fuzz job fails if any seed produces a panic. Operationalizes the Safety + Correctness panic-hook claims.
 - [ ] **Security review**: third-party (or at minimum, sensitive-data-auditor + security-reviewer subagents) review of the full surface before 1.0
-- [ ] **Threat model document** in `docs/security/threat-model.md` covering the trust boundaries (client ↔ server, peer ↔ peer, operator ↔ disk) and mitigations
+- [ ] **Threat model document** in `docs/security/threat-model.md` covering the trust boundaries (client ↔ server, peer ↔ peer, operator ↔ disk) and mitigations; every threat has a named mitigation and a named test (or an explicit "accepted risk" justification).
 
 ## Phase 16 — Web UI (editing core)
 
