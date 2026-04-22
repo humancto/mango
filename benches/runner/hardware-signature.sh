@@ -67,18 +67,26 @@ _field_cpu() {
 }
 
 _field_cpu_mhz_max() {
-    # Never emit an empty value — the canonical form requires every
-    # field to have a non-empty value so space-separated parsing
-    # stays unambiguous. Fall through lscpu -> /proc/cpuinfo -> 0.
-    # Azure VMs and many containers have lscpu but no "CPU max MHz".
+    # The max nominal clock, in MHz. MUST be stable across runs on the
+    # same host (this field is part of the signature's deterministic
+    # identity). We explicitly avoid `/proc/cpuinfo` "cpu MHz", which
+    # is the *current* cpufreq-governor reading and fluctuates.
+    #
+    # Sources, in order of preference:
+    #   Linux: lscpu "CPU max MHz", then /sys/.../cpuinfo_max_freq (kHz).
+    #   Darwin: sysctl hw.cpufrequency_max (Hz). Apple Silicon returns 0.
+    #   Fallback: 0. Azure-class VMs and many containers have no stable
+    #   max, and an honest 0 beats a jittery runtime value.
     local v=""
     case "$(uname -s)" in
         Linux)
             if command -v lscpu >/dev/null 2>&1; then
                 v=$(lscpu 2>/dev/null | awk -F': +' '/CPU max MHz/ { printf "%d", $2; exit }')
             fi
-            if [ -z "$v" ] && [ -r /proc/cpuinfo ]; then
-                v=$(awk -F': ' '/cpu MHz/ { printf "%d", $2; exit }' /proc/cpuinfo 2>/dev/null)
+            if [ -z "$v" ] && [ -r /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq ]; then
+                local khz
+                khz=$(cat /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq 2>/dev/null)
+                [ -n "$khz" ] && v=$(( khz / 1000 ))
             fi
             ;;
         Darwin)
