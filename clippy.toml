@@ -1,0 +1,19 @@
+# Workspace clippy config. Paired with [workspace.lints.clippy] in
+# Cargo.toml — `clippy.toml` supplies the *config* (the list), and
+# `[workspace.lints.clippy]` turns the `disallowed_types` lint on at
+# `deny`. Without both, the config is inert.
+#
+# Concurrency-primitive ban: std's Mutex/RwLock poison on panic-while-
+# held, forcing callers to .unwrap() or .expect() the PoisonError
+# (both banned elsewhere in the workspace lints). The replacement
+# choice is context-dependent — parking_lot::* in sync paths,
+# tokio::sync::* in async paths — so deliberately no `replacement`
+# field here; the reason text carries both alternatives and the
+# contributor picks based on context.
+#
+# (Both `clippy.toml` and `.clippy.toml` are picked up; this file
+# uses the non-dot form so it's visible in `ls` without `-a`.)
+disallowed-types = [
+    { path = "std::sync::Mutex", reason = "use parking_lot::Mutex (no poisoning, faster) or tokio::sync::Mutex (async-aware); both bypass std's poisoning footgun" },
+    { path = "std::sync::RwLock", reason = "use parking_lot::RwLock or tokio::sync::RwLock for the same reason" },
+]
