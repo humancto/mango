@@ -15,12 +15,13 @@ consistency model and scale ceiling match the problem you have.
 
 | | **Mango** | **etcd** | **FoundationDB** | **DynamoDB** |
 |---|---|---|---|---|
-| Consistency | Linearizable | Linearizable | Strict serializable | Eventual (default); strong reads opt-in (2× cost) |
+| Consistency | Linearizable | Linearizable | Strict serializable (stronger than linearizable) | Eventual (default); strong reads opt-in (2× cost) |
 | Replication | Raft, single cluster | Raft, single cluster | Multi-version, multi-shard | Hash-sharded, multi-region async |
-| Scale ceiling | ~1M ops/sec / cluster (Tier 2) | ~50-200K writes/sec / cluster | ~10M ops/sec / cluster | ~10-100M ops/sec / global service |
+| Scale ceiling (writes) | ~200K writes/sec / cluster (Tier 1) | ~50-200K writes/sec / cluster | ~10M ops/sec / cluster (mixed) | ~10-100M ops/sec / global service (mixed) |
+| Scale ceiling (reads) | ~1M reads/sec / cluster *(Tier 2 target — Phase 14.5)* | ~500K-1M reads/sec / cluster (ReadIndex) | (see above) | (see above) |
 | Deployment | Self-host, open source (Apache-2.0) | Self-host, open source (Apache-2.0) | Self-host, open source (Apache-2.0) | AWS-only hosted |
 | Primary use case | Cluster metadata, coordination, config, leader election | Same as mango | Application data with ACID at scale | Application data CRUD at hyperscale |
-| Operational profile | Single-binary, no JVM, no GC pauses | Single-binary, Go GC | Multi-process (coordinators, storage, log), more moving parts | Fully managed |
+| Operational profile | Single-binary, deterministic latency (no GC) | Single-binary, Go GC | Multi-process (coordinators, storage, log), more moving parts | Fully managed |
 
 **Mango is etcd-shaped, not DynamoDB-shaped.** It's for the workloads
 where you need *strong* consistency on a *self-hosted* cluster and want
