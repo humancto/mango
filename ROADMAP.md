@@ -36,7 +36,7 @@ Get the workspace into a state where every subsequent phase can move fast:
 deterministic builds, CI on every push, lints, formatting, and a place to
 put proto definitions.
 
-- [ ] Set up CI (GitHub Actions): `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test --workspace`, on push and PR
+- [x] Set up CI (GitHub Actions): `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test --workspace`, on push and PR
 - [ ] Add `rustfmt.toml` and `.editorconfig` so formatting is unambiguous
 - [ ] Add `deny.toml` and a `cargo-deny` CI job (license + advisory + duplicate-version checks)
 - [ ] Create `crates/mango-proto` skeleton with `tonic-build` and a hello-world `.proto` that compiles
