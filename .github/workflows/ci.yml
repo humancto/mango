@@ -1,0 +1,83 @@
+# Mango CI
+#
+# Three parallel jobs (fmt, clippy, test) run on every push to `main` and
+# every pull request. A red CI run blocks merge.
+#
+# Action refs are SHA-pinned per GitHub's third-party-action hardening
+# guidance; the human-readable tag is in the trailing comment. The Rust
+# toolchain itself floats on `stable` (no MSRV enforcement yet — that's
+# a tracked roadmap follow-up).
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# Cancel superseded PR runs but never cancel a `main` run mid-flight; if
+# two PRs merge back-to-back, both `main` runs must complete so required
+# status checks resolve correctly.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
+jobs:
+  fmt:
+    name: fmt
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          # Clippy and test do NOT share a cache scope — clippy doesn't
+          # fully codegen, test does, and sharing one `target/` cache
+          # silently invalidates work on every alternation.
+          prefix-key: v0-clippy
+          shared-key: ""
+      - name: cargo fetch
+        run: cargo fetch --locked
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  test:
+    name: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          prefix-key: v0-test
+          shared-key: ""
+      - name: cargo fetch
+        run: cargo fetch --locked
+      - name: cargo test
+        # `--no-fail-fast` here means "report all failing test binaries
+        # in one CI run" — it is unrelated to the matrix-strategy
+        # `fail-fast: false` knob, which doesn't apply (no matrix yet).
+        run: cargo test --workspace --all-targets --locked --no-fail-fast

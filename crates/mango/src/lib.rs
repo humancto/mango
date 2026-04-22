@@ -10,7 +10,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn version_is_set() {
-        assert!(!VERSION.is_empty());
+    fn version_matches_cargo_manifest() {
+        assert_eq!(VERSION, "0.1.0");
     }
 }
