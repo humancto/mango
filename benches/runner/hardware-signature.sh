@@ -67,22 +67,28 @@ _field_cpu() {
 }
 
 _field_cpu_mhz_max() {
+    # Never emit an empty value — the canonical form requires every
+    # field to have a non-empty value so space-separated parsing
+    # stays unambiguous. Fall through lscpu -> /proc/cpuinfo -> 0.
+    # Azure VMs and many containers have lscpu but no "CPU max MHz".
+    local v=""
     case "$(uname -s)" in
         Linux)
             if command -v lscpu >/dev/null 2>&1; then
-                lscpu 2>/dev/null | awk -F': +' '/CPU max MHz/ { printf "%d", $2; exit }' || echo 0
-            else
-                awk -F': ' '/cpu MHz/ { printf "%d", $2; exit }' /proc/cpuinfo 2>/dev/null || echo 0
+                v=$(lscpu 2>/dev/null | awk -F': +' '/CPU max MHz/ { printf "%d", $2; exit }')
+            fi
+            if [ -z "$v" ] && [ -r /proc/cpuinfo ]; then
+                v=$(awk -F': ' '/cpu MHz/ { printf "%d", $2; exit }' /proc/cpuinfo 2>/dev/null)
             fi
             ;;
         Darwin)
             local hz
             hz=$(sysctl -n hw.cpufrequency_max 2>/dev/null || echo 0)
-            # Apple Silicon doesn't export hw.cpufrequency_max (returns 0).
-            echo $(( hz / 1000000 ))
+            v=$(( hz / 1000000 ))
             ;;
-        *) echo 0 ;;
     esac
+    [ -z "$v" ] && v=0
+    printf '%s' "$v"
 }
 
 _field_ram_gb() {
