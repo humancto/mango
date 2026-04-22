@@ -260,7 +260,19 @@ named test are auto-`REVISE`.
      *Test:* `tests/security/constant_time.rs` (Phase 8 + 15).
 7. **Large-scale distributed.** Etcd is famously stretched at large
    cluster size (≥ 7 voters), large dataset (multi-GB), and large
-   watcher counts. We target the upper edges as first-class.
+   watcher counts. We target two scale tiers in v1.0: the single-Raft-
+   group Tier 1 that everything else in the roadmap delivers, and a
+   read-scale-out Tier 2 (Phase 14.5) that uses learner replicas +
+   client-side caching to deliver ≥ 1M ops/sec on read-heavy workloads
+   without changing the write path. Multi-shard "Tier 3" (the
+   FoundationDB / TiKV / Cockroach trick for ≥ 10M ops/sec) is **not
+   on the roadmap** — it's a separate, multi-year engineering project
+   that we'd only justify by real user demand after v1.0. See the
+   README's positioning table for where mango fits relative to etcd,
+   FoundationDB, and DynamoDB.
+
+   **Tier 1 — single-Raft-group, write-bounded by quorum** (the etcd
+   regime, plus Rust + better data structures):
    - **5-voter and 7-voter** clusters tested in CI with the same
      workload as 3-voter; throughput delta documented and bounded
      (Raft has fundamental quorum-size cost; we minimize it via
@@ -282,6 +294,24 @@ named test are auto-`REVISE`.
    - **Long-running stability**: 7-day continuous run at 5k writes/sec
      ships a stability report (Phase 15).
      *Test:* `tests/chaos/long_running.rs` (Phase 15).
+
+   **Tier 2 — read-scale-out within a single Raft group** (the lever
+   no etcd-shaped system has used; ships in Phase 14.5 pre-1.0):
+   - **5-voter + 5-learner cluster delivers ≥ 1M ops/sec** on an
+     80/20 read/write mix on the same hardware as `benches/runner/HARDWARE.md`.
+     The win comes from read-only learner replicas serving linearizable
+     reads via ReadIndex and bounded-staleness reads locally; writes
+     stay quorum-bound at Tier 1 ceilings.
+     *Test:* `benches/runner/read-scale-out.sh` (Phase 14.5).
+   - **Linear read-throughput scaling with learner count**: throughput
+     at N learners is ≥ 0.85 × N × (single-voter read throughput),
+     up to N = 10 learners. Validates that the routing + cache layers
+     don't bottleneck before the leader's ReadIndex serialization does.
+     *Test:* `benches/runner/learner-scale.sh` (Phase 14.5).
+   - **Hot-key client cache hit rate ≥ 90%** on the typical "watch one
+     key, read it repeatedly" pattern, with watch-driven invalidation
+     correctness verified by a property test.
+     *Test:* `tests/cache/watch_invalidation.rs` (Phase 14.5).
 8. **Operability.** Production-grade defaults; predictable behavior at
    the limits.
    - Every metric documented in `docs/metrics.md` with declared label
@@ -964,6 +994,54 @@ optimizes against the integrated workload.
 - [ ] **Large-dataset bench** `benches/runner/large-dataset.sh`: load 8 GB / ≥ 100M revisions; measure range-query latency, compaction wall-clock, snapshot wall-clock, defrag wall-clock. Compare to etcd at the same dataset size. Operationalizes Large-scale-distributed bar #3. Numbers in `benches/results/phase-14/large-dataset.md`.
 - [ ] **Watcher-scale bench** `benches/runner/watcher-scale.sh`: open 100k concurrent watchers on a single server under a 1k-events/sec write workload. Assert: stable RSS, bounded CPU, p99 event-delivery latency ≤ 100ms. Operationalizes Large-scale-distributed bar #2. Numbers in `benches/results/phase-14/watcher-scale.md`.
 - [ ] Final integrated bench, runner script `benches/runner/ycsb.sh`: YCSB-A,B,C,D,E,F on a 3-node cluster against the pinned etcd in `benches/oracles/etcd/` on the hardware sig in `benches/runner/HARDWARE.md`. **Realistic acceptance bar: mango wins on YCSB-A (write-heavy) and YCSB-F (read-modify-write) throughput by ≥ 1.3×; ties or wins on YCSB-B/C/D/E throughput within ±10%; wins on p99 latency on at least 4 of the 6 workloads at 50% saturation.** The two workloads where mango may lose are documented with the structural reason in `benches/results/v0.1.0.md`. ("Wins on every workload" is fan-fic; etcd has been profiled by experts for a decade. We win where we have a structural edge — write-heavy paths via Rust + pipelined Raft + better storage engine — and we're honest about read-only point-lookups at small values, which favor bbolt's mmap'd B+tree.)
+
+## Phase 14.5 — Read-scale-out (Tier 2)
+
+The single biggest scale lever an etcd-shaped system has not used.
+Single-Raft-group writes are bounded by quorum (~50-200K writes/sec
+ceiling — that's physics, not implementation). But **reads can be
+served from any replica that has caught up**, and most KV workloads
+are read-heavy (typical 80/20 or 90/10 read/write). This phase ships
+the Tier 2 north-star bars: a 5-voter + 5-learner cluster delivers
+≥ 1M ops/sec on an 80/20 mix, ~20× etcd's single-cluster ceiling, on
+the same hardware. Lands pre-1.0; v1.0 is the Tier 2 release.
+
+Sequenced after Phase 14 (perf push) so the underlying single-node
+hot-path optimizations are in place, and after Phase 9 (membership)
+so learner promotion / removal is real.
+
+### Read-only learner replicas as a first-class deployment mode
+
+- [ ] **`mango-server --role=read-replica`** joins the cluster as a non-voter that does not count toward quorum. Same Raft log replication as a learner (Phase 9), but the replica is configured to never be promoted to voter. Documented as the Tier 2 read-scale-out primitive.
+- [ ] **Linearizable reads on read-replicas via ReadIndex**: replica accepts `Range` requests, sends a ReadIndex request to the leader, waits for its applied-index ≥ leader's commit-index at the time of the request, then serves locally. Adds one round-trip to read latency vs leader-served reads, but distributes the read CPU + memory across N+1 nodes instead of 1. Per-RPC the client can request "linearizable" (default) or "bounded-staleness" (Phase 14 follower-reads).
+- [ ] **`mangoctl member add --read-replica`** and matching `mangoctl member promote-or-demote`. Demoting a voter to read-replica is a no-quorum-loss operation since the replica still serves. Promoting back to voter is the same code path as learner promotion.
+
+### Sharded in-memory key index (eliminate the read-path lock)
+
+- [ ] **Replace the single-mutex MVCC `KeyIndex`** with a sharded concurrent map (`dashmap` or hand-rolled `[Mutex<HashMap>; 64]` keyed by `xxhash(key) & 63`). The current single-mutex design is correct for Tier 1 single-node throughput but becomes the bottleneck on read-heavy multi-core workloads (the per-core scaling bar in Concurrency axis #2 falls apart without this).
+- [ ] `loom` test for the sharded key index in `crates/mango-mvcc/tests/loom/sharded_index.rs`: model concurrent put + range + compact across two shards; assert no torn reads, no missed compactions.
+- [ ] Bench: per-core-scaling on a read-heavy workload re-runs `benches/runner/per-core-scaling.sh --workload=read-only` after this lands; expect to clear the "≥ 14×" bar that the single-mutex design cannot meet.
+
+### Lock-free snapshot read path
+
+- [ ] **`arc-swap::ArcSwap<Snapshot>`** for the current MVCC snapshot. Readers grab an `Arc` to the latest snapshot atomically with a single `Acquire` load, no mutex, no atomic-fence past that. The MVCC apply loop swaps in a new `Arc<Snapshot>` after each batch; old `Arc`s drop when their last reader releases. Standard pattern in high-throughput read paths (used by `tracing-subscriber`, `quiche`, others).
+- [ ] Property test in `tests/properties/snapshot_consistency.rs`: under concurrent reads + writes, every reader sees a snapshot that is either "the snapshot at read-time" or "a snapshot that committed before read-time." No torn snapshots.
+
+### Recent-revision cache
+
+- [ ] **In-memory LRU of the last N revisions** (default N = 10K, configurable) in front of the backend, in the read path of `Range` and `Get`. Cache key is `(key, revision)`; cache value is the materialized response. Hit rate ≥ 80% on the typical "read-after-write" workload (clients reading their own recent writes).
+- [ ] Bench: cold-cache vs warm-cache p99 read latency, expected ≥ 5× speedup on the cache-hit path. Numbers in `benches/results/phase-14.5/recent-revision-cache.md`.
+
+### Client-side cache with watch-driven invalidation
+
+- [ ] **Typed `WatchedCache<K, V>` in `mango-client`**: holds a key (or range) locally; opens a Watch against the server; serves `Get` from the local cache, invalidating on watched events. The cache is consistent at the watched revision, not at "now" — this is documented as a relaxation operator can opt into.
+- [ ] **Property test** `tests/cache/watch_invalidation.rs`: under random put + delete + watch + get sequences, the cache's view of every key is either equal to the server's view or strictly behind by ≤ N events (where N is the per-watcher channel depth). No stale-positive (cache returns a value that was deleted), no stale-negative (cache returns "not found" for a value that exists at the cached revision).
+- [ ] Bench: 90% read / 10% write workload with `WatchedCache` for the read path; cache hit rate ≥ 90% on the hot key set; effective read throughput at the client is **≥ 10× direct-Range throughput** because most reads never hit the wire.
+
+### Acceptance: the Tier 2 north-star bar
+
+- [ ] **`benches/runner/read-scale-out.sh`**: 5-voter + 5-learner cluster on the canonical hardware, 80/20 read/write workload at 1KB values; **delivers ≥ 1M ops/sec sustained**, p99 latency ≤ 50 ms. Numbers in `benches/results/phase-14.5/read-scale-out.md`. Operationalizes Large-scale-distributed Tier 2 bar #1.
+- [ ] **`benches/runner/learner-scale.sh`**: same hardware, sweep learner count 1..10, measure read throughput at each step. **Throughput at N learners ≥ 0.85 × N × (single-voter read throughput).** Validates linear scaling. Numbers in `benches/results/phase-14.5/learner-scale.md`. Operationalizes Tier 2 bar #2.
 
 ## Phase 15 — Hardening
 
