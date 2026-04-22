@@ -1,0 +1,12 @@
+[package]
+name = "mango"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Mango — a Rust port of etcd. Placeholder crate; real crates land per ROADMAP.md."
+
+[lints]
+workspace = true
