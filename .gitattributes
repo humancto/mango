@@ -1,0 +1,26 @@
+# Normalize text files to LF at checkout and at commit, regardless of
+# contributor platform. Paired with `.editorconfig` (enforces at edit
+# time) and `rustfmt.toml` (enforces for .rs via `cargo fmt --check`).
+# Without this file, `.editorconfig` is advisory for non-Rust files —
+# a Windows contributor whose editor ignores EditorConfig can still
+# commit CRLF in .yml / .toml / .md, and CI wouldn't catch it because
+# the YAML / TOML / Markdown parsers in use don't care about line
+# endings.
+
+* text=auto eol=lf
+
+# Source and config files — explicit LF.
+*.rs   text eol=lf
+*.toml text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.md   text eol=lf
+
+# Binary assets — never normalized, never diffed.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.ico  binary
+*.webp binary
+*.pdf  binary
