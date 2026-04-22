@@ -1,0 +1,28 @@
+# benches/oracles/etcd/VERSIONS
+#
+# Pinned etcd oracle version and per-platform content hashes. This is
+# the source of truth for fetch.sh. Hashes are taken from the official
+# SHA256SUMS file at pin time (see ETCD_SHA256SUMS_SHA256 below for
+# defense-in-depth) — see README.md for the TOFU threat model.
+#
+# Shell-sourceable (KEY=VALUE, no quotes needed for hex).
+#
+# Extension suffix per platform (etcd convention):
+#   linux/*  → .tar.gz
+#   darwin/* → .zip
+#   windows/amd64 → .zip (not supported by this harness)
+
+ETCD_VERSION=v3.5.29
+
+# Tarball (linux) / zip (darwin) sha256.
+ETCD_SHA256_linux_amd64=7692f812db0bfeee3a731c45046864cf729e552bad82ce7cb5b507053d033267
+ETCD_SHA256_linux_arm64=10817d916de91fdab373947977682e083f0a1ac7f37650c1b690c2a746e4c269
+ETCD_SHA256_darwin_amd64=68ea4387a423e1c22766e8c0e959bdf3dc9d61f560df3e6eb02a52ff392ee065
+ETCD_SHA256_darwin_arm64=4b88183feaf7449abdddeb1ae21002917d32da851c717da0eaabe587f1c4e903
+
+# sha256 of the SHA256SUMS file itself at pin time. Defense in depth
+# against post-publication substitution: an attacker replacing just the
+# tarball would fail the per-platform sha check; replacing tarball +
+# SHA256SUMS would fail this hash; replacing both with content that
+# collides on both hashes is cryptographically infeasible.
+ETCD_SHA256SUMS_SHA256=9b7990400179fe94c647e32485fcd0468b5e0f0396d3b08fef23c3fbca530de4

@@ -138,3 +138,27 @@ jobs:
         with:
           command: check
           arguments: --all-features
+
+  bench-harness:
+    # Bench-harness scaffold smoke tests. No Rust toolchain, no cache —
+    # the scaffold is pure shell (etcd oracle fetch-and-verify, hardware
+    # signature emission, runner wrapper). See benches/README.md and
+    # .planning/adr/0001-bench-oracle-harness.md for the rationale.
+    #
+    # Advisory until main branch protection is enabled with this job
+    # in the required-checks list (tracked as a follow-up).
+    name: bench-harness
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - name: oracle fetch tests (VERSIONS coverage, verify_sha)
+        run: bash scripts/test-bench-oracle-fetch.sh
+      - name: hardware-signature tests (format, determinism, tier, round-trip)
+        run: bash scripts/test-hardware-signature.sh
+      - name: run.sh wrapper tests (stdout clean, sidecar, tier enforcement)
+        run: bash scripts/test-bench-run-wrapper.sh
+      - name: VERSIONS immutability
+        # Belt-and-suspenders: no test above should mutate the committed
+        # pin file. If one does, this diff catches it before merge.
+        run: git diff --exit-code benches/oracles/etcd/VERSIONS
