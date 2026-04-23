@@ -253,12 +253,21 @@ with worked examples: [`docs/arithmetic-policy.md`][arith].
 -D warnings` gates CI. Workspace lint table is in the workspace
   [`Cargo.toml`](./Cargo.toml); per-crate overrides in the local
   `clippy.toml`.
-- **Supply chain.** `cargo-deny` runs every PR against
-  [`deny.toml`](./deny.toml) (advisories, licenses, banned crates
-  including `openssl-sys`, duplicate-version policy). `cargo-audit`
-  runs on push, PR, and a nightly schedule. GitHub Actions are
-  SHA-pinned. Future additions tracked in Phase 0.5: `cargo-vet`,
-  SBOM via `cargo-cyclonedx`.
+- **Supply chain.** Three layered gates. `cargo-deny` runs every
+  PR against [`deny.toml`](./deny.toml) (advisories, licenses,
+  banned crates including `openssl-sys`, duplicate-version policy).
+  `cargo-audit` runs on push, PR, and a nightly schedule.
+  `cargo-vet` runs on every Cargo.toml / Cargo.lock / supply-chain/
+  change and enforces that every transitive dep has either a
+  first-party audit, a hit in an imported audit set (mozilla /
+  google / bytecode-alliance), or a TTL'd exemption in
+  [`supply-chain/config.toml`](./supply-chain/config.toml). The
+  exemption TTL is enforced by
+  [`crates/xtask-vet-ttl`](./crates/xtask-vet-ttl) (cargo-vet has
+  no native `end:` on `[[exemptions]]`). GitHub Actions are
+  SHA-pinned. Full policy:
+  [`docs/supply-chain-policy.md`](./docs/supply-chain-policy.md).
+  Future additions: SBOM via `cargo-cyclonedx`.
 - **MSRV.** Workspace MSRV is **1.80** (see
   `rust-version` in [`Cargo.toml`](./Cargo.toml) and the `msrv`
   CI job). MSRV bumps are deliberate, land in their own PR, and
@@ -361,6 +370,19 @@ self-test that proves the gate's own logic is sound:
 bash scripts/ct-comparison-check.sh              # scans scoped files, exits 0/1/2/3
 bash scripts/ct-comparison-check.sh --list-scope # debug: dump the scope set
 bash scripts/ct-comparison-scripts-test.sh       # 18 harness scenarios
+```
+
+Run the cargo-vet supply-chain gate locally after a dep bump — same
+gates that block PRs in `.github/workflows/vet.yml`. Full policy in
+[`docs/supply-chain-policy.md`](./docs/supply-chain-policy.md):
+
+```bash
+cargo install cargo-vet --version 0.10.2 --locked   # once; pin must match vet.yml
+bash scripts/vet-update.sh                          # refresh imports + run both gates
+cargo vet check --locked --frozen                   # audit-graph gate only
+cargo run -q -p xtask-vet-ttl                       # exemption review-by TTL gate only
+cargo run -q -p xtask-vet-ttl -- --list             # diagnostic listing of all tokens
+bash scripts/vet-scripts-test.sh                    # 8 harness scenarios
 ```
 
 Notes:

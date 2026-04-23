@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["crates/mango", "crates/mango-proto", "crates/mango-loom-demo"]
+members = [
+    "crates/mango",
+    "crates/mango-proto",
+    "crates/mango-loom-demo",
+    "crates/xtask-vet-ttl",
+]
 # tests/fixtures/geiger-toy-workspace is a self-contained workspace
 # used by scripts/geiger-scripts-test.sh as a real-cargo-geiger
 # oracle. Excluding it keeps Cargo from discovering its

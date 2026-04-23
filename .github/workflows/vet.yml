@@ -1,0 +1,105 @@
+# Mango cargo-vet supply-chain gate.
+#
+# Security: every `github.event.*` value flows through step-level
+# `env:` and is read as a shell variable — never interpolated into
+# `run:` blocks directly. Matches the geiger.yml / miri.yml /
+# ct-comparison.yml hardening precedent.
+#
+# Triggers: pull_request (path-filtered), push:main, merge_group,
+# nightly schedule (imports.lock can rotate externally), and
+# workflow_dispatch (manual re-run after vet-pin bumps).
+#
+# Two gates per run:
+#   1. `cargo vet check --locked --frozen` — any transitive dep
+#      must be audited (via imports or [[audits]]) or exempted.
+#   2. `cargo run -q -p xtask-vet-ttl` — enforces a review-by:
+#      YYYY-MM-DD token in every [[exemptions.<crate>]] notes
+#      string. cargo-vet has no native TTL for exemptions; this
+#      binary (crate from commit A) fills the gap.
+#
+# Version pin: CARGO_VET_VERSION env below is the single source of
+# truth. Different vet versions can accept/reject the same audit
+# graph differently; the pin is exact (not caret). Bump procedure
+# lives in docs/supply-chain-policy.md (commit D).
+
+name: vet
+
+on:
+  pull_request:
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - "supply-chain/**"
+      - "crates/xtask-vet-ttl/**"
+      - ".github/workflows/vet.yml"
+      - "scripts/vet-*.sh"
+  push:
+    branches: [main]
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - "supply-chain/**"
+      - "crates/xtask-vet-ttl/**"
+      - ".github/workflows/vet.yml"
+      - "scripts/vet-*.sh"
+  merge_group:
+  schedule:
+    - cron: "17 8 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'schedule' && 'schedule' || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_VET_VERSION: "0.10.2"
+
+jobs:
+  vet:
+    name: cargo-vet
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          fetch-depth: 0
+
+      - name: cache cargo-vet binary
+        id: cache-vet
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684  # v4
+        with:
+          path: ~/.cargo/bin/cargo-vet
+          key: cargo-vet-${{ env.CARGO_VET_VERSION }}-${{ runner.os }}-${{ runner.arch }}
+
+      - name: install cargo-vet
+        if: steps.cache-vet.outputs.cache-hit != 'true'
+        env:
+          CARGO_VET_VERSION: ${{ env.CARGO_VET_VERSION }}
+        run: |
+          set -euo pipefail
+          cargo install cargo-vet --version "${CARGO_VET_VERSION}" --locked
+
+      - name: vet version sanity
+        env:
+          CARGO_VET_VERSION: ${{ env.CARGO_VET_VERSION }}
+        run: |
+          set -euo pipefail
+          got="$(cargo vet --version | awk '{print $2}')"
+          if [ "$got" != "${CARGO_VET_VERSION}" ]; then
+              echo "error: cargo-vet version mismatch (want ${CARGO_VET_VERSION}, got ${got})" >&2
+              exit 1
+          fi
+
+      - name: vet scripts self-test
+        run: bash scripts/vet-scripts-test.sh
+
+      - name: cargo vet check
+        run: cargo vet check --locked --frozen
+
+      - name: xtask-vet-ttl (exemption review-by gate)
+        run: cargo run -q -p xtask-vet-ttl
