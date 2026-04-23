@@ -32,7 +32,7 @@ Reviewer's Contract:
 - [ ] **Unsafe** (#5) — paths: <...>.
       `// SAFETY:` on every block: yes
       Miri: `MIRIFLAGS=-Zmiri-strict-provenance cargo +nightly miri
-      test -p <crate>` — <output / FFI-no-Miri justification>
+    test -p <crate>` — <output / FFI-no-Miri justification>
       Workspace `unsafe` count delta: <+N / 0>;
       `unsafe`-growth PR label applied if +N > 0
 - [ ] **Security** (#6) — axis #N / bar `<name>`.
@@ -51,7 +51,8 @@ Reviewer's Contract:
       applies.
       Doctest: yes
       `#[must_use]` considered: yes
-      `#[non_exhaustive]` on new enums: yes
+      `#[non_exhaustive]` on new enums: yes (or per-enum escape per
+      `docs/api-stability.md`)
       `cargo public-api --diff`: <output, advisory pre-Phase-6, gating
       from Phase 6>
       `cargo-semver-checks`: <status, gating from Phase 6>

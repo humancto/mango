@@ -95,12 +95,24 @@ process:
    in the PR body.
 4. Verify locally with the "Validating MSRV locally" command
    above, substituting the new toolchain version.
-5. rust-expert adversarial review.
-6. Merge.
+5. **When bumping to 1.81 or later**, migrate every `// reason:`
+   line-comment preceding `#[allow(clippy::exhaustive_enums)]` to
+   the inline `#[allow(clippy::exhaustive_enums, reason = "...")]`
+   form. The line-comment convention is a MSRV-1.80 workaround
+   (the attribute's `reason = ...` field stabilized in 1.81);
+   dropping it keeps the rationale attached to the attribute
+   rather than on a preceding line where refactors can separate
+   them. See [`docs/api-stability.md`](api-stability.md)
+   §"How to add a per-enum exception at MSRV 1.80" and update
+   `scripts/non-exhaustive-check.sh`'s awk state machine in the
+   same PR.
+6. rust-expert adversarial review.
+7. Merge.
 
 ### Ecosystem floors to be aware of
 
 Current dep graph on the Linux target:
+
 - `wit-bindgen 0.49` (last edition2021 version before 0.57) requires Rust **1.82**.
 - `wasip2 1.0.3` declares `rust-version = "1.87"` (only enforced on
   wasi targets — not a Linux constraint today).
