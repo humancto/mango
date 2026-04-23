@@ -79,15 +79,19 @@ chaos budgets — reviewers want to see the first failure fast.
 ## Watchdog enforcement — how it works
 
 `slow-timeout` alone is just a warning. `terminate-after = N`
-multiplies the period by `N` and sends SIGTERM at the resulting
-moment. Example from our config:
+turns the same field into a kill: nextest sends SIGTERM when the
+test has been slow for `N` consecutive periods. Example from our
+config:
 
 ```toml
 slow-timeout = { period = "30s", terminate-after = 1 }
 ```
 
-→ nextest warns at 30s, SIGTERMs at 60s (period * (1+1)), and
-records the test as `TIMEOUT` (exit code non-zero).
+→ nextest records the test as slow at 30s AND sends SIGTERM at
+30s (`terminate-after = 1` fires on the first period), marks the
+test as `TIMEOUT`, and exits non-zero. Empirically verified
+against cargo-nextest 0.9.133: the watchdog smoke is killed at
+~30.003s (see `scripts/test-watchdog.sh`).
 
 That last sentence is the load-bearing invariant. If anyone
 removes `terminate-after`, the watchdog downgrades to warn-only.

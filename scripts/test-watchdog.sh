@@ -17,8 +17,8 @@
 #   4. Assert the run completed in ~30s (not 90s) — i.e., the test
 #      was actually killed, not allowed to finish.
 #
-# Runs in < 35 seconds. Gated in CI as an advisory job; promote to
-# required once main branch protection is updated. See
+# Runs in < 35 seconds. Invoked inline from the required `test`
+# CI job — if this script fails, the PR is blocked. See
 # `.github/workflows/ci.yml` and docs/testing.md.
 
 set -euo pipefail
