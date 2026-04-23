@@ -7,7 +7,15 @@
 //! It is **not** wire-stable and will be deleted when the first
 //! real `mango.*.v1` proto lands.
 
+#![deny(missing_docs)]
+
+/// Namespace root for `mango.hello.*` protobuf services. Phase-0
+/// smoke surface only; real versioned namespaces (`mango.kv.v1`,
+/// `mango.raft.v1`, …) land in Phase 6+.
 pub mod hello {
+    /// Version 0 of the hello service. `v0` is a pipeline smoke
+    /// test, NOT a wire-stable surface — it will be deleted when
+    /// the first real `mango.*.v1` service lands.
     pub mod v0 {
         // Generated code is foreign — we do not own the style. Every
         // workspace-denied lint that prost's expansion could plausibly
@@ -18,6 +26,14 @@ pub mod hello {
         // priority-0 allow, so the individual denies MUST be listed
         // explicitly — the group allows are kept only for
         // future-proofing against new lints in those groups.
+        //
+        // The `rustdoc::bare_urls` and `rustdoc::broken_intra_doc_links`
+        // allows guard against future prost-build versions embedding
+        // `.proto` comment URLs or cross-references. The outer
+        // `-D warnings` in the doc gate does NOT silence those two
+        // from inside this module without the explicit allow — a
+        // dep bump would otherwise red the `doc` job with no source
+        // change from us.
         #![allow(
             clippy::all,
             clippy::pedantic,
@@ -39,7 +55,9 @@ pub mod hello {
             clippy::await_holding_lock,
             clippy::await_holding_refcell_ref,
             unreachable_pub,
-            missing_docs
+            missing_docs,
+            rustdoc::bare_urls,
+            rustdoc::broken_intra_doc_links
         )]
         include!(concat!(env!("OUT_DIR"), "/mango.hello.v0.rs"));
     }

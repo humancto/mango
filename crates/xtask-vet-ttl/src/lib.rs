@@ -7,6 +7,13 @@
 // free-form rationale in `notes`, and we only pluck the ISO-8601 date
 // that follows a `review-by:` label.
 
+// Internal supply-chain helper; `publish = false`. Deliberately outside
+// the `crates/mango-*` missing_docs gate per docs/documentation-policy.md
+// — but declared allowed explicitly so a future `rustc` default flip
+// from `allow` to `warn` for `missing_docs` cannot retroactively red
+// the `doc` CI job. One line of cheap insurance.
+#![allow(missing_docs)]
+
 use std::fmt;
 
 use time::format_description::FormatItem;
