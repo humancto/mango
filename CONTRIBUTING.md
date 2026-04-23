@@ -196,7 +196,11 @@ with worked examples: [`docs/arithmetic-policy.md`][arith].
   `clippy::disallowed_types`; see [`clippy.toml`](./clippy.toml).
   Neither `parking_lot` nor `tokio::sync` poisons on panic, and
   neither holds its guard across `.await` (enforced by
-  `clippy::await_holding_lock`).
+  `clippy::await_holding_lock`). Any custom shared-state primitive
+  (atomic-based counter, lock-free queue, handwritten guard) must
+  ship with a `loom` model that exercises its ordering invariants;
+  see [`docs/loom.md`](./docs/loom.md) and the template crate
+  [`crates/mango-loom-demo`](./crates/mango-loom-demo/).
 - **Monotonic clock.** All protocol-relevant time math uses
   `std::time::Instant` (monotonic). `SystemTime` is only for
   human-facing display (logs, lease-TTL rendering). Full policy:
@@ -278,6 +282,16 @@ cargo deny check
 cargo audit
 rustup run 1.80 cargo check --workspace --all-targets --locked \
   --target x86_64-unknown-linux-gnu
+```
+
+Optional — run the loom model-checker suite locally. Not required on
+every PR, but mandatory for any PR that adds or modifies a
+shared-state primitive (see [`docs/loom.md`](./docs/loom.md)):
+
+```bash
+RUSTFLAGS="--cfg loom -C debug-assertions" \
+  LOOM_MAX_PREEMPTIONS=2 LOOM_MAX_BRANCHES=10000 \
+  cargo nextest run --profile ci --release -p mango-loom-demo
 ```
 
 Notes:

@@ -1,0 +1,63 @@
+[package]
+name = "mango-loom-demo"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Canonical loom-test template. Scaffolds the pattern Phase 3+ primitives copy. PEDAGOGICAL — not a dependency."
+publish = false
+
+# loom is a `cfg(loom)` dep, not a dev-dep. `src/lib.rs` references
+# `loom::thread` and `loom::sync::atomic::AtomicBool` directly under
+# `#[cfg(loom)]`, so loom must be linked into the library target, not
+# just tests/benches/examples. Dev-deps are scoped to non-lib targets
+# only, so they would compile the lib without `loom` in the crate
+# graph and fail on the `loom::...` paths. The tokio/crossbeam/bytes
+# idiom is a target-cfg dep gated on `cfg(loom)`:
+#   [target.'cfg(loom)'.dependencies]
+# The dep is only pulled in when `RUSTFLAGS="--cfg loom"` is set, so
+# default builds have zero loom overhead — same behavior as a
+# dev-dep for normal `cargo test`, correct behavior under `--cfg loom`.
+[target.'cfg(loom)'.dependencies]
+loom.workspace = true
+
+# Intentionally does NOT declare `[lints] workspace = true`.
+# Workspace policy sets `unsafe_code = "forbid"`, which `forbid`
+# semantics make non-overridable in any crate that inherits.
+# This demo crate needs unsafe for the cell shim and raw-pointer
+# dereferences in the spinlock guard, so it opts out of workspace
+# lint inheritance entirely and declares its own minimal policy
+# below. Workspace lints only apply to members with
+# `[lints] workspace = true`; omitting that line is the documented
+# escape hatch (Cargo reference, RFC 3389).
+#
+# Note: `missing_lints_inheritance` is a nightly-only Cargo lint
+# (gated on `-Zcargo-lints`, landed in cargo 1.95 Feb 2026) that
+# would flag non-inheriting crates. Our stable toolchain does not
+# emit it, so no `[lints.cargo]` allow is needed. Revisit if we
+# ever adopt `-Zcargo-lints` in CI.
+
+[lints.rust]
+unsafe_code = "allow"
+unreachable_pub = "warn"
+# `--cfg loom` is the ecosystem-standard activation mechanism
+# (see docs/loom.md). Declare the cfg here so rustc's
+# unexpected_cfgs lint doesn't warn on every `#[cfg(loom)]` /
+# `#[cfg(not(loom))]` gate under the default build.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# Preserve hardening where reasonable — the demo still
+# shouldn't panic, slice-index blindly, or use unwrap/expect
+# outside tests.
+unwrap_used = { level = "deny", priority = 1 }
+expect_used = { level = "deny", priority = 1 }
+panic = { level = "deny", priority = 1 }
+unimplemented = { level = "deny", priority = 1 }
+todo = { level = "deny", priority = 1 }
+indexing_slicing = { level = "deny", priority = 1 }
+dbg_macro = { level = "deny", priority = 1 }

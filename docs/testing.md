@@ -27,12 +27,12 @@ test is [`scripts/test-watchdog.sh`](../scripts/test-watchdog.sh).
 
 ## Test classes and budgets
 
-| Class | Selector | Budget | Used for |
-|-------|----------|--------|----------|
-| `unit` | default (unclassified) | 30s | `#[cfg(test)] mod tests` in `src/`, pure function tests, codec round-trips |
-| `integration` | `kind(test)` | 5 min | `tests/*.rs` at each crate root; multi-module exercises |
-| `loom` | `test(~loom)` | 30 min | Concurrency model checking (Phase 5+) |
-| `chaos` | `test(~chaos)` | 24 h | Fault injection / crash-only recovery (Phase 14.5+) |
+| Class         | Selector               | Budget | Used for                                                                                         |
+| ------------- | ---------------------- | ------ | ------------------------------------------------------------------------------------------------ |
+| `unit`        | default (unclassified) | 30s    | `#[cfg(test)] mod tests` in `src/`, pure function tests, codec round-trips                       |
+| `integration` | `kind(test)`           | 5 min  | `tests/*.rs` at each crate root; multi-module exercises                                          |
+| `loom`        | `test(~loom)`          | 30 min | Concurrency model checking (see [`docs/loom.md`](loom.md); template in `crates/mango-loom-demo`) |
+| `chaos`       | `test(~chaos)`         | 24 h   | Fault injection / crash-only recovery (Phase 14.5+)                                              |
 
 The filter expressions live in
 [`.config/nextest.toml`](../.config/nextest.toml) under
