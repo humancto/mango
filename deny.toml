@@ -55,7 +55,13 @@ confidence-threshold = 0.93
 yanked = "deny"
 unmaintained = "all"
 unsound = "all"
-ignore = []
+# Every ignore entry MUST state its re-audit trigger in the reason
+# text (cargo-deny 0.19.x only accepts `id` + `reason` — no
+# structured expiration). Stale entries are a bug; grep this file
+# at every MSRV bump and crate major-version review.
+ignore = [
+    { id = "RUSTSEC-2026-0009", reason = "time 0.3.41 DoS via RFC 2822 parsing stack exhaustion. Patched in 0.3.47 (rustc 1.88); every 0.3.x >= 0.3.42 requires rustc >= 1.81 and workspace MSRV is 1.80, so the fix is unreachable without a policy bump. Usage audit: xtask-vet-ttl (only consumer) uses time for compile-time format_description!, ISO-8601 Date parsing from repo-controlled supply-chain/config.toml, and OffsetDateTime::now_utc() — no RFC 2822 parsing, no untrusted input. Re-audit trigger: next workspace MSRV bump (target re-audit by 2026-10-23). See .planning/ci-hotfix-msrv-time.plan.md." },
+]
 
 [bans]
 multiple-versions = "deny"
