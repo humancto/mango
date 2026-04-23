@@ -1,0 +1,70 @@
+# Mango dependabot-selftest workflow
+#
+# Runs `scripts/dependabot-scripts-test.sh` on every PR and push that
+# touches the Dependabot config, its self-test script, the vendored
+# JSON Schema, the policy doc, or this workflow. The self-test
+# asserts the structural invariants Dependabot's runtime + mango's
+# SHA-pin policy depend on (see the script header for the full list).
+#
+# Why a dedicated workflow:
+#   - Narrow path filter keeps every other PR from paying the cost
+#     of installing `check-jsonschema`.
+#   - Matches the one-workflow-per-gate convention (geiger, madsim,
+#     miri, semver-checks, vet, etc.).
+#   - Independent status check for branch protection.
+#
+# Security: no `github.event.*` interpolation in `run:` blocks; all
+# inputs are static. Actions SHA-pinned per repo convention. The
+# only dynamic expression is `github.ref` in `concurrency.group`,
+# which GitHub sanitizes.
+#
+# In CI (`CI` env set by GitHub Actions), the self-test treats
+# missing validator tools as hard failures. Locally they skip with
+# an install hint — see scripts/dependabot-scripts-test.sh header.
+
+name: dependabot-selftest
+
+on:
+  pull_request:
+    paths:
+      - ".github/dependabot.yml"
+      - ".github/schemas/dependabot-2.0.json"
+      - ".github/schemas/README.md"
+      - ".github/workflows/dependabot-selftest.yml"
+      - "scripts/dependabot-scripts-test.sh"
+      - "docs/dependency-updates.md"
+      # Workflow uses: lines are covered by assertion #15; any
+      # workflow change should re-run the regex check.
+      - ".github/workflows/**"
+  push:
+    branches: [main]
+    paths:
+      - ".github/dependabot.yml"
+      - ".github/schemas/dependabot-2.0.json"
+      - ".github/schemas/README.md"
+      - ".github/workflows/dependabot-selftest.yml"
+      - "scripts/dependabot-scripts-test.sh"
+      - "docs/dependency-updates.md"
+      - ".github/workflows/**"
+  merge_group:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  selftest:
+    name: selftest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - name: install check-jsonschema
+        # pipx ships in the ubuntu-24.04 runner image; `pipx install`
+        # places the binary on PATH for subsequent steps.
+        run: pipx install check-jsonschema
+      - name: run dependabot self-test
+        run: bash scripts/dependabot-scripts-test.sh

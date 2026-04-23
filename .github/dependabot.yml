@@ -1,0 +1,116 @@
+# Dependabot config for mango.
+#
+# Preserves the SHA-pin policy for GitHub Actions (all `uses:` lines
+# are 40-hex SHAs with a trailing `# <ref>` comment) and keeps the
+# workspace crate versions current. Every bump ships as a PR through
+# the normal expert-review + CI-gate loop — no auto-merge anywhere.
+#
+# Policy:     docs/dependency-updates.md
+# Self-test:  scripts/dependabot-scripts-test.sh
+# JSON Schema: .github/schemas/dependabot-2.0.json
+#
+# Re-run the self-test whenever this file changes.
+version: 2
+updates:
+  # ------------------------------------------------------------
+  # GitHub Actions
+  #
+  # Dependabot bumps the 40-hex SHA and (for actions that publish
+  # semver tags) the trailing `# vN` / `# vN.M.P` comment in lockstep.
+  # For branch-tracking actions (dtolnay/rust-toolchain → `# stable`),
+  # Dependabot updates the SHA and leaves the ref comment untouched —
+  # that is correct; the ref is still "stable." See
+  # docs/dependency-updates.md §"Trailing comments" for the policy.
+  # ------------------------------------------------------------
+  - package-ecosystem: github-actions
+    directory: "/"
+    target-branch: "main"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "14:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    rebase-strategy: auto
+    commit-message:
+      # Intentionally no `include: scope` — the prefix already
+      # carries the scope, and `include: scope` produces ugly
+      # `chore(actions)(deps): ...` doubled parens.
+      prefix: "chore(actions)"
+    labels:
+      - dependencies
+      - github-actions
+    groups:
+      github-actions-minor-patch:
+        patterns: ["*"]
+        update-types:
+          - minor
+          - patch
+      github-actions-major:
+        patterns: ["*"]
+        update-types:
+          - major
+
+  # ------------------------------------------------------------
+  # Cargo workspace
+  #
+  # `insecure-external-code-execution: deny` blocks dependency build
+  # scripts from running during version resolution — mandated by
+  # mango's supply-chain posture. cargo-deny / cargo-vet catch
+  # build-script-dependent issues on the resulting PR instead.
+  #
+  # `madsim-family` is load-bearing: `madsim` and `madsim-tokio`
+  # (manifest key `tokio` under the workspace package-rename at
+  # Cargo.toml:69) MUST be bumped together. Cargo.toml header says
+  # "move both lines together." Dependabot groups by manifest key,
+  # so we list `tokio` here even though the package name is
+  # `madsim-tokio`. Named groups are evaluated in declaration order
+  # — `madsim-family` claims its crates before the catch-all groups
+  # below see them; the catch-alls explicitly `exclude-patterns`
+  # the same three to avoid overlap.
+  # ------------------------------------------------------------
+  - package-ecosystem: cargo
+    directory: "/"
+    target-branch: "main"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "14:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    rebase-strategy: auto
+    insecure-external-code-execution: deny
+    commit-message:
+      prefix: "chore(deps)"
+    labels:
+      - dependencies
+      - rust
+    groups:
+      madsim-family:
+        patterns:
+          - "madsim"
+          - "madsim-*"
+          - "tokio"
+        update-types:
+          - patch
+          - minor
+          - major
+      cargo-minor-patch:
+        patterns:
+          - "*"
+        exclude-patterns:
+          - "madsim"
+          - "madsim-*"
+          - "tokio"
+        update-types:
+          - minor
+          - patch
+      cargo-major:
+        patterns:
+          - "*"
+        exclude-patterns:
+          - "madsim"
+          - "madsim-*"
+          - "tokio"
+        update-types:
+          - major
