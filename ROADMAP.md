@@ -801,7 +801,7 @@ Phase 6 PR that lands before Phase 0.5 is complete.
 - [x] Add a `cargo doc --no-deps --document-private-items` job with `RUSTDOCFLAGS=-D warnings` so broken doc links fail CI. Plus `#![deny(missing_docs)]` at every `crates/mango-*/src/lib.rs` root for public crates.
 - [x] Add `cargo-public-api` CI check **(advisory pre-Phase-6, gating from Phase 6 onwards)** — alongside `cargo-semver-checks` once Phase 6 ships.
 - [x] Add a Renovate / Dependabot config so action SHAs and crate versions get bumped via PR (preserves the SHA-pin policy without it rotting).
-- [ ] **`#[non_exhaustive]` policy on public enums**: documented in `docs/api-stability.md`; every `pub enum` in non-internal crates is `#[non_exhaustive]` unless a documented exception applies. Enforced by code review and (where possible) by a clippy custom lint or `cargo-public-api` check.
+- [x] **`#[non_exhaustive]` policy on public enums**: documented in `docs/api-stability.md`; every `pub enum` in non-internal crates is `#[non_exhaustive]` unless a documented exception applies. Enforced by code review and (where possible) by a clippy custom lint or `cargo-public-api` check.
 
 ## Phase 1 — Storage backend (single-node, no MVCC yet)
 
