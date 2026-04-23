@@ -101,15 +101,19 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
-
-      # MSRV toolchain — installed alongside stable so the MSRV
-      # compile-check below can invoke `cargo +1.80` via the rustup
-      # proxy. Pinned exactly to workspace.package.rust-version.
+      # MSRV toolchain installed FIRST so the final
+      # `dtolnay/rust-toolchain` call (stable, below) becomes the
+      # rustup default. If MSRV were installed last, default would
+      # flip to 1.80 and `cargo fetch --locked` would reject
+      # `wit-bindgen` (edition2024 unstable on 1.80). Same failure
+      # mode as Issue #23 / task #15. See
+      # .planning/msrv-wit-bindgen-fix.plan.md for the incident.
       - name: install MSRV toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
         with:
           toolchain: ${{ env.MSRV }}
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable (default toolchain)
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
         with:

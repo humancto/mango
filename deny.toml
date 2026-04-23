@@ -61,6 +61,7 @@ unsound = "all"
 # at every MSRV bump and crate major-version review.
 ignore = [
     { id = "RUSTSEC-2026-0009", reason = "time 0.3.41 DoS via RFC 2822 parsing stack exhaustion. Patched in 0.3.47 (rustc 1.88); every 0.3.x >= 0.3.42 requires rustc >= 1.81 and workspace MSRV is 1.80, so the fix is unreachable without a policy bump. Usage audit: xtask-vet-ttl (only consumer) uses time for compile-time format_description!, ISO-8601 Date parsing from repo-controlled supply-chain/config.toml, and OffsetDateTime::now_utc() — no RFC 2822 parsing, no untrusted input. Re-audit trigger: next workspace MSRV bump (target re-audit by 2026-10-23). See .planning/ci-hotfix-msrv-time.plan.md." },
+    { id = "RUSTSEC-2025-0141", reason = "bincode 1.3.3 formally unmaintained (the bincode team ceased development after a harassment incident; they consider 1.3.3 a complete version). Pulled in as a TRANSITIVE DEV-DEP of madsim 0.2.30 through mango-madsim-demo; not a runtime dep of any mango crate (sim scaffolding only). Blast radius: deterministic-simulator tests that serialize data the test itself controls — no untrusted input path. The advisory is informational (category `unmaintained`, no active CVE). Re-audit trigger: next madsim minor bump (0.3.x) — upstream may migrate to postcard/bitcode — or by 2026-10-23. See docs/madsim.md and .planning/0-5-3-madsim-dev-dep.plan.md." },
 ]
 
 [bans]
