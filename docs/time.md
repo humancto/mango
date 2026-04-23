@@ -72,6 +72,26 @@ benign upper-bound for a clock-skew correctness bug. Client TTL
 precision is bounded below by leadership-churn frequency, not by
 `Instant` resolution.
 
+#### Crash-only interaction
+
+The 2×TTL behavior above covers the **post-commit-crash** case:
+`L1` replicates the lease grant to a quorum, acks the client,
+then crashes; `L2` takes over and re-arms expiry from its own
+`Instant`. The lease is honored, possibly up to 2×TTL.
+
+There is also a **pre-commit-crash** case, which lives in
+[docs/architecture/crash-only.md](architecture/crash-only.md):
+`L1` appends the `LeaseGrant` log entry locally, crashes before
+it reaches a quorum. On failover the entry is either committed
+(new leader has it) or truncated (minority tail). If truncated,
+the client's `Grant` RPC fails with a retryable error (connection
+reset / `Unavailable`); the client re-grants. The invariant
+across both cases is: **a client never believes it holds a lease
+the cluster has forgotten.** Pre-commit-crash re-synchronizes
+belief via the error path; post-commit-crash honors the lease up
+to 2×TTL. Persisting wallclock expiry would "fix" neither and
+would break the time guarantees above.
+
 ### Lease TTL — wire and display split
 
 Wire: `ttl_seconds` as a `Duration`-shaped integer. Protocol.
