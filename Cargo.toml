@@ -1,6 +1,14 @@
 [workspace]
 resolver = "2"
-members = ["crates/mango", "crates/mango-proto"]
+members = ["crates/mango", "crates/mango-proto", "crates/mango-loom-demo"]
+
+# Exact-version pin for loom. Env-var semantics (LOOM_MAX_PREEMPTIONS,
+# LOOM_MAX_BRANCHES, etc.) and model behavior can drift between minor
+# versions; pinning exact prevents `cargo update` from silently
+# changing CI semantics. See docs/loom.md for the version-bump
+# procedure.
+[workspace.dependencies]
+loom = "=0.7.2"
 
 [workspace.package]
 version = "0.1.0"
