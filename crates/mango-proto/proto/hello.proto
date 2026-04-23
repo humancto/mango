@@ -1,0 +1,8 @@
+// DELETE: removed when the first real `mango.*.v1` proto lands (Phase 6).
+// This is Phase 0 skeleton only — it exists to exercise the tonic-build
+// pipeline under the workspace lint and MSRV regime. Not wire-stable.
+syntax = "proto3";
+package mango.hello.v0;
+
+message HelloRequest { string name = 1; }
+message HelloReply   { string message = 1; }
