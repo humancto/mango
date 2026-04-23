@@ -2,6 +2,21 @@
 resolver = "2"
 members = ["crates/mango", "crates/mango-proto", "crates/mango-loom-demo"]
 
+# Miri curated-subset opt-in (see docs/miri.md). Any crate that ships
+# `unsafe` (and therefore carries a `#![allow(unsafe_code)]` escape
+# from the workspace `unsafe_code = "forbid"` lint) MUST name itself
+# here in the same PR. `.github/workflows/miri.yml` reads this list
+# via `scripts/miri-crates.sh`. The workspace metadata table is
+# Cargo's documented escape hatch for project-local extensions; Cargo
+# does not validate the contents (typos land silently), so
+# `scripts/miri-scripts-test.sh` is the regression test for the
+# table shape.
+#
+# A follow-up dylint (tracked in GitHub issues) will reject any crate
+# with `#![allow(unsafe_code)]` that is missing from this list.
+[workspace.metadata.mango.miri]
+crates = ["mango-loom-demo"]
+
 # Exact-version pin for loom. Env-var semantics (LOOM_MAX_PREEMPTIONS,
 # LOOM_MAX_BRANCHES, etc.) and model behavior can drift between minor
 # versions; pinning exact prevents `cargo update` from silently

@@ -1,0 +1,226 @@
+# Mango Miri workflow
+#
+# Runs `cargo miri test` against the curated subset declared in
+# `[workspace.metadata.mango.miri]` (see scripts/miri-crates.sh).
+# Miri is an interpreter for Rust's MIR that detects UB
+# (aliasing, provenance, uninit reads, leaks) in `unsafe` code.
+# Orthogonal to loom: loom explores interleavings to verify
+# ordering invariants; Miri interprets a single execution to
+# detect UB. Running Miri on `#[cfg(loom)]` tests is pointless
+# (not impossible) — the curated-subset tests are gated
+# `not(loom)` for that reason.
+#
+# Two jobs:
+#
+#   miri-pr     — on pull_request / merge_group. Scope is the
+#                 INTERSECTION of the curated subset with crates
+#                 whose files changed. Empty intersection -> green.
+#                 MIRIFLAGS baseline: `-Zmiri-strict-provenance`.
+#
+#   miri-full   — on push:main / schedule / workflow_dispatch.
+#                 Scope is the full curated subset. Runs the PR
+#                 baseline then the tree-borrows canary
+#                 (`continue-on-error: true`) so a TB-only
+#                 regression is a signal, not a merge block.
+#
+# Nightly pinning: `MIRI_NIGHTLY` at workflow-top is the single
+# source of truth. `MIRI_NIGHTLY` is a mango-local name (not a
+# Miri convention) -- don't delete it thinking it's vestigial.
+# Bump procedure: docs/miri.md, "Nightly pin procedure."
+#
+# Cache: the Miri sysroot (~300MB, 30-90s to build) lives in
+# `~/.cache/miri` and `~/.rustup/toolchains/${MIRI_NIGHTLY}-*`.
+# Both are explicitly listed in Swatinem/rust-cache
+# `cache-directories`; the default paths miss them.
+#
+# Security: no `github.event.*` context is interpolated directly
+# into `run:` blocks. All dynamic values (base ref, event name)
+# pass through step-level `env:` first and are referenced as
+# shell vars. Pattern follows loom.yml hardening precedent.
+
+name: miri
+
+on:
+  pull_request:
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/miri.yml"
+      - "scripts/miri-*.sh"
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/miri.yml"
+      - "scripts/miri-*.sh"
+  merge_group:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  # Pinned nightly. Verified locally on 2026-04-23:
+  #   cargo +nightly-2026-04-01 miri setup
+  #   cargo +nightly-2026-04-01 miri test -p mango-loom-demo --lib --tests
+  # clean under both `-Zmiri-strict-provenance` alone and with
+  # `-Zmiri-tree-borrows` added. Bump quarterly per docs/miri.md.
+  MIRI_NIGHTLY: "nightly-2026-04-01"
+
+jobs:
+  # PR / merge-queue job. Diff-scoped against the base ref; may
+  # legitimately have nothing to run (empty intersection).
+  miri-pr:
+    name: miri (pr)
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          fetch-depth: 0
+
+      - name: install miri toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+        with:
+          toolchain: ${{ env.MIRI_NIGHTLY }}
+          components: miri, rust-src
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          prefix-key: v0-miri
+          shared-key: ""
+          cache-directories: |
+            ~/.cache/miri
+            ~/.rustup/toolchains/${{ env.MIRI_NIGHTLY }}-x86_64-unknown-linux-gnu
+
+      - name: miri setup (build sysroot)
+        env:
+          MIRI_NIGHTLY: ${{ env.MIRI_NIGHTLY }}
+        run: cargo "+${MIRI_NIGHTLY}" miri setup
+
+      - name: miri scripts self-test
+        run: bash scripts/miri-scripts-test.sh
+
+      - name: resolve base ref
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BASE_REF:-}" ]; then
+              echo "base_ref unset (event=${EVENT_NAME}); nothing to diff against" >&2
+              exit 1
+          fi
+          git fetch --no-tags --depth=1 origin "${BASE_REF}"
+          echo "MIRI_BASE_REF=origin/${BASE_REF}" >> "${GITHUB_ENV}"
+
+      - name: select crates to test
+        env:
+          MIRI_BASE_REF: ${{ env.MIRI_BASE_REF }}
+        run: |
+          set -euo pipefail
+          crates=$(bash scripts/miri-changed-crates.sh "${MIRI_BASE_REF}")
+          if [ -z "$crates" ]; then
+              echo "This PR does not touch Miri-in-scope crates; skipping."
+              echo "MIRI_CRATES=" >> "${GITHUB_ENV}"
+          else
+              echo "Miri will run against:"
+              printf '  %s\n' $crates
+              echo "MIRI_CRATES=$(printf '%s ' $crates)" >> "${GITHUB_ENV}"
+          fi
+
+      - name: cargo miri test (strict-provenance)
+        if: ${{ env.MIRI_CRATES != '' }}
+        env:
+          MIRI_NIGHTLY: ${{ env.MIRI_NIGHTLY }}
+          MIRI_CRATES: ${{ env.MIRI_CRATES }}
+          MIRIFLAGS: "-Zmiri-strict-provenance"
+        run: |
+          set -euo pipefail
+          for crate in ${MIRI_CRATES}; do
+              echo "::group::miri test ${crate}"
+              cargo "+${MIRI_NIGHTLY}" miri test -p "${crate}" --lib --tests
+              echo "::endgroup::"
+          done
+
+  # Nightly / post-merge job. Full curated subset, sequential
+  # MIRIFLAGS variants. Tree-borrows canary is continue-on-error.
+  miri-full:
+    name: miri (full)
+    if: ${{ github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: install miri toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+        with:
+          toolchain: ${{ env.MIRI_NIGHTLY }}
+          components: miri, rust-src
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          prefix-key: v0-miri
+          shared-key: ""
+          cache-directories: |
+            ~/.cache/miri
+            ~/.rustup/toolchains/${{ env.MIRI_NIGHTLY }}-x86_64-unknown-linux-gnu
+
+      - name: miri setup (build sysroot)
+        env:
+          MIRI_NIGHTLY: ${{ env.MIRI_NIGHTLY }}
+        run: cargo "+${MIRI_NIGHTLY}" miri setup
+
+      - name: miri scripts self-test
+        run: bash scripts/miri-scripts-test.sh
+
+      - name: enumerate curated subset
+        run: |
+          set -euo pipefail
+          crates=$(bash scripts/miri-crates.sh)
+          if [ -z "$crates" ]; then
+              echo "error: curated subset is empty; miri-full has nothing to run" >&2
+              exit 1
+          fi
+          echo "MIRI_CRATES=$(printf '%s ' $crates)" >> "${GITHUB_ENV}"
+
+      - name: cargo miri test (strict-provenance)
+        env:
+          MIRI_NIGHTLY: ${{ env.MIRI_NIGHTLY }}
+          MIRI_CRATES: ${{ env.MIRI_CRATES }}
+          MIRIFLAGS: "-Zmiri-strict-provenance"
+        run: |
+          set -euo pipefail
+          for crate in ${MIRI_CRATES}; do
+              echo "::group::miri test (strict-provenance) ${crate}"
+              cargo "+${MIRI_NIGHTLY}" miri test -p "${crate}" --lib --tests
+              echo "::endgroup::"
+          done
+
+      - name: cargo miri test (tree-borrows canary)
+        continue-on-error: true
+        env:
+          MIRI_NIGHTLY: ${{ env.MIRI_NIGHTLY }}
+          MIRI_CRATES: ${{ env.MIRI_CRATES }}
+          MIRIFLAGS: "-Zmiri-strict-provenance -Zmiri-tree-borrows"
+        run: |
+          set -euo pipefail
+          for crate in ${MIRI_CRATES}; do
+              echo "::group::miri test (tree-borrows) ${crate}"
+              cargo "+${MIRI_NIGHTLY}" miri test -p "${crate}" --lib --tests
+              echo "::endgroup::"
+          done
