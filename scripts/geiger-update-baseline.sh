@@ -59,19 +59,20 @@ if [ -f "$baseline_path" ]; then
     fi
 fi
 
-# Derive workspace members. `workspace_members` entries look like
-#   "<name> <version> (path+file://...)"
-# — take the first whitespace-delimited token. We avoid `readarray`
-# / `mapfile` here because those are bash 4+ only, and macOS ships
-# bash 3.2; newline-split into IFS-delimited words instead.
+# Derive workspace-member crate names. Cargo 1.77+ changed
+# `.workspace_members[]` from the old space-delimited form
+# `"<name> <version> (path+file://...)"` to a bare PackageId like
+# `path+file://.../crates/NAME#VERSION` (no spaces). Iterating
+# `.packages[] | select(.source == null) | .name` returns just the
+# crate names without relying on the PackageId shape — stable
+# across cargo versions. We avoid `readarray` / `mapfile` because
+# those are bash 4+ only, and macOS ships bash 3.2.
 members=()
 while IFS= read -r line; do
     members+=("$line")
 done < <(
     cargo metadata --no-deps --format-version=1 \
-        | jq -r '.workspace_members
-                 | map(split(" ") | .[0])
-                 | .[]'
+        | jq -r '.packages[] | select(.source == null) | .name'
 )
 
 if [ "${#members[@]}" -eq 0 ]; then
