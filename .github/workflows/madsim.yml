@@ -1,0 +1,204 @@
+# Mango madsim workflow
+#
+# Runs `cargo nextest run` against the curated subset declared in
+# `[workspace.metadata.mango.madsim]` (see scripts/madsim-crates.sh)
+# under `RUSTFLAGS="--cfg madsim"`. The cfg flips the
+# workspace-renamed `tokio` (= `madsim-tokio`) re-export from real
+# tokio to the deterministic simulator at link time — source in
+# `crates/mango-madsim-demo/src/lib.rs` is unchanged across profiles.
+#
+# Orthogonal to loom/miri:
+#   - loom permutes interleavings of a tiny model to prove an
+#     ordering invariant.
+#   - miri interprets a single execution to detect UB in unsafe.
+#   - madsim replaces the async runtime with a deterministic
+#     scheduler, so message ordering, task interleaving, and
+#     timer firing are reproducible from a fixed seed.
+# All three coexist; each owns a different class of bug.
+#
+# Separate workflow from ci.yml because the madsim build uses
+# RUSTFLAGS="--cfg madsim", which is ABI-incompatible with the
+# default build cache. Sharing a Swatinem/rust-cache scope would
+# thrash; separate job → separate cache prefix (`v0-madsim`).
+# Per-invocation `--target-dir target/madsim` further isolates the
+# build artifacts so a local developer alternating `cargo test` and
+# the madsim build does not invalidate either cache.
+#
+# Pinned seeds: MADSIM_TEST_SEED and MADSIM_TEST_NUM are set at the
+# workflow-top so a failure is reproducible. Bump the seed only when
+# adding new sim tests that need wider exploration; rotating the
+# seed without reason would mask a flake as a new bug.
+#
+# Path filter: this workflow only runs when madsim-relevant files
+# change. Required-check policy (branch protection) should list
+# "madsim" with `require_for_changed_paths` so the check stays green
+# when the path filter skips it.
+#
+# Security: no `github.event.*` interpolation inside `run:` blocks.
+# All inputs are static; dynamic GITHUB_* usage is limited to the
+# `concurrency.group` expression (ref name, GitHub-sanitized).
+# Pattern mirrors loom.yml and miri.yml hardening precedent.
+
+name: madsim
+
+on:
+  pull_request:
+    paths:
+      - "crates/**/src/**"
+      - "crates/**/tests/**"
+      - "crates/**/Cargo.toml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/madsim.yml"
+      - "scripts/madsim-crates.sh"
+      - "scripts/madsim-scripts-test.sh"
+      - ".config/nextest.toml"
+      - "docs/madsim.md"
+  push:
+    branches: [main]
+    paths:
+      - "crates/**/src/**"
+      - "crates/**/tests/**"
+      - "crates/**/Cargo.toml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/madsim.yml"
+      - "scripts/madsim-crates.sh"
+      - "scripts/madsim-scripts-test.sh"
+      - ".config/nextest.toml"
+      - "docs/madsim.md"
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  # Fixed seed + iteration count. See docs/madsim.md section on CI
+  # invocation. Bumping MADSIM_TEST_NUM trades CI minutes for
+  # exploration depth; 10 is the smoke-level default. Flipping
+  # MADSIM_TEST_SEED rotates the schedule space and is a knob for
+  # triaging a seed-specific flake; don't rotate by default.
+  MADSIM_TEST_SEED: "1"
+  MADSIM_TEST_NUM: "10"
+  # MSRV pin; mirrors workspace.package.rust-version. Used by the
+  # MSRV check step to prove the curated subset compiles on the
+  # oldest supported toolchain under `--cfg madsim`.
+  MSRV: "1.80"
+
+jobs:
+  madsim:
+    name: madsim
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      # MSRV toolchain installed FIRST so the final
+      # `dtolnay/rust-toolchain` call (stable, below) becomes the
+      # rustup default. If MSRV were installed last, default would
+      # flip to 1.80 and `cargo fetch --locked` would reject
+      # `wit-bindgen` (edition2024 unstable on 1.80). Same failure
+      # mode as Issue #23 / task #15. See
+      # .planning/msrv-wit-bindgen-fix.plan.md for the incident.
+      - name: install MSRV toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+        with:
+          toolchain: ${{ env.MSRV }}
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable (default toolchain)
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          # Separate from ci.yml and loom.yml caches. The `--cfg
+          # madsim` build produces different artifacts (the renamed
+          # `tokio` crate resolves to the simulator's code path);
+          # colliding with the default cache invalidates it on every
+          # run. Prefix scopes isolate the two build graphs.
+          prefix-key: v0-madsim
+          shared-key: ""
+
+      - name: install cargo-nextest
+        uses: taiki-e/install-action@5f57d6cb7cd20b14a8a27f522884c4bc8a187458  # v2
+        with:
+          tool: cargo-nextest
+
+      - name: cargo fetch
+        run: cargo fetch --locked
+
+      - name: madsim scripts self-test
+        run: bash scripts/madsim-scripts-test.sh
+
+      - name: enumerate curated subset
+        run: |
+          set -euo pipefail
+          crates=$(bash scripts/madsim-crates.sh)
+          if [ -z "$crates" ]; then
+              echo "error: curated subset is empty; madsim has nothing to run" >&2
+              exit 1
+          fi
+          echo "Curated subset:"
+          printf '  %s\n' $crates
+          echo "MADSIM_CRATES=$(printf '%s ' $crates)" >> "${GITHUB_ENV}"
+
+      # The canonical madsim invocation.
+      #
+      # --cfg madsim: swaps the workspace-renamed `tokio` (=
+      #   `madsim-tokio`) from real tokio to the simulator at link
+      #   time. See docs/madsim.md section on the rename.
+      # --target-dir target/madsim: isolates the `--cfg madsim` build
+      #   graph from the default cache so alternating builds don't
+      #   invalidate each other.
+      # --profile ci: inherits the nextest timeouts from
+      #   .config/nextest.toml.
+      # Per-crate loop: nextest does not multiplex `-p` args across
+      #   different RUSTFLAGS; looping keeps the invocation explicit
+      #   and makes per-crate logs easy to find via ::group::.
+      - name: cargo nextest run (--cfg madsim)
+        env:
+          MADSIM_CRATES: ${{ env.MADSIM_CRATES }}
+          RUSTFLAGS: "--cfg madsim"
+        run: |
+          set -euo pipefail
+          for crate in ${MADSIM_CRATES}; do
+              echo "::group::nextest run ${crate} (--cfg madsim)"
+              cargo nextest run \
+                  --profile ci \
+                  --target-dir target/madsim \
+                  -p "${crate}"
+              echo "::endgroup::"
+          done
+
+      # MSRV compile check under `--cfg madsim`. Complements the
+      # stable-toolchain test above: proves that the pinned madsim
+      # crates (=0.2.30) compile on the workspace's rust-version
+      # floor. Check-only (not test) — MSRV is a compile contract,
+      # not a runtime contract.
+      # MSRV toolchain referenced via `cargo +${{ env.MSRV }}`.
+      # YAML-level expansion (NOT a `run:`-time shell expansion)
+      # produces the literal string `cargo +1.80` at workflow-dispatch
+      # time. The expansion is safe because `env.MSRV` is declared as
+      # a static literal at workflow-top — it never carries untrusted
+      # input. See scripts/madsim-scripts-test.sh for the matching
+      # regex that asserts the MSRV-pinned invocation is present.
+      - name: cargo check (MSRV, --cfg madsim)
+        env:
+          MADSIM_CRATES: ${{ env.MADSIM_CRATES }}
+          RUSTFLAGS: "--cfg madsim"
+        run: |
+          set -euo pipefail
+          for crate in ${MADSIM_CRATES}; do
+              echo "::group::check (MSRV ${{ env.MSRV }}, --cfg madsim) ${crate}"
+              cargo +${{ env.MSRV }} check \
+                  --target-dir target/madsim-msrv \
+                  -p "${crate}" \
+                  --all-targets
+              echo "::endgroup::"
+          done

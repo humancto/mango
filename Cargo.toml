@@ -4,6 +4,7 @@ members = [
     "crates/mango",
     "crates/mango-proto",
     "crates/mango-loom-demo",
+    "crates/mango-madsim-demo",
     "crates/xtask-vet-ttl",
 ]
 # tests/fixtures/geiger-toy-workspace is a self-contained workspace
@@ -29,6 +30,16 @@ exclude = ["tests/fixtures/geiger-toy-workspace"]
 [workspace.metadata.mango.miri]
 crates = ["mango-loom-demo"]
 
+# madsim deterministic-simulation curated-subset opt-in (see
+# docs/madsim.md). A crate lands in this list the same PR that
+# starts using `tokio.workspace = true` and ships at least one
+# `#[madsim::test]` test. `.github/workflows/madsim.yml` reads
+# this list via `scripts/madsim-crates.sh`. Typos land silently
+# (Cargo does not validate metadata contents) — the regression
+# test is `scripts/madsim-scripts-test.sh`.
+[workspace.metadata.mango.madsim]
+crates = ["mango-madsim-demo"]
+
 # Exact-version pin for loom. Env-var semantics (LOOM_MAX_PREEMPTIONS,
 # LOOM_MAX_BRANCHES, etc.) and model behavior can drift between minor
 # versions; pinning exact prevents `cargo update` from silently
@@ -36,6 +47,27 @@ crates = ["mango-loom-demo"]
 # procedure.
 [workspace.dependencies]
 loom = "=0.7.2"
+
+# madsim deterministic-simulator runtime. Package-rename shape
+# per madsim's integration guide: source code writes
+# `use tokio::time::sleep;` unchanged; the rename does the swap
+# at link time. Activated by RUSTFLAGS="--cfg madsim".
+#
+# Under the default build, `madsim-tokio` re-exports real tokio.
+# Under `--cfg madsim`, it substitutes the deterministic simulator.
+#
+# `package = "madsim-tokio"` inside [workspace.dependencies] is
+# accepted by Cargo; member crates inherit the rename via
+# `tokio.workspace = true` (RisingWave uses this same pattern).
+# See docs/madsim.md §"The rename".
+#
+# Exact pins — same rationale as loom above: env-var semantics
+# (MADSIM_TEST_SEED / MADSIM_TEST_NUM) and simulator behavior
+# can drift between patch versions. Move both lines together.
+# madsim-tonic is deliberately NOT declared yet; Phase 6 adds
+# it in the same PR as the first tonic-using crate.
+tokio = { version = "=0.2.30", package = "madsim-tokio" }
+madsim = { version = "=0.2.30", features = ["macros"] }
 # Constant-time comparison primitives for secret byte compares in
 # `auth*` / `crypto*` / `token*` / `hash_chain*` modules. Enforced
 # by `scripts/ct-comparison-check.sh` per `docs/ct-comparison-policy.md`.
