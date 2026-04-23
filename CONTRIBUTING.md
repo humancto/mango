@@ -201,6 +201,16 @@ with worked examples: [`docs/arithmetic-policy.md`][arith].
   ship with a `loom` model that exercises its ordering invariants;
   see [`docs/loom.md`](./docs/loom.md) and the template crate
   [`crates/mango-loom-demo`](./crates/mango-loom-demo/).
+- **Miri.** Any crate introducing `unsafe` must also add itself to
+  `[workspace.metadata.mango.miri]` in the workspace
+  [`Cargo.toml`](./Cargo.toml) **in the same PR**. That table is
+  the curated subset `.github/workflows/miri.yml` runs against
+  (PR job: changed-crate intersection under
+  `-Zmiri-strict-provenance`; full job on push/schedule: full
+  subset plus `-Zmiri-tree-borrows` canary). loom verifies
+  ordering; Miri verifies soundness of `unsafe` blocks — both are
+  required when Phase 3+ ships `unsafe` + atomics. Full policy:
+  [`docs/miri.md`](./docs/miri.md).
 - **Monotonic clock.** All protocol-relevant time math uses
   `std::time::Instant` (monotonic). `SystemTime` is only for
   human-facing display (logs, lease-TTL rendering). Full policy:
@@ -292,6 +302,19 @@ shared-state primitive (see [`docs/loom.md`](./docs/loom.md)):
 RUSTFLAGS="--cfg loom -C debug-assertions" \
   LOOM_MAX_PREEMPTIONS=2 LOOM_MAX_BRANCHES=10000 \
   cargo nextest run --profile ci --release -p mango-loom-demo
+```
+
+Optional — run Miri locally. Not required on every PR, but
+mandatory for any PR that adds or modifies `unsafe` code
+(see [`docs/miri.md`](./docs/miri.md)):
+
+```bash
+MIRI_NIGHTLY=nightly-2026-04-01   # bump per docs/miri.md; must match miri.yml
+rustup install "$MIRI_NIGHTLY"
+rustup component add miri rust-src --toolchain "$MIRI_NIGHTLY"
+cargo "+$MIRI_NIGHTLY" miri setup
+MIRIFLAGS="-Zmiri-strict-provenance" \
+  cargo "+$MIRI_NIGHTLY" miri test -p mango-loom-demo --lib --tests
 ```
 
 Notes:

@@ -194,8 +194,9 @@ back unless the justification is concrete.
 - **Miri** (ROADMAP.md:795): the Miri CI job runs `cargo miri test`,
   not nextest. Miri is an interpreter; it cannot do
   process-per-test because there is no process separation at the
-  interpreter level. The nightly Miri workflow is its own job
-  with its own (long) timeout, not subject to this doc.
+  interpreter level. The Miri workflow is its own job
+  with its own (long) timeout, not subject to this doc. Policy
+  and the curated-subset mechanism live in [`docs/miri.md`](miri.md).
 - **10×-baseline regression detection** (ROADMAP.md:794): deferred
   as a follow-up. nextest's flake-detector is a retry mechanism,
   not a baseline comparator. A wrapper script over
