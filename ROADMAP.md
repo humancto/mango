@@ -798,7 +798,7 @@ Phase 6 PR that lands before Phase 0.5 is complete.
 - [x] Add `cargo-vet` (or equivalent supply-chain audit gate) so every transitive dep has an audit entry; missing audits fail CI.
 - [x] Add `cargo-semver-checks` CI job: catches semver violations the API surface alone misses (e.g., adding a required generic parameter). Gates breaking changes from Phase 6 onwards alongside `cargo-public-api`.
 - [x] Add an SBOM build step (`cargo-cyclonedx`) that produces a CycloneDX file per release; attached to GitHub Releases in Phase 12.
-- [ ] Add a `cargo doc --no-deps --document-private-items` job with `RUSTDOCFLAGS=-D warnings` so broken doc links fail CI. Plus `#![deny(missing_docs)]` at every `crates/mango-*/src/lib.rs` root for public crates.
+- [x] Add a `cargo doc --no-deps --document-private-items` job with `RUSTDOCFLAGS=-D warnings` so broken doc links fail CI. Plus `#![deny(missing_docs)]` at every `crates/mango-*/src/lib.rs` root for public crates.
 - [ ] Add `cargo-public-api` CI check **(advisory pre-Phase-6, gating from Phase 6 onwards)** — alongside `cargo-semver-checks` once Phase 6 ships.
 - [ ] Add a Renovate / Dependabot config so action SHAs and crate versions get bumped via PR (preserves the SHA-pin policy without it rotting).
 - [ ] **`#[non_exhaustive]` policy on public enums**: documented in `docs/api-stability.md`; every `pub enum` in non-internal crates is `#[non_exhaustive]` unless a documented exception applies. Enforced by code review and (where possible) by a clippy custom lint or `cargo-public-api` check.
