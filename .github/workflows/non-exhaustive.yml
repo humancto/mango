@@ -1,0 +1,116 @@
+# Mango #[non_exhaustive] policy gate
+#
+# Runs the two-layer enforcement from docs/api-stability.md on every
+# PR and push that touches public-enum territory:
+#
+#   1. scripts/non-exhaustive-check.sh — structural backstop. Asserts
+#      the workspace `clippy::exhaustive_enums = "deny"` lint entry
+#      is present and every publishable crate's `pub enum` carries
+#      `#[non_exhaustive]` or a documented `// reason:` escape.
+#
+#   2. scripts/non-exhaustive-scripts-test.sh — self-test harness
+#      (10 assertions). Exercises the backstop's awk state machine
+#      via synthetic tmpdir fixtures and runs
+#      `cargo clippy -- -D clippy::exhaustive_enums` against the
+#      tests/fixtures/non-exhaustive/ workspace (compliant / bad /
+#      allowed). Locks clippy's behavior on the restriction-category
+#      lint against point-release drift.
+#
+# Primary enforcement (workspace-wide `clippy::exhaustive_enums =
+# "deny"`) runs inside the main `cargo clippy` job in ci.yml. This
+# workflow is the defense-in-depth layer: it makes the invariant
+# visible and auditable independently of clippy, so a silent lint
+# regression (clippy point release, accidental table removal) can't
+# sneak through unnoticed.
+#
+# Why a dedicated workflow:
+#   - Narrow path filter keeps every other PR from paying the cost
+#     of installing the fixture's rustc + clippy artifacts.
+#   - Matches the one-workflow-per-gate convention (geiger, madsim,
+#     miri, public-api, semver-checks, ct-comparison, etc.).
+#   - Independent status check for branch protection.
+#
+# Security: no `github.event.*` values are interpolated into run:
+# blocks. All run: inputs are static script paths. The only dynamic
+# expression is `github.ref` in `concurrency.group`, which GitHub
+# sanitizes. Matches the hardening pattern in ct-comparison.yml /
+# dependabot-selftest.yml.
+#
+# In CI (`CI` env set by GitHub Actions), both scripts treat missing
+# `cargo` / `jq` as hard failures. Locally they skip with install
+# hints — see the script headers.
+
+name: non-exhaustive
+
+on:
+  pull_request:
+    paths:
+      - "crates/**/src/**"
+      - "crates/**/Cargo.toml"
+      - "Cargo.toml"
+      - "docs/api-stability.md"
+      - "tests/fixtures/non-exhaustive/**"
+      - "scripts/non-exhaustive-check.sh"
+      - "scripts/non-exhaustive-scripts-test.sh"
+      - ".github/workflows/non-exhaustive.yml"
+  push:
+    branches: [main]
+    paths:
+      - "crates/**/src/**"
+      - "crates/**/Cargo.toml"
+      - "Cargo.toml"
+      - "docs/api-stability.md"
+      - "tests/fixtures/non-exhaustive/**"
+      - "scripts/non-exhaustive-check.sh"
+      - "scripts/non-exhaustive-scripts-test.sh"
+      - ".github/workflows/non-exhaustive.yml"
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  non-exhaustive:
+    name: non-exhaustive (policy gate)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      # Stable toolchain + clippy component. The fixture oracle runs
+      # `cargo clippy -- -D clippy::exhaustive_enums` against three
+      # fixture members; the backstop's cargo-metadata call also needs
+      # a working cargo.
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          components: clippy
+
+      # Separate cache scope: the fixture workspace is outside mango's
+      # target/ and pulls no deps, but we still want the stable rustc
+      # sysroot cached across runs. Prefix-keyed to avoid collision
+      # with ci.yml's default cache.
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          prefix-key: v0-non-exhaustive
+          shared-key: ""
+          workspaces: |
+            .
+            tests/fixtures/non-exhaustive
+
+      # Fail fast if the backstop regresses before the self-test runs.
+      - name: non-exhaustive backstop
+        run: bash scripts/non-exhaustive-check.sh
+
+      # Full self-test: 10 assertions including the three fixture
+      # clippy oracles and two synthetic-tmpdir negative tests.
+      - name: non-exhaustive scripts self-test
+        run: bash scripts/non-exhaustive-scripts-test.sh

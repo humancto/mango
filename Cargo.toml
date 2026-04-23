@@ -13,7 +13,18 @@ members = [
 # deliberately-unsafe source under mango's `unsafe_code = "forbid"`
 # lint and from walking its `[workspace]` table as if it were a
 # nested member. See docs/unsafe-policy.md.
-exclude = ["tests/fixtures/geiger-toy-workspace"]
+#
+# tests/fixtures/non-exhaustive is a self-contained workspace used
+# by scripts/non-exhaustive-scripts-test.sh as a real-clippy
+# oracle for the `clippy::exhaustive_enums` lint. Its `bad/`
+# member contains a deliberately-non-exhaustive `pub enum` that
+# would fire the workspace lint; excluding the directory keeps
+# the mango workspace clippy run clean. See
+# docs/api-stability.md.
+exclude = [
+    "tests/fixtures/geiger-toy-workspace",
+    "tests/fixtures/non-exhaustive",
+]
 
 # Miri curated-subset opt-in (see docs/miri.md). Any crate that ships
 # `unsafe` (and therefore carries a `#![allow(unsafe_code)]` escape
@@ -135,6 +146,16 @@ disallowed_methods = { level = "warn", priority = 1 }
 # call newer than MSRV at PR time, complementing the `cargo check
 # @ 1.80` job that catches it at compile time.
 incompatible_msrv = { level = "deny", priority = 1 }
+# `#[non_exhaustive]` policy on public enums. Every `pub enum` in a
+# publishable (non-`publish = false`) crate must carry
+# `#[non_exhaustive]` or a documented per-enum escape. Escape hatch:
+# `// reason: ...` line-comment immediately preceding
+# `#[allow(clippy::exhaustive_enums)]` on the specific enum. Non-
+# publishable crates carry a crate-level `#![allow(...)]` at lib.rs
+# top — same pattern as `unsafe_code = "forbid"` + per-crate
+# `#![allow(unsafe_code)]`. See `docs/api-stability.md` for the
+# policy; `scripts/non-exhaustive-check.sh` is the structural backstop.
+exhaustive_enums = { level = "deny", priority = 1 }
 
 # Release profile. overflow-checks = true is the runtime backstop for
 # the compile-time clippy::arithmetic_side_effects lint

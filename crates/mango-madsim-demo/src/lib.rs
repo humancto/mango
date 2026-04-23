@@ -13,6 +13,10 @@
 //! policy.
 
 #![deny(missing_docs)]
+// `publish = false` scaffolding crate — opted out of the workspace
+// `clippy::exhaustive_enums = "deny"` policy. See
+// `docs/api-stability.md` for the scope definition.
+#![allow(clippy::exhaustive_enums)]
 
 use tokio::sync::mpsc;
 use tokio::task;

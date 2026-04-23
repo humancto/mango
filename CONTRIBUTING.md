@@ -285,6 +285,18 @@ with worked examples: [`docs/arithmetic-policy.md`][arith].
   merge. **Gating from Phase 6** (first stable public API). Full
   policy, including the advisory→gating flip procedure:
   [`docs/semver-policy.md`](./docs/semver-policy.md).
+- **`#[non_exhaustive]` on public enums.** Every `pub enum` in a
+  publishable crate must carry `#[non_exhaustive]` or a documented
+  per-enum escape (a `// reason: …` line-comment immediately
+  preceding `#[allow(clippy::exhaustive_enums)]` — MSRV-1.80 form).
+  Enforced primarily by the workspace lint
+  `clippy::exhaustive_enums = "deny"` at `cargo clippy` time and
+  defense-in-depth by `.github/workflows/non-exhaustive.yml`
+  (`scripts/non-exhaustive-check.sh` + self-test + a 3-member
+  clippy-oracle fixture). Non-publishable crates opt out
+  crate-wide at `lib.rs` top. Full policy, exceptions, and
+  struct-like-variant guidance:
+  [`docs/api-stability.md`](./docs/api-stability.md).
 - **MSRV.** Workspace MSRV is **1.80** (see
   `rust-version` in [`Cargo.toml`](./Cargo.toml) and the `msrv`
   CI job). MSRV bumps are deliberate, land in their own PR, and
