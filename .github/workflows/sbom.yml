@@ -250,14 +250,29 @@ jobs:
         # purl is valid).
         run: |
           set -euo pipefail
+          # Derive the workspace-root filter dynamically so adding
+          # a new crate under crates/ doesn't silently produce a
+          # cryptic reverse-check failure. cargo metadata's
+          # `.packages[] | select(.source == null) | .name` is the
+          # source of truth the rest of this workflow uses.
+          roots="$(
+              cargo metadata --no-deps --format-version=1 --locked \
+                  | jq -r '.packages[] | select(.source == null) | .name' \
+                  | paste -sd '|' -
+          )"
+          if [ -z "$roots" ]; then
+              echo "error: could not derive workspace roots" >&2
+              exit 1
+          fi
+
           # `--edges=normal` is runtime-only (no build, no dev).
           # `--no-dedupe` forces every occurrence to be printed
           # (not just the first). awk filters out blank lines,
           # workspace-member root lines, and strips the `v`
           # prefix off the version column.
           expected_runtime="$(
-              cargo tree --workspace --edges=normal --prefix=none --no-dedupe \
-                  | awk 'NF>=2 && $1 !~ /^(mango|mango-proto|mango-loom-demo|xtask-vet-ttl)$/ {gsub(/^v/, "", $2); print $1, $2}' \
+              cargo tree --workspace --edges=normal --prefix=none --no-dedupe --locked \
+                  | awk -v roots="^($roots)$" 'NF>=2 && $1 !~ roots {gsub(/^v/, "", $2); print $1, $2}' \
                   | sort -u
           )"
 
@@ -284,9 +299,13 @@ jobs:
           # are acceptable — cargo-cyclonedx can surface feature-
           # gated deps cargo-tree dedupes. The forward check has
           # already verified every extra is in Cargo.lock.
+          #
+          # `grep -c .` counts non-empty lines — `wc -l <<<` adds a
+          # trailing newline and overcounts by one.
+          expected_count="$(printf '%s\n' "$expected_runtime" | grep -c . || true)"
+          union_count="$(printf '%s\n' "$all_sbom_pairs" | grep -c . || true)"
           printf 'runtime reverse check: %d expected, %d in SBOM union\n' \
-              "$(wc -l <<<"$expected_runtime")" \
-              "$(wc -l <<<"$all_sbom_pairs")"
+              "$expected_count" "$union_count"
 
       - name: integration — component-count floors
         # Assertion (10): non-empty floors — well below current

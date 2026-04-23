@@ -107,11 +107,21 @@ The workflow additionally asserts, across all four files:
    corresponds to a `(name, version)` row in `Cargo.lock`
    (forward check — every SBOM entry exists in the lockfile,
    proving no fabrication).
-9. Every non-`local`, non-`registry-altsource` row in
-   `Cargo.lock` appears in the SBOM of at least one non-empty
-   crate (reverse check — the SBOM omits no dep the build
-   actually pulled; catches a forward-only check missing a
-   hidden dep).
+9. Every runtime (normal-edge) dep reachable from any
+   workspace member — derived from `cargo tree --workspace
+--edges=normal --prefix=none --no-dedupe` — appears in the
+   SBOM union (reverse check). The oracle is `cargo tree`, NOT
+   raw `Cargo.lock`, because `--no-build-deps` legitimately
+   excludes build-time + dev-only deps (roughly 50 of
+   `Cargo.lock`'s 79 entries in the current tree). Comparing
+   against the lockfile directly would produce a false failure
+   on every run. Extras in the SBOM over `cargo tree`'s output
+   are permitted — `cargo-cyclonedx` can surface feature-gated
+   deps that `cargo tree --no-dedupe` elides; the forward check
+   has already verified each extra is in `Cargo.lock`. Attack
+   this catches: a generator bug (or tampering) that silently
+   drops a runtime dep from `components[]` while the forward
+   check still passes because every remaining purl is valid.
 10. Non-empty floors — `mango-proto.cdx.json` has ≥ 5
     `components[]`, `xtask-vet-ttl.cdx.json` has ≥ 10. `mango`
     and `mango-loom-demo` are exempt (currently 0 direct deps
