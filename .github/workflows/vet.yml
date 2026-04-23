@@ -98,6 +98,17 @@ jobs:
       - name: vet scripts self-test
         run: bash scripts/vet-scripts-test.sh
 
+      # `cargo vet check --frozen` forbids any HTTP access, but it
+      # invokes `cargo metadata` internally on the mango workspace —
+      # which needs every transitive's tarball present in the local
+      # registry cache. `cargo install cargo-vet` above only populates
+      # cargo-vet's own transitives, not mango's. Pre-fetch the
+      # workspace graph (network is still allowed in this step; the
+      # hermeticity promise of `--frozen` on the next step is
+      # preserved because the lockfile is what's being resolved).
+      - name: pre-fetch workspace deps
+        run: cargo fetch --locked
+
       - name: cargo vet check
         run: cargo vet check --locked --frozen
 
