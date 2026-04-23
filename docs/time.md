@@ -215,11 +215,28 @@ wallclock equivalent — `chrono::Utc::now()`, `jiff::Timestamp::now()`,
 5. **Filesystem `mtime` reads** for human-facing snapshot /
    retention CLI output.
 6. **Human-facing CLI output** — timestamps printed to terminals.
+7. **WAL-segment / snapshot file _names_** MAY include a wallclock
+   component for operator convenience (e.g.,
+   `wal-2026-04-23T18-00Z.log`). The file's _contents_ never carry
+   wallclock, and recovery ordering MUST use segment index, never
+   parse the filename timestamp. Only our own file-naming call
+   sites write; `mtime` reads fall under item 5.
+
+Explicitly **not** an escape hatch:
+
+- **PRNG seeding** via `SystemTime::now()`. Use `rand::rng()` or
+  an explicit entropy seed. Seeding a chaos-test RNG off wallclock
+  couples the test to the host clock and makes the failure mode
+  irreproducible. `thread_rng` / `rand::rng` already draw from
+  OS entropy — use them.
 
 Every call site in an allowed domain carries a
 `// wallclock: display` comment on the same line or the line above,
-so a grep audit is mechanical. Anywhere else, `SystemTime::now()`
-is presumed disallowed and the reviewer says "why not `Instant`?".
+so a grep audit is mechanical. The escape-hatch audit only looks at
+call sites _our code_ writes; framework-emitted wallclock (e.g.,
+`tonic` auto-populating response metadata) is out of scope.
+Anywhere else, `SystemTime::now()` is presumed disallowed and the
+reviewer says "why not `Instant`?".
 
 ## Enforcement handoff — the first Phase 2+ time PR
 
@@ -239,14 +256,19 @@ b. Add a grep-based CI step that fails on any `SystemTime::now`
 without an accompanying `// wallclock: display` comment on
 an adjacent line. Simpler; loses the IDE integration.
 
-c. Document in the PR description why neither (a) nor (b) is
-viable in the current codebase shape, and what the alternate
-enforcement is.
+c. If neither (a) nor (b) is viable in the current codebase
+shape, the PR MUST describe the alternate enforcement
+**mechanism** (not merely the rationale) AND name the
+follow-up PR or roadmap item that will land (a) or (b) within
+one phase. "We'll revisit" is not an acceptable (c). The
+reviewer who accepts a (c) without a named follow-up owns the
+gate failure.
 
 This is a hard gate, not a nice-to-have. Phase 2+ without
 enforcement means the first Raft PR might ship
 `SystemTime::now()` in a hot path and we'd only catch it at
-Phase 13's `chaos-clock-skew` test — the wrong place.
+the Phase 13 fault injector's clock-skew knob
+(`ROADMAP.md:1103`) — the wrong place.
 
 ## Reviewer checklist
 
@@ -255,7 +277,7 @@ Skim this when reviewing any PR that touches clocks:
 - [ ] Every Raft timer (election, heartbeat, commit) uses
       `Instant`, not `SystemTime`.
 - [ ] Every lease-expiry computation uses `Instant::now() +
-    Duration`. Lease state _on the wire_ is
+Duration`. Lease state _on the wire_ is
       `(lease_id, ttl_seconds, granted_at_revision)` only — no
       persisted wallclock expiry.
 - [ ] Every watch progress **cadence** uses `Instant`; any wire
@@ -280,10 +302,11 @@ Skim this when reviewing any PR that touches clocks:
   do no correction.
 - **NTP step tolerance.** Protocol decisions use `Instant`, which
   does not step on NTP adjustments. Wallclock display jumps with
-  NTP — correct, by design, not a bug. The Phase 13 chaos test
-  (`chaos-clock-skew`, see `ROADMAP.md:1103` fault injector) will
-  exercise ±5s clock jumps and assert no Raft election storms,
-  no early lease expiry, no MVCC revision inversions.
+  NTP — correct, by design, not a bug. Phase 13's fault injector
+  includes clock-skew between nodes (`ROADMAP.md:1103`); the
+  injector will be driven with ±5s clock jumps asserting no Raft
+  election storms, no early lease expiry, no MVCC revision
+  inversions.
 - **VM live migration.** Both VMware vMotion and EC2 live
   migration can jump wallclock by minutes. `Instant` behavior on
   migration is platform-dependent — Linux `CLOCK_MONOTONIC` on
