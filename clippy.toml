@@ -18,6 +18,26 @@ disallowed-types = [
     { path = "std::sync::RwLock", reason = "use parking_lot::RwLock or tokio::sync::RwLock for the same reason" },
 ]
 
+# Constant-time comparison — complementary advisory layer to the
+# scoped grep gate (scripts/ct-comparison-check.sh +
+# docs/ct-comparison-policy.md). The grep gate is the CI-blocking
+# enforcement; this list is workspace-wide warn-level and catches
+# cross-file indirection the scoped grep misses (e.g. a helper
+# `fn eq(a: &[u8], b: &[u8]) -> bool { a == b }` in an unscoped
+# file, called from scoped code). `bytes::Bytes` is the specific
+# case that P1-P5 cannot catch from source text alone.
+#
+# Path resolution for these trait-method paths has historically been
+# flaky in clippy; if a path silently fails to resolve, the layer
+# becomes a no-op. Verify with `cargo clippy --workspace` after
+# editing. Bytes lives in `bytes::bytes::Bytes`; if clippy cannot
+# resolve the path, drop that entry and rely on the scoped grep.
+disallowed-methods = [
+    { path = "<[u8] as core::cmp::PartialEq>::eq", reason = "byte-slice == is timing-sensitive; use subtle::ConstantTimeEq::ct_eq. See docs/ct-comparison-policy.md." },
+    { path = "<[u8] as core::cmp::PartialEq>::ne", reason = "byte-slice != is timing-sensitive; use subtle::ConstantTimeEq::ct_eq. See docs/ct-comparison-policy.md." },
+    { path = "<alloc::vec::Vec<u8> as core::cmp::PartialEq>::eq", reason = "Vec<u8> == is timing-sensitive; use subtle::ConstantTimeEq::ct_eq on the slices. See docs/ct-comparison-policy.md." },
+]
+
 # Keep in sync with rust-version in Cargo.toml and the pinned
 # toolchain in .github/workflows/ci.yml's msrv job. Enables
 # clippy::incompatible_msrv (denied in Cargo.toml) to flag any

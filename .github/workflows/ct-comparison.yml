@@ -1,0 +1,81 @@
+# Mango constant-time comparison gate
+#
+# Runs the scoped grep gate in scripts/ct-comparison-check.sh against
+# `auth*` / `crypto*` / `token*` / `hash_chain*` source files under
+# `crates/*/src/`. The gate enforces five signatures (P1-P5) that are
+# timing-oracle-prone byte compares; see docs/ct-comparison-policy.md.
+#
+# Escape hatch: a `// ct-allow: <reason>` on the same line as a match
+# exempts it. Adding a new annotation in a PR requires the
+# `ct-allow-approved` label (set-difference computed via git — rustfmt
+# reflows do not trigger false readings).
+#
+# Two steps:
+#
+#   harness  — fast smoke test of the gate logic itself
+#              (scripts/ct-comparison-scripts-test.sh, 18 scenarios).
+#              Fails the job if the gate regresses before we run it
+#              on real code.
+#
+#   gate     — the real enforcement. Exit codes:
+#              0 PASS, 1 violations, 2 missing label,
+#              3 stale .ct-comparison-ignore entry.
+#
+# Security: every `github.event.*` value flows through step-level
+# `env:` and is read as a shell variable in `run:`. No direct
+# interpolation into shell. Matches the pattern in geiger.yml /
+# miri.yml / loom.yml.
+
+name: ct-comparison
+
+on:
+  pull_request:
+    paths:
+      - "crates/**"
+      - ".ct-comparison-ignore"
+      - "docs/ct-comparison-policy.md"
+      - ".github/workflows/ct-comparison.yml"
+      - "scripts/ct-comparison-*.sh"
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - ".ct-comparison-ignore"
+      - "docs/ct-comparison-policy.md"
+      - ".github/workflows/ct-comparison.yml"
+      - "scripts/ct-comparison-*.sh"
+  merge_group:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  ct-comparison:
+    name: ct-comparison (grep gate)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      # fetch-depth: 0 is required so the gate can read
+      # origin/$GITHUB_BASE_REF:<file> for the base-tree annotation
+      # set-difference. Shallower clones make the PR label gate a no-op.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          fetch-depth: 0
+
+      # Fail fast if check logic regressed before running on real code.
+      - name: ct-comparison scripts self-test
+        run: bash scripts/ct-comparison-scripts-test.sh
+
+      - name: ct-comparison gate
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_BASE_REF: ${{ github.base_ref }}
+          # toJson(null) yields "null"; branch on event_name to feed
+          # a real JSON array only on pull_request. Matches the
+          # PR_LABELS pattern in geiger.yml.
+          PR_LABELS: ${{ github.event_name == 'pull_request' && toJson(github.event.pull_request.labels.*.name) || '[]' }}
+        run: bash scripts/ct-comparison-check.sh

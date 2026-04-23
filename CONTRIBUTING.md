@@ -221,6 +221,20 @@ with worked examples: [`docs/arithmetic-policy.md`][arith].
   Complements `unsafe_code = "forbid"` (compile-time) and Miri
   (runtime UB). Full policy:
   [`docs/unsafe-policy.md`](./docs/unsafe-policy.md).
+- **Constant-time comparison.** Byte-compare timing oracles are
+  banned in modules matching `auth*` / `crypto*` / `token*` /
+  `hash_chain*` under `crates/*/src/`. Use
+  `subtle::ConstantTimeEq::ct_eq` for any `&[u8]` / `Vec<u8>` compare
+  that involves a secret (MAC tag, HMAC, token, hash digest, signature,
+  etc.). Enforced at PR time by the scoped grep gate in
+  `.github/workflows/ct-comparison.yml`; a complementary
+  `clippy::disallowed_methods` advisory layer flags byte-slice
+  `PartialEq::eq/ne` workspace-wide. Escape hatch: a `// ct-allow:
+<reason>` on the match line, gated by the `ct-allow-approved` PR
+  label; whole-file exemptions for name collisions (e.g.,
+  `token_bucket.rs`) go in
+  [`.ct-comparison-ignore`](./.ct-comparison-ignore). Full policy:
+  [`docs/ct-comparison-policy.md`](./docs/ct-comparison-policy.md).
 - **Monotonic clock.** All protocol-relevant time math uses
   `std::time::Instant` (monotonic). `SystemTime` is only for
   human-facing display (logs, lease-TTL rendering). Full policy:
@@ -337,6 +351,16 @@ cargo install --locked cargo-geiger --version 0.13.0   # once
 bash scripts/geiger-update-baseline.sh --dry-run       # preview
 bash scripts/geiger-update-baseline.sh                 # write
 bash scripts/geiger-scripts-test.sh                    # 15 scenarios
+```
+
+Run the constant-time comparison gate locally — same gate that
+blocks PRs in `.github/workflows/ct-comparison.yml`, and the
+self-test that proves the gate's own logic is sound:
+
+```bash
+bash scripts/ct-comparison-check.sh              # scans scoped files, exits 0/1/2/3
+bash scripts/ct-comparison-check.sh --list-scope # debug: dump the scope set
+bash scripts/ct-comparison-scripts-test.sh       # 18 harness scenarios
 ```
 
 Notes:

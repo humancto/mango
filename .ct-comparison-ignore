@@ -1,0 +1,24 @@
+# .ct-comparison-ignore — file-level exemptions for the
+# constant-time comparison gate (scripts/ct-comparison-check.sh,
+# docs/ct-comparison-policy.md).
+#
+# Use this file for whole-file false positives where the P1-P5 grep
+# signatures fire on code that is definitively not a secret compare —
+# the motivating case is name collisions like `token_bucket.rs`
+# (scope-word "token" in the filename, but the module is about rate
+# limiting, not authentication tokens).
+#
+# Per-line exemptions belong at the call site as a `// ct-allow: <reason>`
+# annotation, not here. File-level exemption is the blunt instrument;
+# prefer line-level where possible.
+#
+# Format:
+#   - one repo-relative path per line
+#   - `#` starts a comment; trailing comments are stripped
+#   - blank lines ignored
+#   - each path MUST exist at check time; a missing file aborts the
+#     gate with exit code 3 (prevents stale entries from silently
+#     disabling coverage)
+#
+# Example (commented out — uncomment with a real path when needed):
+# crates/mango-ratelimit/src/token_bucket.rs  # rate-limit, not auth
