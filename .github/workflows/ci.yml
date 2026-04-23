@@ -121,15 +121,26 @@ jobs:
       - name: install protoc
         # tonic-build 0.12 + prost-build 0.13 do not vendor protoc.
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      # `--target x86_64-unknown-linux-gnu` scopes both fetch and check
+      # to the Linux subgraph, skipping wasi-only transitives whose
+      # manifests require newer editions than our MSRV toolchain can
+      # parse. See docs/msrv.md and:
+      #   https://github.com/humancto/mango/issues/23
+      # (tempfile -> getrandom 0.3 -> wasip2 -> wit-bindgen 0.57.1,
+      # which declares edition = "2024"; cargo 1.80 rejects the manifest
+      # even though the crate is never compiled on Linux.) Do NOT remove
+      # `--target` without either (a) expanding the target list to match
+      # any new CI matrix, or (b) bumping MSRV high enough that the full
+      # lockfile parses on the MSRV toolchain.
       - name: cargo fetch
-        run: cargo fetch --locked
+        run: cargo fetch --locked --target x86_64-unknown-linux-gnu
       - name: cargo check (workspace, all targets, MSRV toolchain)
         # `cargo check`, not build/test: MSRV cares about compilation
         # feasibility, not artifact production or runtime semantics.
         # `--all-targets` includes tests/benches/examples so the full
         # source tree is typechecked on MSRV, matching the practice in
         # tokio / serde / hyper / reqwest.
-        run: cargo check --workspace --all-targets --locked
+        run: cargo check --workspace --all-targets --locked --target x86_64-unknown-linux-gnu
 
   deny:
     # Supply-chain policy gate: licenses, RustSec advisories, banned
