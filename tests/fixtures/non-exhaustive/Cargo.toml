@@ -1,0 +1,19 @@
+# Toy workspace used by `scripts/non-exhaustive-scripts-test.sh`.
+# NOT part of mango's workspace — the root `Cargo.toml` excludes
+# this path.
+#
+# Purpose: lock in clippy's behavior on the
+# `clippy::exhaustive_enums` lint against restriction-category
+# drift across clippy point releases. Each member exercises one of
+# three outcomes the script asserts on:
+#
+#   - `compliant`: `#[non_exhaustive] pub enum ...` → clippy clean
+#   - `allowed`:   `// reason: ...` + `#[allow(...)]` → clippy clean
+#   - `bad`:       bare `pub enum ...` → clippy must fail with
+#                  `-D clippy::exhaustive_enums`
+#
+# Keep dependency-free so the test doesn't drag the registry on
+# every CI run. Precedent: `tests/fixtures/geiger-toy-workspace/`.
+[workspace]
+resolver = "2"
+members = ["compliant", "bad", "allowed"]
