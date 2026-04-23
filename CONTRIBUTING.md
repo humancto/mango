@@ -223,7 +223,10 @@ with worked examples: [`docs/arithmetic-policy.md`][arith].
   `rust-version` in [`Cargo.toml`](./Cargo.toml) and the `msrv`
   CI job). MSRV bumps are deliberate, land in their own PR, and
   update this file plus `Cargo.toml` plus
-  `scripts/test-msrv-pin.sh` together.
+  `scripts/test-msrv-pin.sh` together. Full policy, ecosystem
+  floors, and the `--target x86_64-unknown-linux-gnu` workaround
+  for wasi-only edition2024 transitives:
+  [`docs/msrv.md`](./docs/msrv.md).
 - **Benches.** Performance claims are measured on the canonical
   hardware tiers in [`benches/runner/HARDWARE.md`][hw] against the
   pinned etcd oracle in [`benches/oracles/etcd/`][oracle]. Runner
