@@ -103,9 +103,11 @@ jobs:
       # which needs every transitive's tarball present in the local
       # registry cache. `cargo install cargo-vet` above only populates
       # cargo-vet's own transitives, not mango's. Pre-fetch the
-      # workspace graph (network is still allowed in this step; the
+      # workspace graph (network is allowed in this step; the
       # hermeticity promise of `--frozen` on the next step is
-      # preserved because the lockfile is what's being resolved).
+      # preserved because `--locked` rejects any lockfile regeneration
+      # and cargo verifies each tarball's checksum against Cargo.lock
+      # on extraction).
       - name: pre-fetch workspace deps
         run: cargo fetch --locked
 
