@@ -82,13 +82,36 @@ jobs:
       - name: install protoc
         # tonic-build 0.12 + prost-build 0.13 do not vendor protoc.
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      # cargo-nextest is installed via taiki-e/install-action (SHA-pinned
+      # per this repo's convention) and fetches the official release
+      # binary from cargo-nextest's GitHub releases with SHA256
+      # verification. Same supply-chain posture as EmbarkStudios/
+      # cargo-deny-action. See docs/testing.md for the watchdog policy
+      # that lives in `.config/nextest.toml`.
+      - name: install cargo-nextest
+        uses: taiki-e/install-action@5f57d6cb7cd20b14a8a27f522884c4bc8a187458  # v2
+        with:
+          tool: cargo-nextest
       - name: cargo fetch
         run: cargo fetch --locked
-      - name: cargo test
-        # `--no-fail-fast` here means "report all failing test binaries
-        # in one CI run" — it is unrelated to the matrix-strategy
-        # `fail-fast: false` knob, which doesn't apply (no matrix yet).
-        run: cargo test --workspace --all-targets --locked --no-fail-fast
+      - name: cargo nextest run
+        # Per-test-class hard timeouts live in `.config/nextest.toml`.
+        # `--profile ci` inherits from [profile.default], so the class
+        # overrides (unit=30s, integration=5m, loom=30m, chaos=24h)
+        # apply here too. fail-fast is disabled in the profile — a
+        # failing test does not short-circuit the run.
+        run: cargo nextest run --workspace --all-targets --locked --profile ci
+      - name: cargo test --doc
+        # nextest does NOT run doctests; this step covers them.
+        # Placed after nextest so the workspace dep cache is warm and
+        # only doctest-specific artifacts recompile.
+        run: cargo test --doc --workspace --locked
+      - name: watchdog smoke (assert nextest kills runaway tests)
+        # Proves `slow-timeout = { ..., terminate-after = 1 }` actually
+        # kills. Without this, someone could silently drop
+        # terminate-after from nextest.toml and the watchdog would
+        # downgrade to warn-only without CI noticing.
+        run: bash scripts/test-watchdog.sh
 
   msrv:
     # MSRV enforcement. `cargo check` on the pinned 1.80 toolchain

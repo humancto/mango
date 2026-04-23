@@ -64,11 +64,13 @@ TODO/FIXME/unimplemented!), and #12 (axis-or-plumbing declared above). -->
 
 - [ ] `cargo fmt --all -- --check`
 - [ ] `cargo clippy --workspace --all-targets --locked -- -D warnings`
-- [ ] `cargo test --workspace --all-targets --locked`
+- [ ] `cargo nextest run --workspace --all-targets --locked --profile ci`
+- [ ] `cargo test --doc --workspace --locked`
+- [ ] `bash scripts/test-watchdog.sh`
 - [ ] `cargo doc --workspace --no-deps`
 - [ ] `cargo deny check`
 - [ ] `cargo audit`
-- [ ] `rustup run 1.80 cargo check --workspace --all-targets --locked`
+- [ ] `rustup run 1.80 cargo check --workspace --all-targets --locked --target x86_64-unknown-linux-gnu`
 - [ ] No new `TODO` / `FIXME` / `unimplemented!` introduced
 - [ ] rust-expert adversarial review (final gate)
 
