@@ -1,0 +1,139 @@
+# Mango cargo-semver-checks CI gate.
+#
+# Catches semver violations the API surface alone misses — e.g.,
+# tightening a trait bound, removing a #[derive(Clone)], adding a
+# required generic parameter. Complements cargo-public-api (future
+# ROADMAP:802); neither fully replaces the other.
+#
+# Mode: ADVISORY pre-Phase-6. The check runs, surfaces its findings,
+# but does not block merge. Flip to gating when Phase 6 opens
+# (first PR that introduces a stable public API on a `crates/mango-*`
+# crate). The flip procedure is in docs/semver-policy.md.
+#
+# Version pin: CARGO_SEMVER_CHECKS_VERSION below is the single source
+# of truth. Different tool versions can flag / miss different things;
+# the pin is exact. Bump procedure in docs/semver-policy.md.
+#
+# Security: every github event value flows through step-level env
+# and is read as a shell variable — never interpolated into run
+# blocks directly. Matches the vet.yml / geiger.yml precedent.
+
+name: semver-checks
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - "crates/**/src/**"
+      - "crates/**/Cargo.toml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/semver-checks.yml"
+      - "scripts/semver-scripts-test.sh"
+      - "docs/semver-policy.md"
+  # merge_group does not honour paths filters — GitHub Actions
+  # always dispatches merge-queue events. That's the correct
+  # behaviour for us (merge-queue is the last line of defense) and
+  # matches the vet.yml precedent.
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_SEMVER_CHECKS_VERSION: "0.47.0"
+
+jobs:
+  semver-checks:
+    name: cargo-semver-checks (advisory)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          # baseline-rev <sha> needs the commit present locally;
+          # actions/checkout@v4 defaults to depth 1.
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        # cargo-semver-checks invokes cargo rustdoc, which needs a
+        # functioning toolchain. Unlike cargo-vet (prebuilt binary),
+        # this gate cannot skip toolchain setup.
+
+      - name: cache cargo-semver-checks binary
+        id: cache-semver-checks
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684  # v4
+        with:
+          path: ~/.cargo/bin/cargo-semver-checks
+          key: cargo-semver-checks-${{ env.CARGO_SEMVER_CHECKS_VERSION }}-${{ runner.os }}-${{ runner.arch }}
+
+      - name: install cargo-semver-checks
+        if: steps.cache-semver-checks.outputs.cache-hit != 'true'
+        env:
+          CARGO_SEMVER_CHECKS_VERSION: ${{ env.CARGO_SEMVER_CHECKS_VERSION }}
+        run: |
+          set -euo pipefail
+          cargo install cargo-semver-checks --version "${CARGO_SEMVER_CHECKS_VERSION}" --locked
+
+      - name: semver-checks version sanity
+        env:
+          CARGO_SEMVER_CHECKS_VERSION: ${{ env.CARGO_SEMVER_CHECKS_VERSION }}
+        run: |
+          set -euo pipefail
+          got="$(cargo semver-checks --version | awk '{print $2}')"
+          if [ "$got" != "${CARGO_SEMVER_CHECKS_VERSION}" ]; then
+              echo "error: cargo-semver-checks version mismatch (want ${CARGO_SEMVER_CHECKS_VERSION}, got ${got})" >&2
+              exit 1
+          fi
+
+      - name: semver-checks scripts self-test
+        run: bash scripts/semver-scripts-test.sh
+
+      - name: resolve baseline sha
+        id: base
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          MERGE_GROUP_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+        run: |
+          set -euo pipefail
+          # Prefer the GitHub-provided base SHA (attacker-uncontrollable,
+          # set by the maintainer's base-branch choice for PRs, or by
+          # the merge queue for merge_group). Fall back to
+          # git merge-base HEAD origin/main for workflow_dispatch,
+          # which has no base-sha event field.
+          if [ -n "${PR_BASE_SHA:-}" ]; then
+              base="${PR_BASE_SHA}"
+          elif [ -n "${MERGE_GROUP_BASE_SHA:-}" ]; then
+              base="${MERGE_GROUP_BASE_SHA}"
+          else
+              base="$(git merge-base HEAD origin/main)"
+          fi
+          echo "sha=${base}" >> "$GITHUB_OUTPUT"
+          echo "baseline sha: ${base}"
+
+      # SEMVER-CHECKS-MODE: advisory
+      # Single-line sentinel above. scripts/semver-scripts-test.sh
+      # asserts this sentinel stays in sync with the
+      # continue-on-error flag on the next step. When Phase 6 opens,
+      # flip BOTH together (sentinel -> gating, continue-on-error
+      # -> false). See docs/semver-policy.md.
+      - name: cargo semver-checks
+        id: semver-check
+        continue-on-error: true
+        env:
+          BASE_SHA: ${{ steps.base.outputs.sha }}
+        run: |
+          set -euo pipefail
+          cargo semver-checks --workspace --baseline-rev "${BASE_SHA}"
+
+      - name: surface advisory failure as warning
+        if: steps.semver-check.outcome == 'failure'
+        run: |
+          echo "::warning title=semver-checks advisory::cargo-semver-checks reported violations. See job log above and docs/semver-policy.md."
