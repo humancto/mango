@@ -1,0 +1,51 @@
+# xtask-vet-ttl
+#
+# Bespoke TTL check for cargo-vet `[exemptions]` entries carrying a
+# `review-by: YYYY-MM-DD` token in their `notes` string. cargo-vet
+# natively supports `end:` on `[trusted]` and `[wildcard-audits]`
+# entries (covered by `cargo vet renew --expiring --dry-run`), but
+# NOT on `[exemptions]`. This crate fills that gap.
+#
+# Binary, not a library consumers depend on. Invoked by
+# `.github/workflows/vet.yml` and by local contributors via
+# `cargo run -q -p xtask-vet-ttl`. NOT published.
+#
+# Why a Rust crate instead of a shell script: the logic is date
+# arithmetic + TOML parsing, which is hairy to do portably in bash
+# (macOS `date -j` vs GNU `date -d`, bash 3.2 limits, awk dialect
+# drift). A project whose thesis is "from-scratch production Rust"
+# writes its own tooling in Rust.
+
+[package]
+name = "xtask-vet-ttl"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "TTL check for cargo-vet [exemptions] entries (supply-chain gate helper)."
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+# TOML parser for reading supply-chain/config.toml. `toml = 0.8` is
+# the current stable serde-backed parser; brings `toml_edit` and
+# `serde` transitively — both already in the workspace graph.
+toml = "0.8"
+# Date handling. `time` is no_std-capable with an opt-in `std`
+# feature that gives us `OffsetDateTime::now_utc` and conversion
+# from `SystemTime`. `macros` is the const-time format-string
+# parser, `parsing` + `formatting` are the runtime pair we use
+# for reading `review-by` tokens out of `notes` strings.
+time = { version = "0.3", default-features = false, features = [
+    "macros",
+    "parsing",
+    "formatting",
+    "std",
+] }
+
+[dev-dependencies]
+# No external dev-deps; unit tests are self-contained in src/lib.rs.
