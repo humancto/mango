@@ -184,6 +184,62 @@ jobs:
           command: check
           arguments: --all-features
 
+  doc:
+    # Rustdoc gate. Two layers, one job:
+    #
+    #   1. RUSTDOCFLAGS="-D warnings" — every rustdoc lint becomes
+    #      a hard error. Catches rustdoc::broken_intra_doc_links
+    #      (the common regression after a rename), invalid HTML,
+    #      bare URLs, etc. We do NOT enumerate a specific lint
+    #      allowlist — new rustdoc lints land every few releases,
+    #      and an allowlist rots silently. Broad deny plus per-
+    #      module `#![allow(...)]` for known-noisy generated code
+    #      (crates/mango-proto/src/lib.rs for prost output) is the
+    #      correct shape.
+    #
+    #   2. `#![deny(missing_docs)]` on every crates/mango-*/src/lib.rs
+    #      root — source-side contract that every `pub` item has at
+    #      least one line of prose. The attribute survives CI-flag
+    #      rearrangement; -D warnings alone would silently drop
+    #      missing_docs enforcement if someone pulled the flag.
+    #
+    # Doctest *execution* stays in the `test` job below (it runs
+    # `cargo test --doc`). This job is link/warn-only — compiles
+    # doc pages but does not execute code blocks. See
+    # docs/documentation-policy.md for the full policy.
+    #
+    # Why a job in ci.yml and not a dedicated doc.yml: cargo doc
+    # is stable-toolchain + protoc (already warm from the clippy
+    # job's cache) + a few seconds of compile. Dedicated file
+    # would split the "core compile/lint/doc" cluster for no win.
+    name: doc
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          # Distinct cache scope — cargo doc's artifacts are not
+          # interchangeable with clippy/test/msrv. Sharing would
+          # silently invalidate other jobs on every alternation.
+          prefix-key: v0-doc
+          shared-key: ""
+      - name: install protoc
+        # tonic-build 0.12 + prost-build 0.13 do not vendor protoc;
+        # mango-proto's build script needs it. Same convention as
+        # the clippy/test/msrv jobs.
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: cargo fetch
+        run: cargo fetch --locked
+      - name: cargo doc (gate)
+        env:
+          # `-D warnings` turns rustdoc lints into errors. See
+          # docs/documentation-policy.md for the rationale and the
+          # local reproducer command.
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo doc --no-deps --document-private-items --workspace --locked
+
   bench-harness:
     # Bench-harness scaffold smoke tests. No Rust toolchain, no cache —
     # the scaffold is pure shell (etcd oracle fetch-and-verify, hardware
