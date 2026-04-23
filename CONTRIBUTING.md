@@ -285,11 +285,14 @@ Notes:
 
 ## PR description format
 
-Until [`ROADMAP.md:763`][pr-template-item] adds a real PR template,
-the description format is enforced in prose. Every PR description
-picks **one or more** classification cases below (they stack), each
-with the specific evidence the Reviewer's Contract demands. Items
-#1, #10, #11, #12 always apply.
+The PR description format is enforced by
+[`.github/pull_request_template.md`](./.github/pull_request_template.md),
+which GitHub auto-populates on every new PR. The template mirrors the
+nine classification cases documented below; contributors fill in or
+delete the sections that apply. Every PR description picks **one or
+more** classification cases below (they stack), each with the specific
+evidence the Reviewer's Contract demands. Items #1, #10, #11, #12
+always apply.
 
 - **Plumbing** (contract #1) — "This PR moves no north-star axis.
   Classification: plumbing. Verification strategy: [reproducible
@@ -330,5 +333,3 @@ with the specific evidence the Reviewer's Contract demands. Items
 
 Every PR also includes a **Test plan** checklist (DoD classes that
 apply, as in section 4) and a **Rollback** one-liner.
-
-[pr-template-item]: ./ROADMAP.md
