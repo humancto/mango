@@ -201,6 +201,16 @@ with worked examples: [`docs/arithmetic-policy.md`][arith].
   ship with a `loom` model that exercises its ordering invariants;
   see [`docs/loom.md`](./docs/loom.md) and the template crate
   [`crates/mango-loom-demo`](./crates/mango-loom-demo/).
+- **madsim (deterministic simulation).** Any crate introducing an
+  async primitive (spawns tokio tasks, uses tokio channels / timers,
+  or serves tonic RPCs) must also add itself to
+  `[workspace.metadata.mango.madsim]` in the workspace
+  [`Cargo.toml`](./Cargo.toml) **in the same PR**, and ship at
+  least one `#[madsim::test]` test paired with a real-tokio
+  `#[tokio::test]` test. The template crate
+  [`crates/mango-madsim-demo`](./crates/mango-madsim-demo/) is the
+  canonical starting point; full policy:
+  [`docs/madsim.md`](./docs/madsim.md).
 - **Miri.** Any crate introducing `unsafe` must also add itself to
   `[workspace.metadata.mango.miri]` in the workspace
   [`Cargo.toml`](./Cargo.toml) **in the same PR**. That table is
