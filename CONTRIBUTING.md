@@ -268,6 +268,13 @@ with worked examples: [`docs/arithmetic-policy.md`][arith].
   SHA-pinned. Full policy:
   [`docs/supply-chain-policy.md`](./docs/supply-chain-policy.md).
   Future additions: SBOM via `cargo-cyclonedx`.
+- **Semver compatibility.** `cargo-semver-checks` runs on every PR
+  that touches `crates/**/src/**`, `crates/**/Cargo.toml`, the root
+  `Cargo.toml`, or `Cargo.lock`. **Advisory** today — a violation
+  produces a visible `::warning::` annotation but does not block
+  merge. **Gating from Phase 6** (first stable public API). Full
+  policy, including the advisory→gating flip procedure:
+  [`docs/semver-policy.md`](./docs/semver-policy.md).
 - **MSRV.** Workspace MSRV is **1.80** (see
   `rust-version` in [`Cargo.toml`](./Cargo.toml) and the `msrv`
   CI job). MSRV bumps are deliberate, land in their own PR, and
@@ -383,6 +390,18 @@ cargo vet check --locked --frozen                   # audit-graph gate only
 cargo run -q -p xtask-vet-ttl                       # exemption review-by TTL gate only
 cargo run -q -p xtask-vet-ttl -- --list             # diagnostic listing of all tokens
 bash scripts/vet-scripts-test.sh                    # 8 harness scenarios
+```
+
+Run the cargo-semver-checks gate locally before opening a PR that
+touches a crate's public surface — same gate CI runs. `git fetch`
+first so the baseline isn't stale. Full policy in
+[`docs/semver-policy.md`](./docs/semver-policy.md):
+
+```bash
+cargo install cargo-semver-checks --version 0.47.0 --locked  # once; match semver-checks.yml
+git fetch origin main                                        # refresh baseline
+cargo semver-checks --workspace --baseline-rev origin/main   # the gate
+bash scripts/semver-scripts-test.sh                          # workflow self-test
 ```
 
 Notes:
