@@ -1,0 +1,21 @@
+{
+  "generated_by": "scripts/geiger-update-baseline.sh",
+  "generated_at": "2026-04-23T00:00:00Z",
+  "cargo_geiger_version": "0.13.0",
+  "crates": {
+    "mango-loom-demo": {
+      "functions": 0,
+      "exprs": 5,
+      "item_impls": 2,
+      "item_traits": 0,
+      "methods": 0
+    }
+  },
+  "totals": {
+    "functions": 0,
+    "exprs": 5,
+    "item_impls": 2,
+    "item_traits": 0,
+    "methods": 0
+  }
+}

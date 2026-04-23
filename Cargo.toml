@@ -1,6 +1,13 @@
 [workspace]
 resolver = "2"
 members = ["crates/mango", "crates/mango-proto", "crates/mango-loom-demo"]
+# tests/fixtures/geiger-toy-workspace is a self-contained workspace
+# used by scripts/geiger-scripts-test.sh as a real-cargo-geiger
+# oracle. Excluding it keeps Cargo from discovering its
+# deliberately-unsafe source under mango's `unsafe_code = "forbid"`
+# lint and from walking its `[workspace]` table as if it were a
+# nested member. See docs/unsafe-policy.md.
+exclude = ["tests/fixtures/geiger-toy-workspace"]
 
 # Miri curated-subset opt-in (see docs/miri.md). Any crate that ships
 # `unsafe` (and therefore carries a `#![allow(unsafe_code)]` escape

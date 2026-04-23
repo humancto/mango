@@ -1,0 +1,65 @@
+{
+  "packages": [
+    {
+      "package": {
+        "id": {
+          "name": "mango-loom-demo",
+          "version": "0.1.0",
+          "source": {
+            "Path": "file:///repo/crates/mango-loom-demo"
+          }
+        },
+        "dependencies": []
+      },
+      "unsafety": {
+        "used": {
+          "functions": {
+            "safe": 0,
+            "unsafe_": 0
+          },
+          "exprs": {
+            "safe": 0,
+            "unsafe_": 3
+          },
+          "item_impls": {
+            "safe": 0,
+            "unsafe_": 2
+          },
+          "item_traits": {
+            "safe": 0,
+            "unsafe_": 0
+          },
+          "methods": {
+            "safe": 0,
+            "unsafe_": 0
+          }
+        },
+        "unused": {
+          "functions": {
+            "safe": 0,
+            "unsafe_": 0
+          },
+          "exprs": {
+            "safe": 0,
+            "unsafe_": 0
+          },
+          "item_impls": {
+            "safe": 0,
+            "unsafe_": 0
+          },
+          "item_traits": {
+            "safe": 0,
+            "unsafe_": 0
+          },
+          "methods": {
+            "safe": 0,
+            "unsafe_": 0
+          }
+        },
+        "forbids_unsafe": false
+      }
+    }
+  ],
+  "packages_without_metrics": [],
+  "used_but_not_scanned_files": []
+}
