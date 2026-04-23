@@ -1,0 +1,384 @@
+# Mango CycloneDX SBOM workflow.
+#
+# Produces a CycloneDX 1.5 JSON SBOM per workspace member and
+# validates each against the contract documented in
+# docs/sbom-policy.md. The artifacts are for Phase 12 to attach
+# to GitHub Releases; this workflow does NOT do release
+# attachment.
+#
+# Not a policy gate. cargo-deny / cargo-audit / cargo-vet police
+# the dep graph; this job's only failure modes are:
+#   - The SBOM we would ship is malformed (shape assertions fail).
+#   - Generation is non-deterministic (reproducibility diff).
+#   - The SBOM omits deps that are in Cargo.lock, or claims deps
+#     that are not in Cargo.lock (fabrication / omission probe).
+#
+# Security: every `github.event.*` value flows through step-level
+# `env:` and is read as a shell variable — never interpolated
+# into `run:` blocks directly. In this workflow no
+# `github.event.*` value is actually needed by a `run:` step, so
+# no such hoist exists; the pattern is preserved for future
+# additions. Pattern matches geiger.yml / vet.yml / miri.yml /
+# ct-comparison.yml.
+#
+# No schedule trigger: the SBOM snapshots Cargo.lock, which is
+# itself version-controlled. Nightly re-scans would only re-emit
+# the same artifact. The dep-graph gates (cargo-audit) already
+# have the nightly cron that matters.
+
+name: sbom
+
+on:
+  pull_request:
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - ".github/workflows/sbom.yml"
+      - "scripts/sbom-*.sh"
+      - "tests/fixtures/sbom/**"
+      - "docs/sbom-policy.md"
+  push:
+    branches: [main]
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - ".github/workflows/sbom.yml"
+      - "scripts/sbom-*.sh"
+      - "tests/fixtures/sbom/**"
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  # Bump procedure: docs/sbom-policy.md "Bump procedure".
+  # The fixture under tests/fixtures/sbom/valid.json must be
+  # regenerated from the same version in the same PR that moves
+  # this pin; sbom-scripts-test.sh's final scenario enforces the
+  # fixture-vs-workflow agreement.
+  CARGO_CYCLONEDX_VERSION: "0.5.9"
+  CYCLONEDX_SPEC_VERSION: "1.5"
+  # Deterministic timestamp so the reproducibility diff can run
+  # two generations against a byte-stable oracle. 1 (not 0) to
+  # sidestep any tool treating 0 as "unset".
+  SOURCE_DATE_EPOCH: "1"
+
+jobs:
+  sbom:
+    name: sbom (cyclonedx)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          fetch-depth: 1
+
+      - name: install rust stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          prefix-key: v0-sbom
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: restore cargo-cyclonedx binary
+        id: cache-cyclonedx-bin
+        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57  # v4
+        with:
+          path: ~/.cargo/bin/cargo-cyclonedx
+          key: sbom-bin-v${{ env.CARGO_CYCLONEDX_VERSION }}-${{ runner.os }}-${{ runner.arch }}
+
+      - name: install cargo-cyclonedx
+        if: steps.cache-cyclonedx-bin.outputs.cache-hit != 'true'
+        env:
+          CARGO_CYCLONEDX_VERSION: ${{ env.CARGO_CYCLONEDX_VERSION }}
+        run: |
+          set -euo pipefail
+          cargo install --locked cargo-cyclonedx --version "${CARGO_CYCLONEDX_VERSION}"
+
+      - name: install protoc
+        # mango-proto's build.rs invokes protoc. --no-build-deps
+        # excludes build-time deps from the SBOM contents, but
+        # the build.rs still has to run for cargo to emit metadata.
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends protobuf-compiler
+
+      - name: cyclonedx version sanity
+        # `cargo-cyclonedx --version` prints
+        # `cargo-cyclonedx-cyclonedx X.Y.Z`; the last whitespace-
+        # delimited field is the version.
+        env:
+          CARGO_CYCLONEDX_VERSION: ${{ env.CARGO_CYCLONEDX_VERSION }}
+        run: |
+          set -euo pipefail
+          got="$(cargo cyclonedx --version | awk '{print $NF}')"
+          if [ "$got" != "${CARGO_CYCLONEDX_VERSION}" ]; then
+              echo "error: cargo-cyclonedx version mismatch (want ${CARGO_CYCLONEDX_VERSION}, got ${got})" >&2
+              exit 1
+          fi
+
+      - name: sbom scripts self-test
+        # Fail fast if validator logic regressed before a real scan.
+        run: bash scripts/sbom-scripts-test.sh
+
+      - name: generate SBOMs (run 1)
+        env:
+          CYCLONEDX_SPEC_VERSION: ${{ env.CYCLONEDX_SPEC_VERSION }}
+        run: |
+          set -euo pipefail
+          cargo cyclonedx \
+              --format json \
+              --spec-version "${CYCLONEDX_SPEC_VERSION}" \
+              --no-build-deps
+
+          mapfile -t emitted < <(find crates -maxdepth 2 -name '*.cdx.json' -print | sort)
+          if [ "${#emitted[@]}" -eq 0 ]; then
+              echo "error: cargo cyclonedx produced zero .cdx.json files" >&2
+              exit 1
+          fi
+          printf 'generated %d SBOM(s):\n' "${#emitted[@]}"
+          printf '  %s\n' "${emitted[@]}"
+
+          mkdir -p "${RUNNER_TEMP}/sbom-run1"
+          for f in "${emitted[@]}"; do
+              cp "$f" "${RUNNER_TEMP}/sbom-run1/$(basename "$f")"
+          done
+
+      - name: integration — workspace-member coverage
+        # Integration assertion (6) from docs/sbom-policy.md:
+        # exactly one SBOM per workspace member.
+        run: |
+          set -euo pipefail
+          expected=$(
+              cargo metadata --no-deps --format-version=1 \
+                  | jq -r '.packages[] | select(.source == null) | .name' \
+                  | sort
+          )
+          actual=$(
+              find crates -maxdepth 2 -name '*.cdx.json' \
+                  | xargs -n1 basename \
+                  | sed 's/\.cdx\.json$//' \
+                  | sort
+          )
+          if [ "$expected" != "$actual" ]; then
+              echo "error: SBOM set does not match workspace members" >&2
+              diff <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") >&2 || true
+              exit 1
+          fi
+          printf '%d workspace members, %d SBOMs — set matches\n' \
+              "$(wc -l <<<"$expected")" "$(wc -l <<<"$actual")"
+
+      - name: per-file validation
+        # Per-file assertions (1–6) — shape + provenance.
+        env:
+          EXPECTED_TOOL_VERSION: ${{ env.CARGO_CYCLONEDX_VERSION }}
+        run: |
+          set -euo pipefail
+          any_fail=0
+          while IFS= read -r sbom; do
+              expected="$(basename "$sbom" .cdx.json)"
+              if ! bash scripts/sbom-check.sh "$sbom" "$expected"; then
+                  any_fail=1
+              fi
+          done < <(find crates -maxdepth 2 -name '*.cdx.json' | sort)
+          if [ "$any_fail" -ne 0 ]; then
+              echo "error: one or more SBOMs failed per-file validation" >&2
+              exit 1
+          fi
+
+      - name: integration — Cargo.lock forward cross-check
+        # Assertion (8): every components[].purl of shape
+        # pkg:cargo/<name>@<ver> corresponds to a (name, version)
+        # in Cargo.lock. Proves the SBOM is derived from the
+        # lockfile, not fabricated.
+        run: |
+          set -euo pipefail
+          lock_pairs="$(
+              cargo metadata --format-version=1 --locked \
+                  | jq -r '.packages[] | select(.source != null) | "\(.name) \(.version)"' \
+                  | sort -u
+          )"
+
+          any_fail=0
+          while IFS= read -r sbom; do
+              purl_pairs="$(
+                  jq -r '
+                      .components[]?.purl
+                      | select(startswith("pkg:cargo/"))
+                      | capture("^pkg:cargo/(?<n>[^@]+)@(?<v>[^?]+)")
+                      | "\(.n) \(.v)"
+                  ' "$sbom" | sort -u
+              )"
+              if [ -z "$purl_pairs" ]; then
+                  continue
+              fi
+              missing="$(
+                  comm -23 <(printf '%s\n' "$purl_pairs") <(printf '%s\n' "$lock_pairs")
+              )"
+              if [ -n "$missing" ]; then
+                  echo "error: $sbom contains purls not found in Cargo.lock:" >&2
+                  printf '%s\n' "$missing" >&2
+                  any_fail=1
+              fi
+          done < <(find crates -maxdepth 2 -name '*.cdx.json' | sort)
+          if [ "$any_fail" -ne 0 ]; then
+              exit 1
+          fi
+          echo "Cargo.lock forward cross-check passed"
+
+      - name: integration — runtime-dep reverse cross-check
+        # Assertion (9): every runtime (normal) dep reachable
+        # from any workspace member appears in the union of
+        # SBOM components. Uses `cargo tree --edges=normal`,
+        # NOT the full Cargo.lock, because `--no-build-deps`
+        # legitimately excludes build-time + dev-only deps from
+        # the SBOM. The attack this catches: cargo-cyclonedx
+        # silently dropping a runtime dep from components[]
+        # while the forward check still passes (every remaining
+        # purl is valid).
+        run: |
+          set -euo pipefail
+          # `--edges=normal` is runtime-only (no build, no dev).
+          # `--no-dedupe` forces every occurrence to be printed
+          # (not just the first). awk filters out blank lines,
+          # workspace-member root lines, and strips the `v`
+          # prefix off the version column.
+          expected_runtime="$(
+              cargo tree --workspace --edges=normal --prefix=none --no-dedupe \
+                  | awk 'NF>=2 && $1 !~ /^(mango|mango-proto|mango-loom-demo|xtask-vet-ttl)$/ {gsub(/^v/, "", $2); print $1, $2}' \
+                  | sort -u
+          )"
+
+          all_sbom_pairs="$(
+              for sbom in $(find crates -maxdepth 2 -name '*.cdx.json' | sort); do
+                  jq -r '
+                      .components[]?.purl
+                      | select(startswith("pkg:cargo/"))
+                      | capture("^pkg:cargo/(?<n>[^@]+)@(?<v>[^?]+)")
+                      | "\(.n) \(.v)"
+                  ' "$sbom"
+              done | sort -u
+          )"
+
+          missing="$(
+              comm -23 <(printf '%s\n' "$expected_runtime") <(printf '%s\n' "$all_sbom_pairs")
+          )"
+          if [ -n "$missing" ]; then
+              echo "error: runtime deps (cargo tree) missing from every SBOM:" >&2
+              printf '%s\n' "$missing" >&2
+              exit 1
+          fi
+          # Extras in the SBOM over and above cargo-tree's output
+          # are acceptable — cargo-cyclonedx can surface feature-
+          # gated deps cargo-tree dedupes. The forward check has
+          # already verified every extra is in Cargo.lock.
+          printf 'runtime reverse check: %d expected, %d in SBOM union\n' \
+              "$(wc -l <<<"$expected_runtime")" \
+              "$(wc -l <<<"$all_sbom_pairs")"
+
+      - name: integration — component-count floors
+        # Assertion (10): non-empty floors — well below current
+        # reality so won't flap on lockfile bumps, but catch an
+        # empty-output bug.
+        run: |
+          set -euo pipefail
+          check_floor() {
+              local crate="$1" floor="$2"
+              local sbom="crates/$crate/$crate.cdx.json"
+              local n
+              n="$(jq '.components | length' "$sbom")"
+              if [ "$n" -lt "$floor" ]; then
+                  printf 'error: %s has %d components (floor %d)\n' \
+                      "$sbom" "$n" "$floor" >&2
+                  return 1
+              fi
+              printf 'ok: %s has %d components (floor %d)\n' "$sbom" "$n" "$floor"
+          }
+          check_floor mango-proto 5
+          check_floor xtask-vet-ttl 10
+
+      - name: generate SBOMs (run 2) + reproducibility diff
+        # Assertion (11): regenerate into a scratch dir, strip
+        # volatile fields, diff byte-for-byte against run 1.
+        # Non-empty diff => tool-level non-determinism or flag
+        # misuse; fail loudly.
+        env:
+          CYCLONEDX_SPEC_VERSION: ${{ env.CYCLONEDX_SPEC_VERSION }}
+        run: |
+          set -euo pipefail
+
+          run2="${RUNNER_TEMP}/sbom-run2"
+          mkdir -p "$run2"
+
+          find crates -maxdepth 2 -name '*.cdx.json' -delete
+
+          cargo cyclonedx \
+              --format json \
+              --spec-version "${CYCLONEDX_SPEC_VERSION}" \
+              --no-build-deps
+
+          while IFS= read -r f; do
+              mv "$f" "$run2/$(basename "$f")"
+          done < <(find crates -maxdepth 2 -name '*.cdx.json')
+
+          for f in "${RUNNER_TEMP}/sbom-run1"/*.cdx.json; do
+              cp "$f" "crates/$(basename "$f" .cdx.json)/$(basename "$f")"
+          done
+
+          strip='del(.serialNumber, .metadata.timestamp)'
+          any_diff=0
+          for f1 in "${RUNNER_TEMP}/sbom-run1"/*.cdx.json; do
+              base="$(basename "$f1")"
+              f2="$run2/$base"
+              if [ ! -f "$f2" ]; then
+                  echo "error: run 2 missing $base" >&2
+                  any_diff=1
+                  continue
+              fi
+              if ! diff -u \
+                      <(jq -S "$strip" "$f1") \
+                      <(jq -S "$strip" "$f2"); then
+                  echo "error: reproducibility diff non-empty for $base" >&2
+                  any_diff=1
+              fi
+          done
+          if [ "$any_diff" -ne 0 ]; then
+              exit 1
+          fi
+          echo "reproducibility diff empty across all SBOMs"
+
+      - name: upload sbom-release artifacts
+        # Artifact split (per docs/sbom-policy.md): public-facing
+        # SBOMs for Phase 12 release attachment.
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: sbom-release-cyclonedx-1.5
+          path: |
+            crates/mango/mango.cdx.json
+            crates/mango-proto/mango-proto.cdx.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: upload sbom-internal artifacts
+        # Internal crates — audited for supply-chain continuity
+        # but not intended for public release attachment.
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: sbom-internal-cyclonedx-1.5
+          path: |
+            crates/mango-loom-demo/mango-loom-demo.cdx.json
+            crates/xtask-vet-ttl/xtask-vet-ttl.cdx.json
+          if-no-files-found: error
+          retention-days: 90
