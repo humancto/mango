@@ -9,6 +9,12 @@
 //! Ordering discipline: `Ordering` is imported from `std` on
 //! both arms — loom re-exports the same type. The cfg split is
 //! for `AtomicBool` and the cell module only.
+//!
+//! Secondary role: Miri smoke-test target. Until Phase 1+ ships
+//! `unsafe` code with its own Miri coverage, the curated subset
+//! in `[workspace.metadata.mango.miri]` points at this crate so
+//! the Miri CI workflow has a non-vacuous surface to exercise.
+//! See `docs/miri.md`.
 
 use std::sync::atomic::Ordering;
 
@@ -148,5 +154,79 @@ impl<T> std::ops::DerefMut for SpinlockGuard<'_, T> {
 impl<T> Drop for SpinlockGuard<'_, T> {
     fn drop(&mut self) {
         self.lock.locked.store(false, Ordering::Release);
+    }
+}
+
+// Default-cfg smoke tests. Gated on `not(loom)` so they only run
+// under the standard build (and therefore under Miri, which does
+// not set `--cfg loom`). Loom concurrency testing lives in
+// `tests/loom_spinlock.rs` under `#![cfg(loom)]` and is orthogonal:
+// loom explores interleavings to verify ordering; these tests give
+// Miri a workload that touches every `unsafe` site so the interpreter
+// has somewhere to find UB if we regress. See `docs/miri.md`.
+#[cfg(all(test, not(loom)))]
+mod tests {
+    use super::Spinlock;
+
+    // Exercises each of the 4 unsafe pointer-deref sites in this
+    // crate: `SpinlockGuard::with`, `SpinlockGuard::with_mut`,
+    // `Deref::deref`, `DerefMut::deref_mut`. The `AtomicBool::store`
+    // in Drop is a safe op — intentionally not a 5th site.
+    #[test]
+    fn spinlock_single_threaded_smoke() {
+        let lock = Spinlock::new(0_u32);
+
+        // Site 1: `with` (read via cell shim + raw-pointer deref).
+        {
+            let g = lock.lock();
+            let v = g.with(|v| *v);
+            assert_eq!(v, 0);
+        }
+
+        // Site 2: `with_mut` (write via cell shim + raw-pointer deref).
+        {
+            let mut g = lock.lock();
+            g.with_mut(|v| *v = 7);
+        }
+
+        // Site 3: `Deref::deref` (non-loom-only read convenience).
+        {
+            let g = lock.lock();
+            assert_eq!(*g, 7);
+        }
+
+        // Site 4: `DerefMut::deref_mut` (non-loom-only write convenience).
+        {
+            let mut g = lock.lock();
+            *g = 42;
+        }
+
+        // Final read-back to confirm writes landed and Drop (the safe
+        // `store(Release)`) released the lock between acquisitions.
+        let g = lock.lock();
+        assert_eq!(*g, 42);
+    }
+
+    // Exercises the `unsafe impl Send + Sync for Spinlock<T>` claims
+    // under a real cross-thread access pattern. Miri's preemption
+    // points let threads race; if the Sync claim were bogus (e.g.,
+    // two threads could observe &mut overlap), Miri would catch the
+    // aliasing violation here. Uses `std::thread::scope` — available
+    // since 1.63 and supported under Miri.
+    #[test]
+    fn spinlock_cross_thread_aliasing() {
+        let lock = Spinlock::new(0_u64);
+        std::thread::scope(|s| {
+            for _ in 0..4 {
+                s.spawn(|| {
+                    for _ in 0..16 {
+                        let mut g = lock.lock();
+                        g.with_mut(|v| *v = v.wrapping_add(1));
+                    }
+                });
+            }
+        });
+        let g = lock.lock();
+        assert_eq!(g.with(|v| *v), 4 * 16);
     }
 }
