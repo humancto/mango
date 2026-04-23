@@ -227,10 +227,14 @@ jobs:
           shared-key: ""
       - name: install protoc
         # tonic-build 0.12 + prost-build 0.13 do not vendor protoc;
-        # mango-proto's build script needs it. Same convention as
-        # the clippy/test/msrv jobs.
+        # mango-proto's build script needs it. protoc ships on the
+        # GitHub-hosted runner image — same convention as the
+        # clippy/test/msrv jobs.
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - name: cargo fetch
+        # Strictly redundant with cargo doc's own fetch, but mirrors
+        # the clippy/test/msrv step shape and gives a clean log
+        # boundary if the network flakes on the lockfile resolve.
         run: cargo fetch --locked
       - name: cargo doc (gate)
         env:
