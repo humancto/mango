@@ -1,0 +1,19 @@
+# Workspace-wide Cargo configuration.
+#
+# `incompatible-rust-versions = "fallback"` enables the MSRV-aware resolver
+# (stable since Cargo 1.84). When resolving dependencies, Cargo prefers the
+# latest version whose declared `rust-version` is compatible with the
+# workspace's MSRV (`rust-version = "1.80"` in the workspace manifest),
+# silently picking older compatible releases instead of the newest published
+# release. Without this, `cargo update` can pin transitive deps that require
+# a newer Rust edition (e.g., `getrandom 0.4.2` and `indexmap 2.14+` require
+# `edition2024` / Cargo 1.85), breaking the `cargo check @ 1.80` MSRV gate.
+#
+# The MSRV CI job runs Cargo 1.80, which does not know about this setting,
+# but it reads the already-resolved Cargo.lock (`--locked`) so it inherits
+# the MSRV-aware resolution made by a newer Cargo at PR / lockfile-update
+# time. Contributors who regenerate the lockfile on Cargo >= 1.84 get the
+# fallback for free; older Cargos will produce a too-new lockfile that the
+# MSRV job catches at PR time.
+[resolver]
+incompatible-rust-versions = "fallback"

@@ -58,6 +58,11 @@ jobs:
           # silently invalidates work on every alternation.
           prefix-key: v0-clippy
           shared-key: ""
+      - name: install protoc
+        # tonic-build 0.12 + prost-build 0.13 do not vendor protoc;
+        # the protobuf-compiler apt package is on the GitHub runner
+        # image cache, so this is warm after the first run.
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - name: cargo fetch
         run: cargo fetch --locked
       - name: cargo clippy
@@ -74,6 +79,9 @@ jobs:
         with:
           prefix-key: v0-test
           shared-key: ""
+      - name: install protoc
+        # tonic-build 0.12 + prost-build 0.13 do not vendor protoc.
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - name: cargo fetch
         run: cargo fetch --locked
       - name: cargo test
@@ -110,6 +118,9 @@ jobs:
           # invalidates this job's cache cleanly without a manual rev.
           prefix-key: v0-msrv-1.80
           shared-key: ""
+      - name: install protoc
+        # tonic-build 0.12 + prost-build 0.13 do not vendor protoc.
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - name: cargo fetch
         run: cargo fetch --locked
       - name: cargo check (workspace, all targets, MSRV toolchain)

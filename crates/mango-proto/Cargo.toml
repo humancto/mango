@@ -1,0 +1,24 @@
+[package]
+name = "mango-proto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Mango generated protobuf bindings (Phase 0 skeleton; real wire surfaces land in Phase 6)."
+publish = false
+
+[dependencies]
+prost = "0.13"
+
+[build-dependencies]
+# `default-features = false, features = ["prost"]` is future-proofing.
+# `transport` today is `transport = []` (a marker with zero deps);
+# dropping it does not change the current dep graph. If a future
+# tonic-build point release adds runtime deps under `transport`, we
+# do not pick them up silently — we opt in deliberately.
+tonic-build = { version = "0.12", default-features = false, features = ["prost"] }
+
+[lints]
+workspace = true
