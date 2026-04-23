@@ -759,7 +759,7 @@ Phase 6 ships gRPC publicly.
 - [x] **Monotonic-clock policy**: workspace doc note in `docs/time.md` declaring "all protocol-relevant time math uses `Instant` (monotonic), never `SystemTime`. Wallclock is used only for human-facing logs and lease TTL display, never for protocol decisions. Leap seconds: documented as N/A. NTP step tolerance: tested with ±5s clock jumps in Phase 13."
 - [x] **Crash-only design declaration** in `docs/architecture/crash-only.md`: storage and server layers assume the process can be killed at any instant; clean shutdown is an optimization, never a correctness requirement. WAL-then-apply ordering and `data-dir/VERSION` recovery (Phase 12) make process restart equivalent to crash recovery. Every storage / Raft PR must satisfy "this would also be correct if killed at any point."
 - [x] Create `crates/mango-proto` skeleton with `tonic-build` and a hello-world `.proto` that compiles
-- [ ] Add `CONTRIBUTING.md` covering branch naming, commit style, PR template, the test bar, **the north-star bar + reviewer's contract**, and the arithmetic-primitive policy.
+- [x] Add `CONTRIBUTING.md` covering branch naming, commit style, PR template, the test bar, **the north-star bar + reviewer's contract**, and the arithmetic-primitive policy.
 - [ ] Add a PR template that forces every PR description to declare which north-star axis the change moves, names the verifying test, and records the measured number (or honestly marks as plumbing).
 
 ## Phase 0.5 — Foundation (parallel with Phases 1–5; must land before Phase 6 ships gRPC publicly)
