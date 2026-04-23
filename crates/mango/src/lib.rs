@@ -3,6 +3,12 @@
 //! This crate is currently a placeholder. Real functionality lands per the
 //! phases described in `ROADMAP.md` at the workspace root.
 
+#![deny(missing_docs)]
+
+/// The package version string, captured at build time from
+/// `CARGO_PKG_VERSION`. Kept as a crate-level constant so
+/// downstream tests can assert on the shipped version without
+/// re-reading `Cargo.toml`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[cfg(test)]

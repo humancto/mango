@@ -16,6 +16,8 @@
 //! the Miri CI workflow has a non-vacuous surface to exercise.
 //! See `docs/miri.md`.
 
+#![deny(missing_docs)]
+
 use std::sync::atomic::Ordering;
 
 #[cfg(loom)]
