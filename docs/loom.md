@@ -220,7 +220,7 @@ A PR without these is not mergeable.
 - [`docs/miri.md`](miri.md) — Miri is the orthogonal UB-detection
   gate; loom verifies ordering, Miri verifies soundness of `unsafe`
   blocks. Both are required when Phase 3+ primitives ship `unsafe`
-  - atomics.
+  and atomics together.
 - [`CONTRIBUTING.md` §8](../CONTRIBUTING.md) — optional local loom
   invocation.
 - [`ROADMAP.md` item 0.5.2](../ROADMAP.md) — where this policy was declared.
