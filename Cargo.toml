@@ -31,6 +31,18 @@ crates = ["mango-loom-demo"]
 # procedure.
 [workspace.dependencies]
 loom = "=0.7.2"
+# Constant-time comparison primitives for secret byte compares in
+# `auth*` / `crypto*` / `token*` / `hash_chain*` modules. Enforced
+# by `scripts/ct-comparison-check.sh` per `docs/ct-comparison-policy.md`.
+# `default-features = false` drops the `std` feature (subtle is
+# no_std-capable; nothing in the trait surface needs std).
+# `const-generics` enables `ConstantTimeEq` on `[T; N]` arrays —
+# what fixed-size MAC tags / hashes want.
+# Forward-declared here so the first crate that needs it just writes
+# `subtle.workspace = true`; no crate uses it yet.
+subtle = { version = "2.6", default-features = false, features = [
+    "const-generics",
+] }
 
 [workspace.package]
 version = "0.1.0"
@@ -72,6 +84,16 @@ print_stderr = { level = "deny", priority = 1 }
 await_holding_lock = { level = "deny", priority = 1 }
 await_holding_refcell_ref = { level = "deny", priority = 1 }
 disallowed_types = { level = "deny", priority = 1 }
+# Advisory layer for the constant-time comparison policy
+# (docs/ct-comparison-policy.md). Pairs with `disallowed-methods`
+# in clippy.toml — without this line the config in clippy.toml is
+# inert. Kept at `warn` (not `deny`) because:
+#   (a) the scoped grep gate `scripts/ct-comparison-check.sh` is
+#       the CI-blocking enforcement layer, and
+#   (b) clippy's trait-method path resolution is flaky enough that
+#       silent no-op is a real risk; `warn` surfaces hits without
+#       blocking PRs if resolution regresses.
+disallowed_methods = { level = "warn", priority = 1 }
 # Pairs with `msrv = "1.80"` in clippy.toml: flags any stdlib API
 # call newer than MSRV at PR time, complementing the `cargo check
 # @ 1.80` job that catches it at compile time.
