@@ -17,6 +17,10 @@
 //! See `docs/miri.md`.
 
 #![deny(missing_docs)]
+// `publish = false` pedagogical demo — opted out of the workspace
+// `clippy::exhaustive_enums = "deny"` policy. See
+// `docs/api-stability.md` for the scope definition.
+#![allow(clippy::exhaustive_enums)]
 
 use std::sync::atomic::Ordering;
 

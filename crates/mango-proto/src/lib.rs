@@ -8,6 +8,13 @@
 //! real `mango.*.v1` proto lands.
 
 #![deny(missing_docs)]
+// `publish = false` and forward-looking: prost-emitted enums are
+// never `#[non_exhaustive]`, and retrofitting post-codegen is
+// brittle. Opt the whole crate out of the workspace
+// `clippy::exhaustive_enums = "deny"` policy. When `mango-proto`
+// becomes publishable in Phase 6+, this allow stays (generated-
+// code exception in `docs/api-stability.md`).
+#![allow(clippy::exhaustive_enums)]
 
 /// Namespace root for `mango.hello.*` protobuf services. Phase-0
 /// smoke surface only; real versioned namespaces (`mango.kv.v1`,

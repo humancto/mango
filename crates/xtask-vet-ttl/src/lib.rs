@@ -13,6 +13,11 @@
 // from `allow` to `warn` for `missing_docs` cannot retroactively red
 // the `doc` CI job. One line of cheap insurance.
 #![allow(missing_docs)]
+// `publish = false` internal xtask — opted out of the workspace
+// `clippy::exhaustive_enums = "deny"` policy. `ParseError` below
+// is the one `pub enum` in this crate; it stays closed because
+// xtask-vet-ttl is not a library. See `docs/api-stability.md`.
+#![allow(clippy::exhaustive_enums)]
 
 use std::fmt;
 

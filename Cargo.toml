@@ -135,6 +135,16 @@ disallowed_methods = { level = "warn", priority = 1 }
 # call newer than MSRV at PR time, complementing the `cargo check
 # @ 1.80` job that catches it at compile time.
 incompatible_msrv = { level = "deny", priority = 1 }
+# `#[non_exhaustive]` policy on public enums. Every `pub enum` in a
+# publishable (non-`publish = false`) crate must carry
+# `#[non_exhaustive]` or a documented per-enum escape. Escape hatch:
+# `// reason: ...` line-comment immediately preceding
+# `#[allow(clippy::exhaustive_enums)]` on the specific enum. Non-
+# publishable crates carry a crate-level `#![allow(...)]` at lib.rs
+# top — same pattern as `unsafe_code = "forbid"` + per-crate
+# `#![allow(unsafe_code)]`. See `docs/api-stability.md` for the
+# policy; `scripts/non-exhaustive-check.sh` is the structural backstop.
+exhaustive_enums = { level = "deny", priority = 1 }
 
 # Release profile. overflow-checks = true is the runtime backstop for
 # the compile-time clippy::arithmetic_side_effects lint
