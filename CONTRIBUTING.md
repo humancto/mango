@@ -65,7 +65,9 @@ from [`ROADMAP.md` § Working rules][working-rules]:
 - One roadmap item per PR. Small, atomic, mergeable.
 - Every plan declares the north-star axis + named test + measured
   number (or honestly marks plumbing).
-- `cargo test --workspace` green at every commit.
+- `cargo nextest run --workspace` green at every commit (plus
+  `cargo test --doc --workspace` for doctests, which nextest
+  does not cover — see [`docs/testing.md`](./docs/testing.md)).
 - Every hot-path PR ships a Criterion bench and a baseline number.
 - No `TODO` / `FIXME` / `unimplemented!()` / `todo!()` on `main` —
   follow-ups become new roadmap items, not comments in code.
@@ -268,23 +270,38 @@ pushing.
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo test --workspace --all-targets --locked
+cargo nextest run --workspace --all-targets --locked --profile ci
+cargo test --doc --workspace --locked
+bash scripts/test-watchdog.sh
 cargo doc --workspace --no-deps
 cargo deny check
 cargo audit
-rustup run 1.80 cargo check --workspace --all-targets --locked
+rustup run 1.80 cargo check --workspace --all-targets --locked \
+  --target x86_64-unknown-linux-gnu
 ```
 
 Notes:
 
+- `cargo nextest run`: the CI test runner. Per-test-class hard
+  timeouts live in `.config/nextest.toml`; policy in
+  [`docs/testing.md`](./docs/testing.md). `cargo test` still
+  works for local iteration — same test bodies, different
+  runner — but CI only runs nextest.
+- `cargo test --doc`: nextest does NOT run doctests; this step
+  covers them. Required to reproduce CI.
+- `bash scripts/test-watchdog.sh`: regression smoke that proves
+  nextest's `terminate-after` actually kills a runaway test.
+  Runs in ~30s.
 - `cargo doc`: the Definition of Done requires this to be
   warning-free. `cargo doc` `-D warnings` will gate once the
   doc-lint CI job lands.
-- `rustup run 1.80 …`: MSRV gate. Update the `1.80` when the
-  workspace MSRV bumps (single-sourcing from `rust-version` is a
-  future cleanup).
+- `rustup run 1.80 …`: MSRV gate. See
+  [`docs/msrv.md`](./docs/msrv.md) for the `--target` rationale.
 - `cargo deny`, `cargo audit`: install with
   `cargo install cargo-deny cargo-audit` if missing.
+- `cargo nextest`: install with
+  `cargo install cargo-nextest --locked` (or
+  `brew install cargo-nextest` on macOS) if missing.
 
 ## PR description format
 
