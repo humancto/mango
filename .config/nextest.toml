@@ -1,0 +1,71 @@
+# Test watchdog config for mango.
+#
+# Per-test hard timeouts. A wedged test is sent SIGTERM after its
+# class period and recorded as a failure, so one hung test never
+# burns the full GitHub Actions job budget.
+#
+# `slow-timeout = { period = "…", terminate-after = 1 }` is the
+# load-bearing shape: `slow-timeout` alone only prints a warning,
+# `terminate-after = N` is what turns it into a kill (SIGTERM after
+# N * period, SIGKILL after the grace window).
+#
+# Policy lives in [profile.default] so local `cargo nextest run`
+# enforces the same budgets as CI. See docs/testing.md and
+# ROADMAP.md item 0.5.1 for the policy; scripts/test-watchdog.sh
+# is the committed regression test that proves the watchdog still
+# kills wedged tests.
+
+[profile.default]
+# `unit` class default (30s). Covers anything not routed to a
+# more permissive class below.
+slow-timeout = { period = "30s", terminate-after = 1 }
+
+# Surface failures as they happen AND at the end. Default "final"
+# hides a minute-2 failure until minute 30 of a long run;
+# "immediate-final" prints each failure inline + a summary, which
+# is what nextest's own docs recommend for CI.
+failure-output = "immediate-final"
+
+# Continue running after a failure (equivalent to
+# `cargo test --no-fail-fast`). Exit code is still non-zero.
+fail-fast = false
+
+# Retries disabled. The project's test bar (CONTRIBUTING §4)
+# treats flaky tests as failures; silently retrying hides real
+# bugs. A test that is legitimately non-deterministic can carry
+# a narrow per-test override with a justification comment.
+retries = 0
+
+# integration class: crate-level `tests/*.rs` binaries.
+# `kind(test)` is nextest's canonical selector for integration-
+# test binaries. Budget: 5 minutes.
+[[profile.default.overrides]]
+filter = 'kind(test)'
+slow-timeout = { period = "5m", terminate-after = 1 }
+
+# loom class: concurrency model checking (scaffolding for
+# Phase 5+; no loom tests exist today). Filter matches any test
+# whose fully-qualified name contains `loom` — nextest prepends
+# the integration-test binary name to each test, so a test in
+# `tests/loom_foo.rs` reports as `loom_foo::bar` and matches.
+# `test(~…)` filters parse cleanly even when nothing matches,
+# which is required for forward-looking classes. Budget: 30 min.
+# Convention: name loom files `tests/loom_*.rs` (or put them
+# inside a module / crate whose name contains `loom`).
+[[profile.default.overrides]]
+filter = 'test(~loom)'
+slow-timeout = { period = "30m", terminate-after = 1 }
+
+# chaos class: fault-injection / crash-only recovery
+# (scaffolding for Phase 14.5; no chaos tests exist today).
+# Same convention as loom — name files `tests/chaos_*.rs` or
+# put them in a `chaos`-named module/crate. Budget: 24 hours.
+[[profile.default.overrides]]
+filter = 'test(~chaos)'
+slow-timeout = { period = "24h", terminate-after = 1 }
+
+[profile.ci]
+# CI inherits every policy field from [profile.default]. This
+# section exists so `--profile ci` is a valid invocation and to
+# leave room for CI-only tuning (e.g., a future JUnit-output
+# step for a test-report publisher).
