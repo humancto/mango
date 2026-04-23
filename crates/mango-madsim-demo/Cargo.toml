@@ -1,0 +1,57 @@
+[package]
+name = "mango-madsim-demo"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Canonical madsim-test template. Scaffolds the pattern Phase 3+ async crates copy. PEDAGOGICAL — not a dependency."
+publish = false
+
+# Same rationale as mango-loom-demo: this crate uses cfg-gated
+# test scaffolding and would fight workspace-level pedantic lints.
+# Opts out of workspace lint inheritance entirely; minimal local
+# policy below. Workspace lints only apply to members with
+# `[lints] workspace = true`; omitting that line is the documented
+# escape hatch (Cargo reference, RFC 3389).
+
+# `tokio` is the workspace-renamed `madsim-tokio` crate. Under the
+# default build, madsim-tokio re-exports real tokio at link time.
+# Under RUSTFLAGS="--cfg madsim", madsim-tokio substitutes its
+# simulator. Source code in src/lib.rs and tests/*.rs writes
+# `use tokio::...` unchanged in both profiles. See docs/madsim.md.
+[dependencies]
+tokio = { workspace = true, features = [
+    "macros",
+    "rt-multi-thread",
+    "sync",
+    "time",
+] }
+
+# madsim provides #[madsim::test] via its `macros` feature.
+# Test-only dep; the library itself never references `madsim::...`.
+[dev-dependencies]
+madsim = { workspace = true }
+
+[lints.rust]
+unsafe_code = "forbid"
+unreachable_pub = "warn"
+# `--cfg madsim` is the ecosystem-standard activation mechanism
+# (see docs/madsim.md). Declare the cfg here so rustc's
+# unexpected_cfgs lint doesn't warn on every `#[cfg(madsim)]` /
+# `#[cfg(not(madsim))]` gate in tests/.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(madsim)"] }
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# Preserve hardening where reasonable — the demo still shouldn't
+# panic, slice-index blindly, or use unwrap/expect outside tests.
+unwrap_used = { level = "deny", priority = 1 }
+expect_used = { level = "deny", priority = 1 }
+panic = { level = "deny", priority = 1 }
+unimplemented = { level = "deny", priority = 1 }
+todo = { level = "deny", priority = 1 }
+indexing_slicing = { level = "deny", priority = 1 }
+dbg_macro = { level = "deny", priority = 1 }
