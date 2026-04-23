@@ -140,8 +140,7 @@ what you think it's checking.
 The demo was sanity-broken in both directions during development:
 
 - `compare_exchange_weak(Acquire, Relaxed)` → `(Relaxed, Relaxed)`
-  → loom reports `Causality violation: Concurrent write accesses
-to UnsafeCell`.
+  → loom reports ``Causality violation: Concurrent write accesses to `UnsafeCell`.`` (backticks around `UnsafeCell` are loom's verbatim output).
 - `store(Release)` → `store(Relaxed)` → same violation.
 
 ## Version-bump procedure

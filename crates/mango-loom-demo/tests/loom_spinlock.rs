@@ -1,7 +1,7 @@
 #![cfg(loom)]
 
+use loom::sync::Arc;
 use mango_loom_demo::Spinlock;
-use std::sync::Arc;
 
 #[test]
 fn mutual_exclusion() {
