@@ -74,11 +74,19 @@ jobs:
           # actions/checkout@v4 defaults to depth 1.
           fetch-depth: 0
 
-      # Nightly first, stable second: dtolnay/rust-toolchain sets the
-      # LAST-installed toolchain as default, so this leaves stable
-      # active. cargo-public-api auto-invokes the installed nightly
-      # for its rustdoc JSON calls — the rest of CI's tools assume
-      # stable.
+      # dtolnay/rust-toolchain sets the LAST-installed toolchain as
+      # default. Nightly first, stable second → stable is active.
+      # We invoke `cargo public-api` via the `cargo +<toolchain>`
+      # rustup proxy below, which sets RUSTUP_TOOLCHAIN for the
+      # child process and makes `cargo --version` report nightly.
+      # cargo-public-api 0.51.0 inspects `cargo --version`: if the
+      # active toolchain is stable, it hardcodes the literal string
+      # "nightly" (a *floating* toolchain, NOT our pinned nightly),
+      # which may not be installed. Running under the pinned nightly
+      # via the +proxy bypasses that fallback and uses the pinned
+      # toolchain end-to-end (including the child rustdoc-json
+      # subprocess). This is a hard contract with the tool — bumping
+      # to a version that changes `resolve_toolchain` can break it.
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
         with:
           toolchain: ${{ env.PUBLIC_API_NIGHTLY }}
@@ -171,7 +179,10 @@ jobs:
                   new_in_pr="${new_in_pr} ${pkg}"
               fi
           done
-          # Trim leading whitespace.
+          # Trim the single leading space from each accumulator
+          # (loop prepends exactly one space per entry, initial value
+          # is empty — so `${var# }` removes the one and only leading
+          # space). `##` would be overkill; `# ` is deliberate.
           available="${available# }"
           new_in_pr="${new_in_pr# }"
 
@@ -204,11 +215,14 @@ jobs:
         env:
           BASE_SHA: ${{ steps.base.outputs.sha }}
           AVAILABLE: ${{ steps.pkgs.outputs.available }}
+          PUBLIC_API_NIGHTLY: ${{ env.PUBLIC_API_NIGHTLY }}
         run: |
           set -euo pipefail
 
           if [ -z "$AVAILABLE" ]; then
-              echo "no publishable crates with a baseline — nothing to diff"
+              # Visible notice so a jq-filter regression that emits
+              # zero names doesn't silently pass the gate.
+              echo "::notice title=public-api::no publishable crates with a baseline — nothing to diff"
               exit 0
           fi
 
@@ -216,11 +230,20 @@ jobs:
           for pkg in $AVAILABLE; do
               echo ""
               echo "=== cargo public-api diff: $pkg ==="
-              # Global args (--manifest-path, --package, --omit) come
-              # before the `diff` subcommand for readability; --deny is
-              # a diff-subcommand arg and comes after.
-              cargo public-api \
-                  --manifest-path "${GITHUB_WORKSPACE}/Cargo.toml" \
+              # Invocation notes:
+              #  - `cargo "+${PUBLIC_API_NIGHTLY}" public-api` uses
+              #    the rustup `+toolchain` proxy (required — the tool
+              #    otherwise hardcodes the literal "nightly" when
+              #    stable is active; see dtolnay block above).
+              #  - `--manifest-path crates/<pkg>/Cargo.toml` points
+              #    at the crate's own manifest. cargo-public-api
+              #    0.51.0 rejects virtual (workspace-root) manifests
+              #    up-front, before `--package` is even resolved.
+              #  - Global args (--manifest-path, --package, --omit)
+              #    come before the `diff` subcommand; --deny is a
+              #    diff-subcommand arg and comes after.
+              cargo "+${PUBLIC_API_NIGHTLY}" public-api \
+                  --manifest-path "${GITHUB_WORKSPACE}/crates/${pkg}/Cargo.toml" \
                   --package "$pkg" \
                   --omit blanket-impls,auto-trait-impls,auto-derived-impls \
                   diff \

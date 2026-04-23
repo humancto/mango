@@ -162,7 +162,12 @@ scenario="tri-consistency: sentinel ↔ continue-on-error ↔ --deny"
 if [ "$workflow_present" = "1" ] && [ -n "$mode" ]; then
     coe_line="$(printf '%s\n' "$normalized" | grep -E '^ *continue-on-error: (true|false)' | head -n 1 || true)"
     has_deny=0
-    if grep -qE -- '--deny(\s|=)' "$workflow"; then
+    # Match --deny followed by a DenyMethod variant on a non-comment
+    # line only. The workflow has a header comment mentioning --deny,
+    # and a naive `grep '--deny'` would match it — masking a real
+    # regression where the invocation itself drops the flag.
+    if grep -v '^[[:space:]]*#' "$workflow" \
+        | grep -qE -- '--deny[[:space:]]+(all|added|changed|removed)'; then
         has_deny=1
     fi
 

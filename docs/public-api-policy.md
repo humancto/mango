@@ -111,11 +111,17 @@ git fetch origin main
 cargo install --locked cargo-public-api --version <pin>
 rustup install <nightly-pin>
 
-# Run from repo root. --manifest-path is explicit as a guard against
-# accidentally running from a crate subdirectory (where --package
-# would silently resolve to a different workspace).
-cargo public-api \
-    --manifest-path "$(git rev-parse --show-toplevel)/Cargo.toml" \
+# Invoke via the `cargo +<toolchain>` rustup proxy. cargo-public-api
+# 0.51.0 inspects `cargo --version` to decide which toolchain to use;
+# under the proxy, `cargo --version` reports nightly and the tool
+# uses the pinned nightly end-to-end. Running on stable (without the
+# proxy) makes the tool hardcode the literal "nightly" toolchain
+# name, which may not be installed.
+#
+# --manifest-path points at the crate's OWN manifest. The tool
+# rejects virtual (workspace-root) manifests up front.
+cargo +<nightly-pin> public-api \
+    --manifest-path "$(git rev-parse --show-toplevel)/crates/mango/Cargo.toml" \
     --package mango \
     --omit blanket-impls,auto-trait-impls,auto-derived-impls \
     diff \
@@ -131,10 +137,10 @@ The `git fetch` is load-bearing — a stale local `origin/main`
 produces spurious deltas.
 
 **Toolchain channel**: unlike `cargo-semver-checks` (stable-only),
-`cargo-public-api` REQUIRES a nightly rustdoc. Running locally on
-stable-only will fail with a rustdoc-JSON-format error. The tool
-auto-invokes nightly if installed; you don't need to
-`rustup default nightly`.
+`cargo-public-api` REQUIRES a nightly rustdoc. Running locally
+without the `+<nightly>` proxy will fail with a "toolchain not
+installed" error (the tool falls back to the literal floating
+`nightly`). The proxy is the supported local invocation.
 
 ### Synthetic-change smoke
 
@@ -146,8 +152,8 @@ echo '' >> crates/mango/src/lib.rs
 echo '/// Smoke test — delete before committing.' >> crates/mango/src/lib.rs
 echo 'pub fn smoke_change() {}' >> crates/mango/src/lib.rs
 
-cargo public-api \
-    --manifest-path "$(git rev-parse --show-toplevel)/Cargo.toml" \
+cargo +<nightly-pin> public-api \
+    --manifest-path "$(git rev-parse --show-toplevel)/crates/mango/Cargo.toml" \
     --package mango \
     --omit blanket-impls,auto-trait-impls,auto-derived-impls \
     diff --deny all origin/main..HEAD
@@ -247,11 +253,21 @@ once after shipping, and after any pin bump):
   doesn't). `cargo public-api diff BASE..HEAD --package mango-foo`
   fails to rustdoc-compile the baseline (crate doesn't exist
   there). The workflow intersects the publishable-member set
-  between BASE and HEAD: crates present only in HEAD emit a
-  `::notice::` annotation ("new publishable crate — no baseline
-  to diff against") and are skipped. Their diff gets reviewed by
-  human reviewers, which is the right granularity for a
-  new-crate PR anyway.
+  between BASE and HEAD via `git cat-file -e
+BASE_SHA:crates/<pkg>/Cargo.toml`: crates present only in HEAD
+  emit a `::notice::` annotation ("new publishable crate — no
+  baseline to diff against") and are skipped. Their diff gets
+  reviewed by human reviewers, which is the right granularity for
+  a new-crate PR anyway.
+- **Crate-dir/package-name convention.** The new-crate-in-PR
+  probe and the `--manifest-path` argument both assume
+  `crates/<pkg-name>/Cargo.toml` — directory name equals package
+  name. The `crates/mango-*` roadmap naming rule (ROADMAP.md)
+  preserves this. A contributor who writes `crates/foo/Cargo.toml`
+  with `[package] name = "mango-foo"` breaks both the probe (false
+  "new in PR" classification) AND the invocation (wrong path);
+  rust-expert reviewers will catch it at PR time. Structural
+  enforcement via cargo-metadata path lookup is a follow-up.
 - **Tool error vs non-empty diff.** Even with `--deny all`, exit 1
   could mean "diff present" OR "tool crashed internally". Advisory
   mode can't tell them apart without parsing output. We accept
