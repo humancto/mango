@@ -112,12 +112,12 @@ The workflow additionally asserts, across all four files:
    crate (reverse check — the SBOM omits no dep the build
    actually pulled; catches a forward-only check missing a
    hidden dep).
-10. Non-empty floors — `mango-proto.cdx.json` has ≥ 20
+10. Non-empty floors — `mango-proto.cdx.json` has ≥ 5
     `components[]`, `xtask-vet-ttl.cdx.json` has ≥ 10. `mango`
-    and `mango-loom-demo` are exempt (currently 0 / few direct
-    deps). The floors are well below current reality (36 and 19)
-    so won't flap on lockfile bumps, but catch an empty-output
-    bug.
+    and `mango-loom-demo` are exempt (currently 0 direct deps
+    each). Current reality under `--no-build-deps` is 10 and 19
+    respectively; floors are well below that so they won't flap
+    on lockfile bumps, but still catch an empty-output bug.
 11. Reproducibility diff — the generator runs twice;
     `.serialNumber` and `.metadata.timestamp` are stripped from
     both outputs; the diff must be empty.
