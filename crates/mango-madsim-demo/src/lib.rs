@@ -15,6 +15,7 @@
 #![deny(missing_docs)]
 
 use tokio::sync::mpsc;
+use tokio::task;
 use tokio::time::{sleep, Duration};
 
 /// Runs a producer-consumer pair where the producer sends `n`
@@ -25,9 +26,15 @@ use tokio::time::{sleep, Duration};
 /// driven by the deterministic simulator — the output is
 /// reproducible from a fixed seed. Under the default build, the
 /// function runs on real tokio.
+///
+/// Uses `tokio::task::spawn` rather than `tokio::spawn` because
+/// `madsim-tokio` (the simulator shim activated by `--cfg madsim`)
+/// only re-exports `spawn` under `tokio::task::`; the crate-root
+/// `tokio::spawn` works under real tokio but is missing under the
+/// simulator. Writing `task::spawn` compiles in both profiles.
 pub async fn producer_consumer(n: usize) -> Vec<usize> {
     let (tx, mut rx) = mpsc::channel::<usize>(16);
-    let producer = tokio::spawn(async move {
+    let producer = task::spawn(async move {
         for i in 0..n {
             sleep(Duration::from_millis(1)).await;
             if tx.send(i).await.is_err() {

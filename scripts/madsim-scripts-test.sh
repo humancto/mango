@@ -115,9 +115,14 @@ else
 fi
 
 # --- 7. demo lib.rs has zero cfg(madsim) gates ----------------------
+# Excludes line comments (`//` / `//!`) so the doc-comment that
+# *documents* the invariant ("This file MUST NOT contain any
+# `#[cfg(madsim)]` gates...") does not false-positive the test.
+# A real `#[cfg(madsim)]` attribute would live on a non-comment line.
 scenario="demo lib.rs has zero #[cfg(madsim)] / #[cfg(not(madsim))] gates"
 if [ -f "$demo_lib" ]; then
-    if grep -qE 'cfg\(\s*(not\s*\(\s*)?madsim' "$demo_lib"; then
+    if grep -v '^[[:space:]]*//' "$demo_lib" \
+        | grep -qE 'cfg\(\s*(not\s*\(\s*)?madsim'; then
         fail "$scenario (found cfg(madsim) gate — scaffold invariant violated)"
     else
         pass "$scenario"
