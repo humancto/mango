@@ -10,8 +10,9 @@ The machinery behind this policy:
 - **`cargo-semver-checks`** — this doc's subject. Runs in
   [`.github/workflows/semver-checks.yml`](../.github/workflows/semver-checks.yml)
   on every PR that touches a crate's source or manifest.
-- **`cargo-public-api`** (future, ROADMAP:802) — complementary
-  surface-level diff tool. Not shipped yet.
+- **`cargo-public-api`** — complementary surface-level diff tool.
+  Runs in [`.github/workflows/public-api.yml`](../.github/workflows/public-api.yml);
+  policy at [`docs/public-api-policy.md`](public-api-policy.md).
 
 `cargo-semver-checks` catches violations the public-API surface alone
 doesn't reveal: tightening a trait bound, removing a
@@ -218,11 +219,12 @@ bash scripts/semver-scripts-test.sh
 
 ## Relationship to `cargo-public-api`
 
-`cargo-public-api` (future ROADMAP:802) prints a human-readable diff
-of a crate's public surface. It's great for PR-review triage but is
-syntactic — it doesn't reason about trait-bound tightening or
-semver implications. `cargo-semver-checks` is the tool that actually
-**judges** whether a diff is a semver violation.
+`cargo-public-api` prints a human-readable diff of a crate's public
+surface. It's great for PR-review triage but is syntactic — it
+doesn't reason about trait-bound tightening or semver implications.
+`cargo-semver-checks` is the tool that actually **judges** whether
+a diff is a semver violation.
 
 Both ship as advisory-now, gating-at-Phase-6. They're complementary,
-not redundant.
+not redundant. See [`docs/public-api-policy.md`](public-api-policy.md)
+for the sibling tool's policy.

@@ -1,0 +1,262 @@
+# Mango cargo-public-api CI gate.
+#
+# Prints the diff of every publishable workspace crate's public API
+# surface against the PR base. Complements cargo-semver-checks:
+# cargo-public-api answers "what symbols changed?"; cargo-semver-checks
+# answers "is that change a semver violation?". See docs/public-api-policy.md.
+#
+# Mode: ADVISORY pre-Phase-6. The check runs, surfaces its findings
+# via a ::warning:: annotation in the PR's Files view, but does not
+# block merge. Flip to gating when Phase 6 opens. The flip procedure
+# is in docs/public-api-policy.md.
+#
+# Version pins: CARGO_PUBLIC_API_VERSION and PUBLIC_API_NIGHTLY below
+# are the single source of truth. They must move TOGETHER — bumping
+# the tool without the nightly produces rustdoc-JSON-format errors
+# that look unrelated. Bump procedure in docs/public-api-policy.md.
+#
+# Security: every github event value flows through step-level env
+# and is read as a shell variable — never interpolated into run
+# blocks directly. Matches the vet.yml / geiger.yml / semver-checks.yml
+# precedent.
+#
+# --deny all is mandatory on the diff invocation below. Without it,
+# cargo public-api diff returns exit 0 on a non-empty diff and the
+# continue-on-error / ::warning:: wiring becomes a silent no-op. The
+# Phase-6 flip is still two lines (sentinel + continue-on-error);
+# --deny stays across the flip.
+
+name: public-api
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - "crates/**/src/**"
+      - "crates/**/Cargo.toml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/public-api.yml"
+      - "scripts/public-api-scripts-test.sh"
+      - "docs/public-api-policy.md"
+  # merge_group does not honour paths filters — GitHub Actions always
+  # dispatches merge-queue events. Correct behaviour (merge-queue is
+  # the last line of defense) and matches the sibling gates.
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_PUBLIC_API_VERSION: "0.51.0"
+  # Pinned nightly (not floating `nightly`) for determinism. Must be
+  # at-or-after the upstream compat-matrix minimum for the tool
+  # version above. Bump together with CARGO_PUBLIC_API_VERSION per
+  # docs/public-api-policy.md §"Bumping the pin".
+  PUBLIC_API_NIGHTLY: "nightly-2026-03-01"
+
+jobs:
+  public-api:
+    name: cargo-public-api (advisory)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          # `diff BASE..HEAD` needs the base commit present locally;
+          # actions/checkout@v4 defaults to depth 1.
+          fetch-depth: 0
+
+      # dtolnay/rust-toolchain sets the LAST-installed toolchain as
+      # default. Nightly first, stable second → stable is active.
+      # We invoke `cargo public-api` via the `cargo +<toolchain>`
+      # rustup proxy below, which sets RUSTUP_TOOLCHAIN for the
+      # child process and makes `cargo --version` report nightly.
+      # cargo-public-api 0.51.0 inspects `cargo --version`: if the
+      # active toolchain is stable, it hardcodes the literal string
+      # "nightly" (a *floating* toolchain, NOT our pinned nightly),
+      # which may not be installed. Running under the pinned nightly
+      # via the +proxy bypasses that fallback and uses the pinned
+      # toolchain end-to-end (including the child rustdoc-json
+      # subprocess). This is a hard contract with the tool — bumping
+      # to a version that changes `resolve_toolchain` can break it.
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+        with:
+          toolchain: ${{ env.PUBLIC_API_NIGHTLY }}
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+        with:
+          toolchain: stable
+
+      - name: cache cargo-public-api binary
+        id: cache-public-api
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684  # v4
+        with:
+          path: ~/.cargo/bin/cargo-public-api
+          key: cargo-public-api-${{ env.CARGO_PUBLIC_API_VERSION }}-${{ runner.os }}-${{ runner.arch }}
+
+      - name: install cargo-public-api
+        if: steps.cache-public-api.outputs.cache-hit != 'true'
+        env:
+          CARGO_PUBLIC_API_VERSION: ${{ env.CARGO_PUBLIC_API_VERSION }}
+        run: |
+          set -euo pipefail
+          cargo install cargo-public-api --version "${CARGO_PUBLIC_API_VERSION}" --locked
+
+      - name: public-api version sanity
+        env:
+          CARGO_PUBLIC_API_VERSION: ${{ env.CARGO_PUBLIC_API_VERSION }}
+        run: |
+          set -euo pipefail
+          got="$(cargo public-api --version | awk '{print $2}')"
+          if [ "$got" != "${CARGO_PUBLIC_API_VERSION}" ]; then
+              echo "error: cargo-public-api version mismatch (want ${CARGO_PUBLIC_API_VERSION}, got ${got})" >&2
+              exit 1
+          fi
+
+      - name: public-api scripts self-test
+        run: bash scripts/public-api-scripts-test.sh
+
+      - name: resolve baseline sha
+        id: base
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          MERGE_GROUP_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+        run: |
+          set -euo pipefail
+          # Prefer the GitHub-provided base SHA (attacker-uncontrollable,
+          # set by the maintainer's base-branch choice for PRs, or by
+          # the merge queue for merge_group). Fall back to
+          # git merge-base HEAD origin/main for workflow_dispatch.
+          if [ -n "${PR_BASE_SHA:-}" ]; then
+              base="${PR_BASE_SHA}"
+          elif [ -n "${MERGE_GROUP_BASE_SHA:-}" ]; then
+              base="${MERGE_GROUP_BASE_SHA}"
+          else
+              base="$(git merge-base HEAD origin/main)"
+          fi
+          echo "sha=${base}" >> "$GITHUB_OUTPUT"
+          echo "baseline sha: ${base}"
+
+      - name: enumerate publishable packages
+        id: pkgs
+        env:
+          BASE_SHA: ${{ steps.base.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # publish filter (matches docs/public-api-policy.md):
+          #   publish: null        -> default, publishable     -> INCLUDE
+          #   publish: []          -> publish = false          -> EXCLUDE
+          #   publish: [...]       -> registry allow-list      -> INCLUDE
+          # source == null limits to workspace members (dep packages
+          # pulled from registries carry a non-null source).
+          head_pkgs="$(
+              cargo metadata --no-deps --format-version=1 --locked \
+                  | jq -r '.packages[]
+                           | select(.source == null)
+                           | select(.publish != [])
+                           | .name'
+          )"
+
+          # Intersect with BASE to skip new-in-this-PR crates (they
+          # have no baseline rustdoc-compilable tree — the tool would
+          # fail with an "unknown package" error that looks unrelated
+          # to an API change). Convention: crates/<pkg>/Cargo.toml
+          # exists for every workspace member; a missing file at BASE
+          # means the crate was added in this PR.
+          available=""
+          new_in_pr=""
+          for pkg in $head_pkgs; do
+              if git cat-file -e "${BASE_SHA}:crates/${pkg}/Cargo.toml" 2>/dev/null; then
+                  available="${available} ${pkg}"
+              else
+                  new_in_pr="${new_in_pr} ${pkg}"
+              fi
+          done
+          # Trim the single leading space from each accumulator
+          # (loop prepends exactly one space per entry, initial value
+          # is empty — so `${var# }` removes the one and only leading
+          # space). `##` would be overkill; `# ` is deliberate.
+          available="${available# }"
+          new_in_pr="${new_in_pr# }"
+
+          echo "available=${available}" >> "$GITHUB_OUTPUT"
+          echo "new_in_pr=${new_in_pr}" >> "$GITHUB_OUTPUT"
+          echo "publishable packages in HEAD: ${head_pkgs}" | tr '\n' ' '
+          echo ""
+          echo "with baseline (will diff): ${available}"
+          echo "new in this PR (will skip): ${new_in_pr}"
+
+      - name: notice new-in-PR crates
+        if: steps.pkgs.outputs.new_in_pr != ''
+        env:
+          NEW_IN_PR: ${{ steps.pkgs.outputs.new_in_pr }}
+        run: |
+          set -euo pipefail
+          for pkg in $NEW_IN_PR; do
+              echo "::notice title=public-api new crate::${pkg} is new in this PR — no baseline to diff against. Human reviewers should eyeball the public surface directly."
+          done
+
+      # PUBLIC-API-MODE: advisory
+      # Single-line sentinel above. scripts/public-api-scripts-test.sh
+      # asserts this sentinel stays in sync with the continue-on-error
+      # flag AND the --deny flag on the next step. When Phase 6 opens,
+      # flip sentinel -> gating and continue-on-error -> false on the
+      # same step. --deny stays. See docs/public-api-policy.md.
+      - name: cargo public-api diff
+        id: public-api
+        continue-on-error: true
+        env:
+          BASE_SHA: ${{ steps.base.outputs.sha }}
+          AVAILABLE: ${{ steps.pkgs.outputs.available }}
+          PUBLIC_API_NIGHTLY: ${{ env.PUBLIC_API_NIGHTLY }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$AVAILABLE" ]; then
+              # Visible notice so a jq-filter regression that emits
+              # zero names doesn't silently pass the gate.
+              echo "::notice title=public-api::no publishable crates with a baseline — nothing to diff"
+              exit 0
+          fi
+
+          diff_failed=0
+          for pkg in $AVAILABLE; do
+              echo ""
+              echo "=== cargo public-api diff: $pkg ==="
+              # Invocation notes:
+              #  - `cargo "+${PUBLIC_API_NIGHTLY}" public-api` uses
+              #    the rustup `+toolchain` proxy (required — the tool
+              #    otherwise hardcodes the literal "nightly" when
+              #    stable is active; see dtolnay block above).
+              #  - `--manifest-path crates/<pkg>/Cargo.toml` points
+              #    at the crate's own manifest. cargo-public-api
+              #    0.51.0 rejects virtual (workspace-root) manifests
+              #    up-front, before `--package` is even resolved.
+              #  - Global args (--manifest-path, --package, --omit)
+              #    come before the `diff` subcommand; --deny is a
+              #    diff-subcommand arg and comes after.
+              cargo "+${PUBLIC_API_NIGHTLY}" public-api \
+                  --manifest-path "${GITHUB_WORKSPACE}/crates/${pkg}/Cargo.toml" \
+                  --package "$pkg" \
+                  --omit blanket-impls,auto-trait-impls,auto-derived-impls \
+                  diff \
+                  --deny all \
+                  "${BASE_SHA}..HEAD" \
+                  || diff_failed=1
+          done
+
+          if [ "$diff_failed" = "1" ]; then
+              exit 1
+          fi
+
+      - name: surface advisory diff as warning
+        if: steps.public-api.outcome == 'failure'
+        run: |
+          echo "::warning title=public-api advisory::cargo-public-api reported a non-empty diff. See job log above and docs/public-api-policy.md."
