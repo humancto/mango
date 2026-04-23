@@ -129,8 +129,15 @@ jobs:
         run: |
           set -euo pipefail
           scratch="$(mktemp -d)"
+          # Extract workspace member *names* directly from `.packages`
+          # (local packages have `source == null`). An earlier form
+          # parsed `.workspace_members` and split-on-space to pull the
+          # name, which broke when cargo 1.77+ changed the PackageId
+          # encoding to `path+file://.../crates/NAME#VERSION` (no
+          # spaces) — the whole URL became `$m`, and `$scratch/$m.json`
+          # then contained slashes and failed to open.
           members=$(cargo metadata --no-deps --format-version=1 \
-                      | jq -r '.workspace_members | map(split(" ") | .[0]) | .[]')
+                      | jq -r '.packages[] | select(.source == null) | .name')
           for m in $members; do
               manifest=$(cargo metadata --no-deps --format-version=1 \
                            | jq -r --arg m "$m" '.packages[] | select(.name == $m) | .manifest_path')
@@ -245,8 +252,11 @@ jobs:
           RUST
 
           scratch="$(mktemp -d)"
+          # See the `scan workspace` step comment for why we iterate
+          # `.packages | select(.source == null)` rather than
+          # `.workspace_members`.
           members=$(cargo metadata --no-deps --format-version=1 \
-                      | jq -r '.workspace_members | map(split(" ") | .[0]) | .[]')
+                      | jq -r '.packages[] | select(.source == null) | .name')
           for m in $members; do
               manifest=$(cargo metadata --no-deps --format-version=1 \
                            | jq -r --arg m "$m" '.packages[] | select(.name == $m) | .manifest_path')
