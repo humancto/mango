@@ -162,8 +162,8 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
                 .unwrap_or_else(|_| "???".into());
             eprintln!("  {} @ {} -> review-by {}", r.crate_name, r.version, fmt);
         }
-        eprintln!("\nrenew via `cargo vet renew --expiring` for [trusted] entries,");
-        eprintln!("or bump the review-by date in supply-chain/config.toml for exemptions.");
+        eprintln!("\nbump the review-by date in supply-chain/config.toml after re-eyeballing");
+        eprintln!("the crate, or replace the exemption with `cargo vet certify`.");
         eprintln!("see docs/supply-chain-policy.md.");
         return Ok(ExitCode::from(1));
     }

@@ -93,8 +93,8 @@ impl From<toml::de::Error> for ParseError {
 /// date that follows is not a valid ISO-8601 `YYYY-MM-DD`.
 pub fn parse_review_by(notes: &str) -> Result<Option<Date>, time::error::Parse> {
     let Some(after_label) = notes.find(REVIEW_BY_LABEL).map(|i| {
-        // SAFETY-EQUIVALENT BOUND: `find` returns a valid UTF-8 index;
-        // adding the label's known-ASCII length stays within bounds.
+        // BOUND: `find` returns a valid UTF-8 index; adding the
+        // label's known-ASCII length stays within bounds.
         i.saturating_add(REVIEW_BY_LABEL.len())
     }) else {
         return Ok(None);
@@ -353,11 +353,15 @@ notes = "no ttl label at all"
         let (reviews, soft) = extract_exemption_reviews(cfg).unwrap();
         assert!(reviews.is_empty());
         assert_eq!(soft.len(), 1);
-        matches!(
+        // Variant classification is load-bearing: the xtask's exit
+        // codes depend on MissingReviewBy vs MalformedDate. A bare
+        // `matches!(...)` would type-check but discard the boolean;
+        // `assert!(matches!(...))` is what actually verifies.
+        assert!(matches!(
             soft[0],
             ParseError::MissingReviewBy { ref crate_name, .. }
                 if crate_name == "silent-crate"
-        );
+        ));
     }
 
     #[test]
@@ -371,11 +375,11 @@ notes = "review-by: 2026-13-40; oops"
         let (reviews, soft) = extract_exemption_reviews(cfg).unwrap();
         assert!(reviews.is_empty());
         assert_eq!(soft.len(), 1);
-        matches!(
+        assert!(matches!(
             soft[0],
             ParseError::MalformedDate { ref crate_name, .. }
                 if crate_name == "bad-date"
-        );
+        ));
     }
 
     #[test]
