@@ -1,0 +1,275 @@
+# Mango cargo-geiger unsafe-growth workflow
+#
+# Counts `unsafe` sites across mango's workspace crates and
+# enforces the monotonic-growth policy documented in
+# docs/unsafe-policy.md. Orthogonal to Miri: Miri says "the
+# `unsafe` that's here is sound"; this gate says "new `unsafe` has
+# been consciously approved by a maintainer".
+#
+# Two jobs:
+#
+#   geiger                — the real gate. Runs on pull_request,
+#                           push:main, merge_group. Scans each
+#                           workspace crate with `cargo geiger
+#                           --manifest-path ... --output-format Json
+#                           --include-tests`, merges, compares
+#                           against unsafe-baseline.json.
+#
+#   geiger-sanity-break   — workflow_dispatch-only. Injects a
+#                           throwaway `unsafe { std::mem::zeroed() }`
+#                           into mango-loom-demo and confirms the
+#                           gate fires (exit 1). Confidence probe
+#                           for "the check would catch a real
+#                           regression".
+#
+# Security: every `github.event.*` value flows through step-level
+# `env:` first and is read as a shell variable in `run:` blocks.
+# No direct `${{ github.* }}` interpolation into shell. Pattern
+# matches miri.yml / loom.yml.
+#
+# Install strategy: cargo-geiger 0.13.0 via `cargo install --locked`,
+# cached by (version, os, arch) so PRs cold-install once per
+# (runner, version) pair.
+
+name: geiger
+
+on:
+  pull_request:
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "unsafe-baseline.json"
+      - ".github/workflows/geiger.yml"
+      - "scripts/geiger-*.sh"
+      - "tests/fixtures/geiger/**"
+      - "tests/fixtures/geiger-toy-workspace/**"
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "unsafe-baseline.json"
+      - ".github/workflows/geiger.yml"
+      - "scripts/geiger-*.sh"
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  # Bump procedure: docs/unsafe-policy.md "Version-bump procedure".
+  # Both this env var AND `unsafe-baseline.json`'s `cargo_geiger_version`
+  # must match; geiger-check.sh enforces the equality (exit 4 on skew).
+  CARGO_GEIGER_VERSION: "0.13.0"
+
+jobs:
+  geiger:
+    name: geiger (unsafe-growth gate)
+    if: ${{ github.event_name != 'workflow_dispatch' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      # fetch-depth: 0 is required so geiger-check.sh can
+      # `git diff origin/${BASE_REF}...HEAD -- unsafe-baseline.json`
+      # to verify the PR actually bumped the baseline. See
+      # docs/unsafe-policy.md and scripts/geiger-check.sh.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          fetch-depth: 0
+
+      - name: install rust stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          prefix-key: v0-geiger
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # Binary cache for cargo-geiger itself — a cold `cargo install
+      # --locked cargo-geiger` is ~3-5 minutes. Key binds to
+      # (version, os, arch) so a silent `ubuntu-latest` drift or a
+      # version bump invalidates automatically.
+      - name: restore cargo-geiger binary
+        id: cache-geiger-bin
+        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57  # v4
+        with:
+          path: ~/.cargo/bin/cargo-geiger
+          key: geiger-bin-v${{ env.CARGO_GEIGER_VERSION }}-${{ runner.os }}-${{ runner.arch }}
+
+      - name: install cargo-geiger
+        if: steps.cache-geiger-bin.outputs.cache-hit != 'true'
+        env:
+          CARGO_GEIGER_VERSION: ${{ env.CARGO_GEIGER_VERSION }}
+        run: cargo install --locked cargo-geiger --version "${CARGO_GEIGER_VERSION}"
+
+      # mango-proto's build.rs invokes protoc; matches ci.yml.
+      - name: install protoc
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends protobuf-compiler
+
+      # Fail fast if check logic regressed before running a real scan.
+      - name: geiger scripts self-test
+        run: bash scripts/geiger-scripts-test.sh
+
+      - name: scan workspace
+        run: |
+          set -euo pipefail
+          scratch="$(mktemp -d)"
+          members=$(cargo metadata --no-deps --format-version=1 \
+                      | jq -r '.workspace_members | map(split(" ") | .[0]) | .[]')
+          for m in $members; do
+              manifest=$(cargo metadata --no-deps --format-version=1 \
+                           | jq -r --arg m "$m" '.packages[] | select(.name == $m) | .manifest_path')
+              echo "::group::cargo geiger $m"
+              cargo geiger \
+                  --manifest-path "$manifest" \
+                  --output-format Json \
+                  --include-tests \
+                  > "$scratch/$m.json"
+              echo "::endgroup::"
+          done
+          jq -s '{
+              packages: (map(.packages) | add),
+              packages_without_metrics: (map(.packages_without_metrics) | add | unique),
+              used_but_not_scanned_files: (map(.used_but_not_scanned_files) | add | unique)
+          }' "$scratch"/*.json > geiger.json
+
+      - name: check unsafe growth
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_BASE_REF: ${{ github.base_ref }}
+          # toJson(null) yields "null"; branch on event_name to feed
+          # a real JSON array only on pull_request.
+          PR_LABELS: ${{ github.event_name == 'pull_request' && toJson(github.event.pull_request.labels.*.name) || '[]' }}
+        run: bash scripts/geiger-check.sh geiger.json unsafe-baseline.json
+
+      - name: step summary
+        if: always()
+        run: |
+          set -euo pipefail
+          [ -f geiger.json ] || { echo "(scan did not produce geiger.json)" >> "${GITHUB_STEP_SUMMARY}"; exit 0; }
+          {
+              echo "### cargo-geiger unsafe-growth check"
+              echo
+              echo "| category | current | baseline |"
+              echo "|----------|---------|----------|"
+              for c in functions exprs item_impls item_traits methods; do
+                  cur=$(jq -r --arg c "$c" '
+                      [.packages[] | select(.package.id.source | type == "object" and has("Path"))
+                       | .unsafety.used[$c].unsafe_ // 0] | add // 0
+                  ' geiger.json 2>/dev/null || echo "n/a")
+                  base=$(jq -r --arg c "$c" '.totals[$c]' unsafe-baseline.json)
+                  echo "| $c | $cur | $base |"
+              done
+              echo
+              unscanned=$(jq -r '.used_but_not_scanned_files | length' geiger.json 2>/dev/null || echo 0)
+              if [ "$unscanned" != "0" ]; then
+                  echo "<details><summary>used_but_not_scanned_files ($unscanned)</summary>"
+                  echo
+                  jq -r '.used_but_not_scanned_files[] | "- \(. )"' geiger.json
+                  echo "</details>"
+              fi
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  geiger-sanity-break:
+    name: geiger sanity break (manual)
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          fetch-depth: 0
+
+      - name: install rust stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          prefix-key: v0-geiger
+
+      - name: restore cargo-geiger binary
+        id: cache-geiger-bin
+        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57  # v4
+        with:
+          path: ~/.cargo/bin/cargo-geiger
+          key: geiger-bin-v${{ env.CARGO_GEIGER_VERSION }}-${{ runner.os }}-${{ runner.arch }}
+
+      - name: install cargo-geiger
+        if: steps.cache-geiger-bin.outputs.cache-hit != 'true'
+        env:
+          CARGO_GEIGER_VERSION: ${{ env.CARGO_GEIGER_VERSION }}
+        run: cargo install --locked cargo-geiger --version "${CARGO_GEIGER_VERSION}"
+
+      - name: install protoc
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends protobuf-compiler
+
+      # Inject a throwaway unsafe expression into mango-loom-demo's
+      # test module and confirm the gate fires with exit 1.
+      - name: inject unsafe, scan, assert exit 1
+        env:
+          GITHUB_EVENT_NAME: push
+          PR_LABELS: "[]"
+        run: |
+          set -euo pipefail
+          cat >> crates/mango-loom-demo/src/lib.rs <<'RUST'
+
+          // Sanity-break injection — NOT SHIPPED. Only present on the
+          // geiger-sanity-break CI run via workflow_dispatch.
+          #[cfg(test)]
+          mod _geiger_sanity_break {
+              #[test]
+              fn injected() {
+                  let _: u32 = unsafe { std::mem::zeroed::<u32>() };
+              }
+          }
+          RUST
+
+          scratch="$(mktemp -d)"
+          members=$(cargo metadata --no-deps --format-version=1 \
+                      | jq -r '.workspace_members | map(split(" ") | .[0]) | .[]')
+          for m in $members; do
+              manifest=$(cargo metadata --no-deps --format-version=1 \
+                           | jq -r --arg m "$m" '.packages[] | select(.name == $m) | .manifest_path')
+              cargo geiger \
+                  --manifest-path "$manifest" \
+                  --output-format Json \
+                  --include-tests \
+                  > "$scratch/$m.json"
+          done
+          jq -s '{
+              packages: (map(.packages) | add),
+              packages_without_metrics: (map(.packages_without_metrics) | add | unique),
+              used_but_not_scanned_files: (map(.used_but_not_scanned_files) | add | unique)
+          }' "$scratch"/*.json > geiger.json
+
+          set +e
+          bash scripts/geiger-check.sh geiger.json unsafe-baseline.json
+          rc=$?
+          set -e
+
+          if [ "$rc" = "1" ]; then
+              echo "sanity-break OK: gate fired with exit 1"
+          else
+              echo "sanity-break FAILED: gate returned exit $rc (wanted 1)" >&2
+              exit 1
+          fi

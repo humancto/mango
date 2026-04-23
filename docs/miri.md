@@ -255,6 +255,10 @@ The Miri workflow is independent of `ci.yml` / `loom.yml` /
 
 - [`docs/loom.md`](loom.md) — concurrency model checking;
   complementary to Miri.
+- [`docs/unsafe-policy.md`](unsafe-policy.md) — `cargo-geiger`
+  growth gate. Miri says _the `unsafe` that's here is sound_; the
+  growth gate says _new `unsafe` has been consciously approved_.
+  Both are orthogonal.
 - [`docs/testing.md`](testing.md) — test policy and runner.
 - [`CONTRIBUTING.md`](../CONTRIBUTING.md) §7 — `unsafe` policy;
   §8 — local commands.

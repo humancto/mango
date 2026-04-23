@@ -1,0 +1,11 @@
+# Toy workspace used by `scripts/geiger-scripts-test.sh` scenario
+# "toy-workspace-real-geiger". NOT part of mango's workspace — the
+# root `Cargo.toml` excludes this path, and intentionally so:
+# `toy-unsafe` exists precisely to carry `unsafe` code that mango's
+# `unsafe_code = "forbid"` workspace lint would reject.
+#
+# Keep this workspace dependency-free so the test doesn't drag the
+# registry on every CI run.
+[workspace]
+resolver = "2"
+members = ["toy-clean", "toy-unsafe"]

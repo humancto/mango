@@ -211,6 +211,16 @@ with worked examples: [`docs/arithmetic-policy.md`][arith].
   ordering; Miri verifies soundness of `unsafe` blocks — both are
   required when Phase 3+ ships `unsafe` + atomics. Full policy:
   [`docs/miri.md`](./docs/miri.md).
+- **Unsafe-growth gate.** Every new `unsafe` site is a reviewed
+  event. `.github/workflows/geiger.yml` runs `cargo-geiger` against
+  each workspace crate on every PR and compares the per-category
+  counts against `unsafe-baseline.json`. Growth requires the
+  `unsafe-growth-approved` PR label **and** a matching baseline
+  bump in the same PR (run `bash scripts/geiger-update-baseline.sh`).
+  Shrinkage is free; the baseline is monotonic, not strict.
+  Complements `unsafe_code = "forbid"` (compile-time) and Miri
+  (runtime UB). Full policy:
+  [`docs/unsafe-policy.md`](./docs/unsafe-policy.md).
 - **Monotonic clock.** All protocol-relevant time math uses
   `std::time::Instant` (monotonic). `SystemTime` is only for
   human-facing display (logs, lease-TTL rendering). Full policy:
@@ -315,6 +325,18 @@ rustup component add miri rust-src --toolchain "$MIRI_NIGHTLY"
 cargo "+$MIRI_NIGHTLY" miri setup
 MIRIFLAGS="-Zmiri-strict-provenance" \
   cargo "+$MIRI_NIGHTLY" miri test -p mango-loom-demo --lib --tests
+```
+
+Optional — bump the `unsafe-baseline.json` when a PR legitimately
+adds `unsafe`. See [`docs/unsafe-policy.md`](./docs/unsafe-policy.md)
+for the full procedure and the maintainer-label requirement:
+
+```bash
+cargo install --locked cargo-geiger --version 0.13.0   # once
+# rebase on origin/main first so shrinkage PRs don't poison the diff
+bash scripts/geiger-update-baseline.sh --dry-run       # preview
+bash scripts/geiger-update-baseline.sh                 # write
+bash scripts/geiger-scripts-test.sh                    # 15 scenarios
 ```
 
 Notes:
