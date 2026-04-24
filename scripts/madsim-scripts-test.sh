@@ -235,11 +235,11 @@ else
     fi
 
     scenario="workflow runs MSRV check under --cfg madsim"
-    # Match a line referencing `cargo +1.80` (MSRV toolchain) in a step
+    # Match a line referencing `cargo +1.89` (MSRV toolchain) in a step
     # that also mentions --cfg madsim. Kept permissive because exact
-    # syntax (cargo +1.80.0 vs cargo +1.80 vs $MSRV var) is an impl choice.
+    # syntax (cargo +1.89.0 vs cargo +1.89 vs $MSRV var) is an impl choice.
     if grep -v '^[[:space:]]*#' "$workflow" \
-        | grep -qE 'cargo[[:space:]]+\+?(1\.80|\$\{?\{?[[:space:]]*env\.MSRV)'; then
+        | grep -qE 'cargo[[:space:]]+\+?(1\.89|\$\{?\{?[[:space:]]*env\.MSRV)'; then
         pass "$scenario"
     else
         fail "$scenario (no MSRV-pinned cargo invocation found)"

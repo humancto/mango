@@ -228,15 +228,13 @@ pub fn partition_by_date(
     (expired, current)
 }
 
-// Tests intentionally use unwrap/expect/indexing/panic for concise
-// assertions. `reason = "..."` on `#[allow]` is 1.81+; the workspace
-// MSRV is 1.80.
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::indexing_slicing,
-    clippy::panic
+    clippy::panic,
+    reason = "tests use unwrap/expect/indexing/panic for concise assertions"
 )]
 mod tests {
     use super::*;

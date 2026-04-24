@@ -95,7 +95,7 @@ subtle = { version = "2.6", default-features = false, features = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.80"
+rust-version = "1.89"
 license = "Apache-2.0"
 repository = "https://github.com/humancto/mango"
 authors = ["mango contributors"]
@@ -142,9 +142,9 @@ disallowed_types = { level = "deny", priority = 1 }
 #       silent no-op is a real risk; `warn` surfaces hits without
 #       blocking PRs if resolution regresses.
 disallowed_methods = { level = "warn", priority = 1 }
-# Pairs with `msrv = "1.80"` in clippy.toml: flags any stdlib API
+# Pairs with `msrv = "1.89"` in clippy.toml: flags any stdlib API
 # call newer than MSRV at PR time, complementing the `cargo check
-# @ 1.80` job that catches it at compile time.
+# @ 1.89` job that catches it at compile time.
 incompatible_msrv = { level = "deny", priority = 1 }
 # `#[non_exhaustive]` policy on public enums. Every `pub enum` in a
 # publishable (non-`publish = false`) crate must carry

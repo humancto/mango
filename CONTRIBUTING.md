@@ -287,8 +287,8 @@ with worked examples: [`docs/arithmetic-policy.md`][arith].
   [`docs/semver-policy.md`](./docs/semver-policy.md).
 - **`#[non_exhaustive]` on public enums.** Every `pub enum` in a
   publishable crate must carry `#[non_exhaustive]` or a documented
-  per-enum escape (a `// reason: …` line-comment immediately
-  preceding `#[allow(clippy::exhaustive_enums)]` — MSRV-1.80 form).
+  per-enum escape (inline
+  `#[allow(clippy::exhaustive_enums, reason = "…")]`).
   Enforced primarily by the workspace lint
   `clippy::exhaustive_enums = "deny"` at `cargo clippy` time and
   defense-in-depth by `.github/workflows/non-exhaustive.yml`
@@ -297,14 +297,17 @@ with worked examples: [`docs/arithmetic-policy.md`][arith].
   crate-wide at `lib.rs` top. Full policy, exceptions, and
   struct-like-variant guidance:
   [`docs/api-stability.md`](./docs/api-stability.md).
-- **MSRV.** Workspace MSRV is **1.80** (see
+- **MSRV.** Workspace MSRV is **1.89** (see
   `rust-version` in [`Cargo.toml`](./Cargo.toml) and the `msrv`
-  CI job). MSRV bumps are deliberate, land in their own PR, and
-  update this file plus `Cargo.toml` plus
-  `scripts/test-msrv-pin.sh` together. Full policy, ecosystem
-  floors, and the `--target x86_64-unknown-linux-gnu` workaround
-  for wasi-only edition2024 transitives:
-  [`docs/msrv.md`](./docs/msrv.md).
+  CI job; decision of record is
+  [ADR 0003](./.planning/adr/0003-msrv-bump.md)). MSRV bumps are
+  deliberate, land in their own PR with an ADR, and update all
+  four machine-checked sources of truth
+  (`Cargo.toml`, `clippy.toml`, `.github/workflows/ci.yml`,
+  `.github/workflows/madsim.yml`) together — drift is caught
+  by `scripts/test-msrv-pin.sh`. Full policy, bumping process,
+  and the migration note for the deprecated `// reason:`
+  line-comment form: [`docs/msrv.md`](./docs/msrv.md).
 - **Benches.** Performance claims are measured on the canonical
   hardware tiers in [`benches/runner/HARDWARE.md`][hw] against the
   pinned etcd oracle in [`benches/oracles/etcd/`][oracle]. Runner
@@ -352,8 +355,7 @@ bash scripts/test-watchdog.sh
 cargo doc --workspace --no-deps
 cargo deny check
 cargo audit
-rustup run 1.80 cargo check --workspace --all-targets --locked \
-  --target x86_64-unknown-linux-gnu
+rustup run 1.89 cargo check --workspace --all-targets --locked
 ```
 
 Optional — run the loom model-checker suite locally. Not required on
@@ -441,8 +443,8 @@ Notes:
 - `cargo doc`: the Definition of Done requires this to be
   warning-free. `cargo doc` `-D warnings` will gate once the
   doc-lint CI job lands.
-- `rustup run 1.80 …`: MSRV gate. See
-  [`docs/msrv.md`](./docs/msrv.md) for the `--target` rationale.
+- `rustup run 1.89 …`: MSRV gate. See
+  [`docs/msrv.md`](./docs/msrv.md) for the bumping process.
 - `cargo deny`, `cargo audit`: install with
   `cargo install cargo-deny cargo-audit` if missing.
 - `cargo nextest`: install with

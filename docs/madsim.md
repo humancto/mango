@@ -136,7 +136,7 @@ RUSTFLAGS="--cfg madsim" MADSIM_TEST_SEED=1 MADSIM_TEST_NUM=100 \
 
 # MSRV check under --cfg madsim (matches CI)
 RUSTFLAGS="--cfg madsim" \
-    cargo +1.80 check --tests -p mango-madsim-demo \
+    cargo +1.89 check --tests -p mango-madsim-demo \
     --target-dir target/madsim
 ```
 

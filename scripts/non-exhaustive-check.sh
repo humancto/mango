@@ -321,25 +321,23 @@ fi
 # --- 5. MSRV tripwire for `// reason:` line-comments ----------------
 # The `// reason:` line-comment convention exists because the inline
 # `#[allow(lint, reason = "...")]` form is stable only from rustc 1.81.
-# Mango MSRV is pinned at 1.80 today (workspace.package.rust-version
-# in root Cargo.toml). The moment MSRV advances to 1.81+, the inline
-# form becomes available and the line-comment workaround is obsolete.
+# This tripwire is now ACTIVE: mango MSRV is at 1.89 (ADR 0003), and
+# the inline form is available across the entire supported floor, so
+# any surviving `// reason:` line-comment in a publishable crate's
+# `src/**/*.rs` is a drift-from-policy and fails the check.
 #
-# This tripwire enforces the migration: when the workspace
-# rust-version minor is >= 81 (or any major > 1), any surviving
-# `// reason:` line-comment in a publishable crate's `src/**/*.rs`
-# fails the check. The MSRV-bump PR is then forced to migrate them in
-# the same change-set.
+# Kept as a live rail (not deleted) because it also enforces the
+# *forward* invariant: if anyone ever lowers MSRV below 1.81 again
+# the comparison below falls through to no-op naturally, and on any
+# supported MSRV it catches reintroductions of the workaround form.
 #
 # Scope is intentionally narrow: publishable `<manifest_dir>/src/**`
 # only. Not `tests/`, not `examples/`, not `benches/`, not fixture
 # workspaces (which are separate workspaces `cargo metadata --no-deps`
 # on the root won't enumerate), not `docs/`.
-#
-# Inert today at MSRV=1.80.
 msrv_raw=$(grep -E '^[[:space:]]*rust-version[[:space:]]*=[[:space:]]*"[0-9]+\.[0-9]+' "$cargo_toml" 2>/dev/null | head -1 || true)
 if [ -n "$msrv_raw" ] && [ -n "$publishable_crates" ]; then
-    # Extract major.minor with sed. Handles both "1.80" and "1.80.0".
+    # Extract major.minor with sed. Handles both "1.89" and "1.89.0".
     msrv_major=$(printf '%s' "$msrv_raw" | sed -nE 's/.*"([0-9]+)\.([0-9]+).*/\1/p')
     msrv_minor=$(printf '%s' "$msrv_raw" | sed -nE 's/.*"([0-9]+)\.([0-9]+).*/\2/p')
     if [ -n "$msrv_major" ] && [ -n "$msrv_minor" ]; then

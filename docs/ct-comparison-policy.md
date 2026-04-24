@@ -259,7 +259,7 @@ load-bearing" and the scoped grep remains the sole enforcement.
   `token_bucket.rs` and friends. Mitigated by
   [`.ct-comparison-ignore`](../.ct-comparison-ignore).
 
-- **MSRV.** `subtle` 2.6 supports Rust ≥1.41; workspace MSRV is 1.80
+- **MSRV.** `subtle` 2.6 supports Rust ≥1.41; workspace MSRV is 1.89
   — no interaction.
 
 ## When to upgrade to a dylint
