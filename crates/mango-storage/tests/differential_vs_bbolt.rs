@@ -467,6 +467,42 @@ fn oracle_error(resp: &Value) -> Option<String> {
         .map(std::borrow::ToOwned::to_owned)
 }
 
+/// Normalize an error string to its engine-neutral core by stripping
+/// known wire-level wrappers. Go's oracle wraps errors as
+/// `"app: <Method>: <inner>"`, and redb's [`BackendError`] `Display`
+/// adds `"backend: "`. Structural prefix stripping — not method-name
+/// matching — keeps the helper decoupled from the oracle's exact
+/// labels.
+///
+/// If `"app: "` is present without the inner `": "` separator (a
+/// drift in `main.go` that lacks a method label), the helper still
+/// strips `"app: "` so a future wire-format change can't silently
+/// mask a divergence.
+fn normalize_err(raw: &str) -> String {
+    // Strip redb's BackendError Display prefix.
+    let s = raw.strip_prefix("backend: ").unwrap_or(raw);
+    // Strip the Go oracle's wire wrapper.
+    if let Some(rest) = s.strip_prefix("app: ") {
+        if let Some((_method, inner)) = rest.split_once(": ") {
+            return map_alias(inner);
+        }
+        return map_alias(rest);
+    }
+    map_alias(s)
+}
+
+/// Map bbolt's error vocabulary into redb's where they differ on wire
+/// but mean the same thing. Keep this table tiny and obvious — every
+/// entry is a deliberate "these two strings are the same error class"
+/// decision, not a regex or heuristic.
+fn map_alias(s: &str) -> String {
+    match s {
+        "key required" => "empty key".to_owned(),
+        "value cannot be nil" => "empty value".to_owned(),
+        other => other.to_owned(),
+    }
+}
+
 /// Apply one [`DiffOp`] in lockstep to both engines. Post-commit
 /// and post-rollback we run [`snapshot_and_diff`] to detect drift.
 ///
@@ -559,12 +595,18 @@ fn apply_op(
             match (redb_res, oracle_err) {
                 (Ok(_), None) => {}
                 (Err(e), Some(oe)) => {
-                    // Symmetric error — both engines rejected.
-                    // Expected on commit 7 only if a harness bug let
-                    // through a staging-time invariant violation.
-                    return Err(format!(
-                        "symmetric commit error (not expected in commit-7 scope): redb={e}, oracle={oe}"
-                    ));
+                    // Symmetric error — both engines rejected. The
+                    // plan §5 hard contract requires the normalized
+                    // errors to match: identical error class on wire,
+                    // modulo engine-specific wrappers.
+                    let redb_norm = normalize_err(&e.to_string());
+                    let oracle_norm = normalize_err(&oe);
+                    if redb_norm != oracle_norm {
+                        return Err(format!(
+                            "symmetric commit error but normalized strings diverge: \
+                             redb={redb_norm:?} (raw={e}), oracle={oracle_norm:?} (raw={oe})"
+                        ));
+                    }
                 }
                 (Ok(_), Some(oe)) => {
                     return Err(format!("divergence on commit: redb ok, oracle err={oe}"));
@@ -825,6 +867,35 @@ fn proptest_cases() -> u32 {
 
 /// The 10-op protocol round-trip smoke test (plan §9 commit 6).
 ///
+/// Pin the normalizer's behavior across the wire-wrapper permutations
+/// the harness actually observes. If `main.go` ever drifts — renaming
+/// a method label, changing the alias strings, or omitting the
+/// inner `": "` separator — this test is the canary.
+#[test]
+fn normalize_err_unit() {
+    // 1. Redb BackendError Display prefix stripped, pass-through after.
+    assert_eq!(normalize_err("backend: empty key"), "empty key");
+    // 2. Go oracle wrapper + alias: "Put: key required" → "empty key".
+    assert_eq!(normalize_err("app: Put: key required"), "empty key");
+    // 3. Same alias through Delete path.
+    assert_eq!(normalize_err("app: Delete: key required"), "empty key");
+    // 4. Empty-value alias through commit_group path.
+    assert_eq!(
+        normalize_err("app: commit_group: value cannot be nil"),
+        "empty value"
+    );
+    // 5. Redb prefix + non-aliased inner — pass through.
+    assert_eq!(
+        normalize_err("backend: UnknownBucket(BucketId { raw: 7 })"),
+        "UnknownBucket(BucketId { raw: 7 })"
+    );
+    // 6. Malformed Go wrapper without the inner ": " separator still
+    //    strips "app: " (defensive fallthrough per rust-expert NIT-5).
+    assert_eq!(normalize_err("app: kaboom"), "kaboom");
+    // 7. Pass-through for a string with no recognized prefix.
+    assert_eq!(normalize_err("some other thing"), "some other thing");
+}
+
 /// Exercises every basic op the harness will emit once proptest is
 /// wired, without yet involving `RedbBackend`. A green run here
 /// proves: (a) the subprocess spawn works, (b) JSON framing is
