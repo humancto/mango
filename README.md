@@ -13,19 +13,19 @@ with etcd; it is inspired by it.
 Distributed KV stores are not interchangeable. Pick the one whose
 consistency model and scale ceiling match the problem you have.
 
-| | **Mango** | **etcd** | **FoundationDB** | **DynamoDB** |
-|---|---|---|---|---|
-| Consistency | Linearizable | Linearizable | Strict serializable (stronger than linearizable) | Eventual (default); strong reads opt-in (2× cost) |
-| Replication | Raft, single cluster | Raft, single cluster | Multi-version, multi-shard | Hash-sharded, multi-region async |
-| Scale ceiling (writes) | ~200K writes/sec / cluster (Tier 1) | ~50-200K writes/sec / cluster | ~10M ops/sec / cluster (mixed) | ~10-100M ops/sec / global service (mixed) |
-| Scale ceiling (linearizable reads) | ~600K reads/sec / cluster *(Tier 2b target — Phase 14.5)* | ~50-150K reads/sec / cluster (ReadIndex) | (see above) | Strong-reads-only mode (2× cost) |
-| Scale ceiling (bounded-staleness reads) | ~1M reads/sec / cluster *(Tier 2a target — Phase 14.5)* | ~500K-1M reads/sec / cluster (serializable, stale) | (see above) | Default mode |
-| Deployment | Self-host, open source (Apache-2.0) | Self-host, open source (Apache-2.0) | Self-host, open source (Apache-2.0) | AWS-only hosted |
-| Primary use case | Cluster metadata, coordination, config, leader election | Same as mango | Application data with ACID at scale | Application data CRUD at hyperscale |
-| Operational profile | Single-binary, deterministic latency (no GC) | Single-binary, Go GC | Multi-process (coordinators, storage, log), more moving parts | Fully managed |
+|                                         | **Mango**                                                 | **etcd**                                           | **FoundationDB**                                              | **DynamoDB**                                      |
+| --------------------------------------- | --------------------------------------------------------- | -------------------------------------------------- | ------------------------------------------------------------- | ------------------------------------------------- |
+| Consistency                             | Linearizable                                              | Linearizable                                       | Strict serializable (stronger than linearizable)              | Eventual (default); strong reads opt-in (2× cost) |
+| Replication                             | Raft, single cluster                                      | Raft, single cluster                               | Multi-version, multi-shard                                    | Hash-sharded, multi-region async                  |
+| Scale ceiling (writes)                  | ~200K writes/sec / cluster (Tier 1)                       | ~50-200K writes/sec / cluster                      | ~10M ops/sec / cluster (mixed)                                | ~10-100M ops/sec / global service (mixed)         |
+| Scale ceiling (linearizable reads)      | ~600K reads/sec / cluster _(Tier 2b target — Phase 14.5)_ | ~50-150K reads/sec / cluster (ReadIndex)           | (see above)                                                   | Strong-reads-only mode (2× cost)                  |
+| Scale ceiling (bounded-staleness reads) | ~1M reads/sec / cluster _(Tier 2a target — Phase 14.5)_   | ~500K-1M reads/sec / cluster (serializable, stale) | (see above)                                                   | Default mode                                      |
+| Deployment                              | Self-host, open source (Apache-2.0)                       | Self-host, open source (Apache-2.0)                | Self-host, open source (Apache-2.0)                           | AWS-only hosted                                   |
+| Primary use case                        | Cluster metadata, coordination, config, leader election   | Same as mango                                      | Application data with ACID at scale                           | Application data CRUD at hyperscale               |
+| Operational profile                     | Single-binary, deterministic latency (no GC)              | Single-binary, Go GC                               | Multi-process (coordinators, storage, log), more moving parts | Fully managed                                     |
 
 **Mango is etcd-shaped, not DynamoDB-shaped.** It's for the workloads
-where you need *strong* consistency on a *self-hosted* cluster and want
+where you need _strong_ consistency on a _self-hosted_ cluster and want
 significantly better tail latency, memory footprint, and per-cluster
 throughput than etcd ships today. If your bottleneck is "I need 10M+
 ops/sec on application data," look at FoundationDB, TiKV, or a hosted
@@ -70,4 +70,10 @@ cargo test  --workspace
 
 ## License
 
-Apache-2.0.
+Licensed under the Apache License, Version 2.0
+([LICENSE](LICENSE) or http://www.apache.org/licenses/LICENSE-2.0).
+
+Unless you explicitly state otherwise, any contribution intentionally
+submitted for inclusion in mango by you, as defined in the Apache-2.0
+license, shall be licensed as above, without any additional terms or
+conditions. See [NOTICE](NOTICE) for attribution.
