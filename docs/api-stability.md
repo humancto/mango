@@ -87,17 +87,22 @@ Four narrow cases:
 Variant sets that are load-bearing contracts with downstream
 exhaustive pattern-matching and where adding a variant is _always_
 a major semver break by design — e.g. `Direction { Ingress,
-Egress }`, `Parity { Even, Odd }`, `Role { Leader, Follower,
-Candidate }`.
+Egress }`, `Parity { Even, Odd }`.
+
+Be strict about what qualifies. Raft `Role { Leader, Follower,
+Candidate }` is _not_ a good example — real Raft implementations
+legitimately grow roles (`PreCandidate`, `Learner`, etc.) and the
+right shape for such an enum is `#[non_exhaustive]`. Reserve the
+exhaustive-by-contract escape for enums where the mathematical or
+protocol-level closure is load-bearing.
 
 ```rust
-// reason: exhaustive-by-contract — Raft roles are a closed set; adding
-// a variant is a major protocol break by design.
+// reason: exhaustive-by-contract — parity is a closed two-element set
+// (mod 2); adding a variant would be ill-formed, not just a break.
 #[allow(clippy::exhaustive_enums)]
-pub enum Role {
-    Leader,
-    Follower,
-    Candidate,
+pub enum Parity {
+    Even,
+    Odd,
 }
 ```
 
@@ -136,8 +141,10 @@ justification.
 Crates that set `publish = false` are **out of scope** for this
 policy. They carry a crate-level `#![allow(clippy::exhaustive_enums)]`
 at lib.rs top with a one-line comment citing this section. Removing
-`publish = false` MUST be paired with removing the allow in the same
-PR.
+`publish = false` MUST be paired with **replacing** the crate-level
+allow with either `#[non_exhaustive]` on every public enum or per-enum
+`// reason:` escapes — dropping the crate-level allow alone would
+red-light clippy on every enum in the crate at once.
 
 ## How to add a per-enum exception at MSRV 1.80
 
