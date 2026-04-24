@@ -802,7 +802,7 @@ Phase 6 PR that lands before Phase 0.5 is complete.
 - [x] Add `cargo-public-api` CI check **(advisory pre-Phase-6, gating from Phase 6 onwards)** — alongside `cargo-semver-checks` once Phase 6 ships.
 - [x] Add a Renovate / Dependabot config so action SHAs and crate versions get bumped via PR (preserves the SHA-pin policy without it rotting).
 - [x] **`#[non_exhaustive]` policy on public enums**: documented in `docs/api-stability.md`; every `pub enum` in non-internal crates is `#[non_exhaustive]` unless a documented exception applies. Enforced by code review and (where possible) by a clippy custom lint or `cargo-public-api` check.
-- [ ] **Track upstream `tikv/raft-engine` 1.0 discussion**: open an issue on `tikv/raft-engine` asking about 1.0 plans, semver commitment, and crates.io publication cadence (crate is 24 months stale; master is active). Link the response into ADR 0002's "risks" section. Re-check at every mango minor release.
+- [x] **Track upstream `tikv/raft-engine` 1.0 discussion**: issue filed at [tikv/raft-engine#396](https://github.com/tikv/raft-engine/issues/396) asking about 1.0 plans, semver commitment, and crates.io publication cadence (crate is 24 months stale; master is active). Response, when it arrives, is linked into ADR 0002 §Risks W4. Re-check at every mango minor release.
 
 ## Phase 1 — Storage backend (single-node, no MVCC yet)
 

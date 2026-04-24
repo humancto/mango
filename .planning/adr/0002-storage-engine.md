@@ -131,7 +131,7 @@ Every verified wart is engaged explicitly. "This is fine" is not an answer.
   Plus:
   1. **cargo-vet audit** at the pinned SHA (Phase 0 gate, task #21, already shipped).
   2. **Renovate tracking** of the master branch (Phase 0.5 gate, task #28, already shipped). Bumps open a PR a human reviews.
-  3. **Upstream engagement:** open an issue on `tikv/raft-engine` asking about 1.0 plans (tracked as a new roadmap item).
+  3. **Upstream engagement:** issue filed at [tikv/raft-engine#396](https://github.com/tikv/raft-engine/issues/396) asking about 1.0 plans, semver commitment, and crates.io publication cadence. Response (when received) is summarized in this §W4.
   4. **Re-evaluation cadence:** re-check raft-engine's crates.io / master situation at every mango minor release.
 - **Escape hatch:** if master goes dark for 12 months or a CVE is filed with no response in 30 days, swap the Raft log engine. Two fallbacks: (a) redb-backed log engine built behind `RaftLogStore` (not ideal for write amplification; acceptable as a temporary fallback); (b) vendor the pinned SHA under `crates/vendored-raft-engine/` with a CODEOWNERS stanza. Vendoring is a multi-year burden; taken only if upstream is truly gone.
 
