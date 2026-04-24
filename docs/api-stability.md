@@ -244,5 +244,7 @@ classifies it. Document the break in the release notes.
   — clippy regression fixture
 - [`.github/workflows/non-exhaustive.yml`](../.github/workflows/non-exhaustive.yml)
   — CI workflow
-- [`docs/msrv.md`](msrv.md) — MSRV-bump checklist (migrates
-  `// reason:` comments when MSRV reaches 1.81)
+- [`docs/msrv.md`](msrv.md) — MSRV bumping process; workspace
+  MSRV is 1.89, making the inline `#[allow(lint, reason = "...")]`
+  form the preferred shape (the `// reason:` line-comment
+  workaround is deprecated and blocked by the tripwire above)
