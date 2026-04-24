@@ -95,6 +95,14 @@ mod tests {
                 },
                 "bar",
             ),
+            (
+                BackendError::BucketNameConflict {
+                    name: "kv".into(),
+                    existing_id: BucketId::new(1),
+                    requested_id: BucketId::new(2),
+                },
+                "kv",
+            ),
             (BackendError::Other("engine boom".into()), "engine boom"),
         ];
         for (err, needle) in cases {
