@@ -32,7 +32,7 @@ Reviewer's Contract:
 - [ ] **Unsafe** (#5) — paths: <...>.
       `// SAFETY:` on every block: yes
       Miri: `MIRIFLAGS=-Zmiri-strict-provenance cargo +nightly miri
-    test -p <crate>` — <output / FFI-no-Miri justification>
+  test -p <crate>` — <output / FFI-no-Miri justification>
       Workspace `unsafe` count delta: <+N / 0>;
       `unsafe`-growth PR label applied if +N > 0
 - [ ] **Security** (#6) — axis #N / bar `<name>`.
@@ -71,7 +71,7 @@ TODO/FIXME/unimplemented!), and #12 (axis-or-plumbing declared above). -->
 - [ ] `cargo doc --workspace --no-deps`
 - [ ] `cargo deny check`
 - [ ] `cargo audit`
-- [ ] `rustup run 1.80 cargo check --workspace --all-targets --locked --target x86_64-unknown-linux-gnu`
+- [ ] `rustup run 1.89 cargo check --workspace --all-targets --locked`
 - [ ] No new `TODO` / `FIXME` / `unimplemented!` introduced
 - [ ] rust-expert adversarial review (final gate)
 
