@@ -234,9 +234,11 @@ scan_crate() {
             }
             function is_line_comment(s) {
                 # Matches `//`, `///`, `//!`, and `// reason:` — any
-                # line-comment form. Not `/* */` block comments; those
-                # would break the cluster in rustc too (well, partially
-                # — but we keep it simple).
+                # line-comment form. Block comments `/* */` reset the
+                # cluster here even though rustc tolerates them between
+                # attributes; backstops are allowed to be stricter than
+                # the compiler, and no one writes block-comments in an
+                # attribute cluster in practice.
                 return (s ~ /^[[:space:]]*\/\//)
             }
             function is_blank(s) {
@@ -361,7 +363,7 @@ if [ -n "$msrv_raw" ] && [ -n "$publishable_crates" ]; then
             IFS="$OLDIFS"
             if [ -n "$tripwire_hits" ]; then
                 fail "$scenario"
-                echo "    MSRV has advanced to 1.${msrv_minor}; the inline" >&2
+                echo "    MSRV has advanced to ${msrv_major}.${msrv_minor}; the inline" >&2
                 echo "    \`#[allow(lint, reason = \"...\")]\` form is stable — migrate:" >&2
                 printf '%s' "$tripwire_hits" | sed 's/^/        /' >&2
             else

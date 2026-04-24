@@ -97,14 +97,19 @@ exhaustive-by-contract escape for enums where the mathematical or
 protocol-level closure is load-bearing.
 
 ```rust
-// reason: exhaustive-by-contract — parity is a closed two-element set
-// (mod 2); adding a variant would be ill-formed, not just a break.
+// reason: exhaustive-by-contract — parity mod 2 is mathematically closed; a third variant would be ill-formed, not merely a break.
 #[allow(clippy::exhaustive_enums)]
 pub enum Parity {
     Even,
     Odd,
 }
 ```
+
+The `// reason:` comment is on a **single line**. The backstop
+(`scripts/non-exhaustive-check.sh`) requires the line _immediately_
+before `#[allow(clippy::exhaustive_enums)]` to be a `// reason:`
+line-comment; a wrapped two-line reason fails the backstop because
+the continuation line is not itself a `reason:` marker.
 
 ### 2. C-repr / FFI enums
 
@@ -113,8 +118,7 @@ a wire protocol, kernel ioctl, or FFI boundary. Adding a variant
 would silently reinterpret existing data.
 
 ```rust
-// reason: C-repr wire type — variants match kernel TCP_INFO states;
-// adding one would misread a live socket.
+// reason: C-repr wire type — variants match kernel TCP_INFO states; adding one would misread a live socket.
 #[allow(clippy::exhaustive_enums)]
 #[repr(u8)]
 pub enum TcpState {
