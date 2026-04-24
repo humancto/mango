@@ -46,7 +46,16 @@
 
 set -u
 
-repo_root="$(cd "$(dirname "$0")/.." && pwd)"
+# Repo root discovery. Default: resolve from the script's own location,
+# so `bash scripts/non-exhaustive-check.sh` works from any CWD. The
+# $NON_EXHAUSTIVE_REPO_ROOT env var overrides for the self-test's
+# synthetic-tmpdir negative tests — see
+# scripts/non-exhaustive-scripts-test.sh tests #9/#10.
+if [ -n "${NON_EXHAUSTIVE_REPO_ROOT:-}" ]; then
+    repo_root="$NON_EXHAUSTIVE_REPO_ROOT"
+else
+    repo_root="$(cd "$(dirname "$0")/.." && pwd)"
+fi
 cd "$repo_root"
 
 pass_count=0
@@ -142,17 +151,32 @@ fi
 # --- 4. scan each publishable crate for pub enum compliance ---------
 # For each publishable crate, walk every `.rs` file under `src/`
 # and for every `pub enum` line, assert one of:
-#   (a) the enum has `#[non_exhaustive]` on the preceding non-blank,
-#       non-comment line;
-#   (b) the enum has `#[allow(clippy::exhaustive_enums)]` on the
-#       preceding non-blank line, and the line immediately before
-#       that `#[allow]` is a `// reason:` line-comment;
+#   (a) any line in the attribute/comment cluster immediately above
+#       the `pub enum` is `#[non_exhaustive]`;
+#   (b) any line in that cluster is
+#       `#[allow(clippy::exhaustive_enums)]` AND the line immediately
+#       preceding it in the cluster is a `// reason:` line-comment;
 #   (c) the crate's lib.rs (or main.rs) carries a crate-level
 #       `#![allow(clippy::exhaustive_enums)]`.
 #
-# The awk below implements (a) and (b) via a small state machine
-# that remembers the last 2 non-blank, non-test-mode-boundary lines.
-# (c) is tested per-crate before entering the scan.
+# Cluster definition (for (a) and (b)):
+#   A cluster is a run of consecutive lines matching any of:
+#     - `#[...]` outer attribute
+#     - `///` or `//!` doc-comment
+#     - `//` line-comment (including the `// reason:` form)
+#   The cluster ends (resets) on:
+#     - a blank line
+#     - any non-attribute, non-comment content (item, brace, etc.)
+#
+# Cluster is stored in source order: cluster[0] is the top of the
+# cluster (farthest from `pub enum`); cluster[n-1] is the line
+# immediately above `pub enum`. The reason↔allow adjacency rule reads
+# `cluster[i]` (the allow) and `cluster[i-1]` (the reason).
+#
+# Rationale for rewriting away from the prev1/prev2 scheme: that
+# scheme false-rejected `#[derive(Debug)]\n#[non_exhaustive]\npub enum`,
+# because `#[non_exhaustive]` landed on `prev2` behind `#[derive]` on
+# `prev1` and prev2 was only checked as a `// reason:` candidate.
 #
 # Note: this is a backstop. If clippy is doing its job the scan
 # is vacuously satisfied on the publishable set. The script's job
@@ -181,7 +205,7 @@ scan_crate() {
     fi
 
     # Walk every .rs file under src/. For each `pub enum` line,
-    # run the state-machine check.
+    # run the cluster-buffer check.
     local files
     files="$(find "$src_dir" -type f -name '*.rs' -print | sort)"
     local file
@@ -194,35 +218,75 @@ scan_crate() {
             function is_non_exhaustive(s) {
                 return (s ~ /^[[:space:]]*#\[non_exhaustive\][[:space:]]*$/)
             }
+            # Accepts multi-lint allow forms like
+            # `#[allow(clippy::exhaustive_enums, dead_code)]` — the
+            # `[^)]*` on either side of `clippy::exhaustive_enums` lets
+            # other lint names share the attribute call. Intentional:
+            # real-world escapes often group related lints.
             function is_exhaustive_allow(s) {
                 return (s ~ /^[[:space:]]*#\[allow\([^)]*clippy::exhaustive_enums[^)]*\)\][[:space:]]*$/)
             }
             function is_reason_comment(s) {
                 return (s ~ /^[[:space:]]*\/\/[[:space:]]*reason:/)
             }
-            BEGIN { prev1 = ""; prev2 = ""; fails = 0 }
+            function is_attr(s) {
+                return (s ~ /^[[:space:]]*#\[/)
+            }
+            function is_line_comment(s) {
+                # Matches `//`, `///`, `//!`, and `// reason:` — any
+                # line-comment form. Block comments `/* */` reset the
+                # cluster here even though rustc tolerates them between
+                # attributes; backstops are allowed to be stricter than
+                # the compiler, and no one writes block-comments in an
+                # attribute cluster in practice.
+                return (s ~ /^[[:space:]]*\/\//)
+            }
+            function is_blank(s) {
+                return (s ~ /^[[:space:]]*$/)
+            }
+            function cluster_reset() {
+                ncluster = 0
+                delete cluster
+            }
+            function cluster_push(s) {
+                cluster[ncluster] = s
+                ncluster++
+            }
+            function cluster_scan_pub_enum() {
+                # Returns 1 on accept, 0 on reject. Emits fail on 0.
+                for (i = 0; i < ncluster; i++) {
+                    if (is_non_exhaustive(cluster[i])) return 1
+                }
+                # No #[non_exhaustive] in the cluster; look for an
+                # exhaustive_allow escape with a reason immediately
+                # preceding it in the cluster (source-adjacent).
+                for (i = 0; i < ncluster; i++) {
+                    if (is_exhaustive_allow(cluster[i])) {
+                        if (i >= 1 && is_reason_comment(cluster[i-1])) {
+                            return 1
+                        }
+                        emit_fail("#[allow(clippy::exhaustive_enums)] without `// reason:` line-comment on preceding line")
+                        return 0
+                    }
+                }
+                emit_fail("pub enum without #[non_exhaustive] or documented escape")
+                return 0
+            }
+            BEGIN { ncluster = 0; fails = 0 }
             # Track only `pub enum <Ident>` — not `pub(crate) enum`,
             # not `enum` (crate-private), not enum variant field
             # refs. The lint only fires on truly public enums.
             {
                 if ($0 ~ /^[[:space:]]*pub[[:space:]]+enum[[:space:]]+[A-Za-z_]/) {
-                    # Match option (a)
-                    if (is_non_exhaustive(prev1)) {
-                        # ok
-                    } else if (is_exhaustive_allow(prev1)) {
-                        # Match option (b): reason comment must be
-                        # the line before the #[allow].
-                        if (is_reason_comment(prev2)) {
-                            # ok
-                        } else {
-                            emit_fail("#[allow(clippy::exhaustive_enums)] without `// reason:` line-comment on preceding line")
-                        }
-                    } else {
-                        emit_fail("pub enum without #[non_exhaustive] or documented escape")
-                    }
+                    cluster_scan_pub_enum()
+                    cluster_reset()
+                } else if (is_blank($0)) {
+                    cluster_reset()
+                } else if (is_attr($0) || is_line_comment($0)) {
+                    cluster_push($0)
+                } else {
+                    cluster_reset()
                 }
-                prev2 = prev1
-                prev1 = $0
             }
             END { exit (fails > 0) ? 1 : 0 }
         ' "$file"
@@ -251,6 +315,61 @@ if [ -n "$publishable_crates" ]; then
     IFS="$OLDIFS"
     if [ "$all_clean" = "1" ]; then
         pass "all publishable crates satisfy #[non_exhaustive] policy"
+    fi
+fi
+
+# --- 5. MSRV tripwire for `// reason:` line-comments ----------------
+# The `// reason:` line-comment convention exists because the inline
+# `#[allow(lint, reason = "...")]` form is stable only from rustc 1.81.
+# Mango MSRV is pinned at 1.80 today (workspace.package.rust-version
+# in root Cargo.toml). The moment MSRV advances to 1.81+, the inline
+# form becomes available and the line-comment workaround is obsolete.
+#
+# This tripwire enforces the migration: when the workspace
+# rust-version minor is >= 81 (or any major > 1), any surviving
+# `// reason:` line-comment in a publishable crate's `src/**/*.rs`
+# fails the check. The MSRV-bump PR is then forced to migrate them in
+# the same change-set.
+#
+# Scope is intentionally narrow: publishable `<manifest_dir>/src/**`
+# only. Not `tests/`, not `examples/`, not `benches/`, not fixture
+# workspaces (which are separate workspaces `cargo metadata --no-deps`
+# on the root won't enumerate), not `docs/`.
+#
+# Inert today at MSRV=1.80.
+msrv_raw=$(grep -E '^[[:space:]]*rust-version[[:space:]]*=[[:space:]]*"[0-9]+\.[0-9]+' "$cargo_toml" 2>/dev/null | head -1 || true)
+if [ -n "$msrv_raw" ] && [ -n "$publishable_crates" ]; then
+    # Extract major.minor with sed. Handles both "1.80" and "1.80.0".
+    msrv_major=$(printf '%s' "$msrv_raw" | sed -nE 's/.*"([0-9]+)\.([0-9]+).*/\1/p')
+    msrv_minor=$(printf '%s' "$msrv_raw" | sed -nE 's/.*"([0-9]+)\.([0-9]+).*/\2/p')
+    if [ -n "$msrv_major" ] && [ -n "$msrv_minor" ]; then
+        if [ "$msrv_major" -gt 1 ] || { [ "$msrv_major" -eq 1 ] && [ "$msrv_minor" -ge 81 ]; }; then
+            scenario="MSRV tripwire: no \`// reason:\` line-comments in publishable src/ at MSRV >= 1.81"
+            tripwire_hits=""
+            OLDIFS="$IFS"
+            IFS='
+'
+            for row in $publishable_crates; do
+                path=$(printf '%s' "$row" | cut -f2)
+                src="$path/src"
+                if [ -d "$src" ]; then
+                    hits=$(grep -rEn '^[[:space:]]*//[[:space:]]*reason:' "$src" 2>/dev/null || true)
+                    if [ -n "$hits" ]; then
+                        tripwire_hits="${tripwire_hits}${hits}
+"
+                    fi
+                fi
+            done
+            IFS="$OLDIFS"
+            if [ -n "$tripwire_hits" ]; then
+                fail "$scenario"
+                echo "    MSRV has advanced to ${msrv_major}.${msrv_minor}; the inline" >&2
+                echo "    \`#[allow(lint, reason = \"...\")]\` form is stable — migrate:" >&2
+                printf '%s' "$tripwire_hits" | sed 's/^/        /' >&2
+            else
+                pass "$scenario"
+            fi
+        fi
     fi
 fi
 
