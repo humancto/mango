@@ -1,0 +1,23 @@
+[package]
+name = "mango-storage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Mango storage backend (Phase 1 skeleton; Backend + RaftLogStore traits land per ROADMAP.md)."
+publish = false
+
+[dependencies]
+redb.workspace = true
+# Consumed via `.workspace = true` with NO feature override: the workspace
+# entry's `default-features = false, features = ["internals"]` inherits
+# verbatim. Adding a local `features = [...]` here would ADD to the
+# workspace set — re-enabling `lz4-compression` would re-introduce the
+# C FFI dep (ADR 0002 §W5), and re-enabling `scripting` would pull
+# MPL-2.0 (via rhai/smartstring).
+raft-engine.workspace = true
+
+[lints]
+workspace = true
