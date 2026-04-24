@@ -1,0 +1,23 @@
+# benches/oracles/bbolt/VERSIONS
+#
+# Pinned bbolt oracle version. This is the source of truth for the
+# go.mod in this directory and for supply-chain review. Shell-
+# sourceable (KEY=VALUE, no quotes needed).
+#
+# The bbolt pin is chosen to track etcd's stable-line usage (etcd
+# v3.5.x ships bbolt v1.3.x). The exact go.mod pin and go.sum
+# integrity checksums are checked in alongside this file; verify by
+# running `go mod verify` in this directory.
+#
+# Why TOFU-per-go.sum rather than a separate sha256: `go mod verify`
+# uses Go's checksum database (sum.golang.org) plus go.sum's
+# h1: hash. go.sum is committed, which gives reproducible builds
+# without a second manual sha channel. See README.md `## Threat
+# model`.
+#
+# To bump: update BBOLT_VERSION here, run `go get
+# go.etcd.io/bbolt@<NEW>` in this directory, then `go mod tidy`,
+# then `go mod verify`, then commit the resulting go.mod/go.sum
+# diff. CI will refuse to merge if go.sum is out of sync.
+
+BBOLT_VERSION=v1.3.11
