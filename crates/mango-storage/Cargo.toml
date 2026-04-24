@@ -18,6 +18,14 @@ redb.workspace = true
 # C FFI dep (ADR 0002 §W5), and re-enabling `scripting` would pull
 # MPL-2.0 (via rhai/smartstring).
 raft-engine.workspace = true
+# ROADMAP:818: raft-rs SHA-pinned via workspace. Used ONLY for the
+# protobuf type surface (`raft::eraftpb::{Entry, HardState,
+# SnapshotMetadata}`) at the `RaftLogStore` conversion boundary; we do
+# NOT exercise raft-rs's state machine here (that's Phase 3
+# `mango-raft`). The workspace entry sets `default-features = false,
+# features = ["protobuf-codec"]` — local features MUST stay empty to
+# avoid re-enabling `default-logger` (slog transitives).
+raft.workspace = true
 # Trait-surface deps — see ROADMAP:816 and the workspace declarations
 # for rationale. bytes carries Raft entry payloads and snapshot bytes;
 # thiserror derives BackendError.

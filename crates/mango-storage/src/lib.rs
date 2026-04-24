@@ -20,10 +20,15 @@ pub mod backend;
 // public API.
 mod redb;
 
+// ROADMAP:818 raft-engine-backed RaftLogStore impl. The module is
+// private; only the named types below are public API.
+mod raft_engine;
+
 pub use backend::{
     Backend, BackendConfig, BackendError, BucketId, CommitStamp, HardState, RaftEntry,
     RaftEntryType, RaftLogStore, RaftSnapshotMetadata, RangeIter, ReadSnapshot, WriteBatch,
 };
+pub use raft_engine::{RaftEngineConfig, RaftEngineLogStore, ReadableSize, RecoveryMode};
 pub use redb::{batch::RedbBatch, snapshot::RedbSnapshot, RedbBackend};
 
 /// The package version string, captured at build time from

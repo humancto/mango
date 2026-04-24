@@ -33,9 +33,17 @@ audit-as-crates-io = false
 criteria = "safe-to-deploy"
 notes = "first-party workspace crate; audit-as-crates-io=false so cargo-vet does not require third-party audits for mango's own code. safe-to-deploy is governed by in-tree review (CODEOWNERS + PR review)."
 
+[policy.raft]
+audit-as-crates-io = true
+notes = "tikv/raft-rs consumed SHA-pinned at master (see workspace Cargo.toml `raft` entry, ROADMAP:818). Used ONLY for the protobuf type surface (raft::eraftpb::{Entry, HardState, SnapshotMetadata}) at the RaftLogStore conversion boundary; the raft-rs state machine itself is NOT exercised from mango-storage (that lives in mango-raft at Phase 3). `audit-as-crates-io = true` asks cargo-vet to treat the git-pinned source as-if the crates.io tarball at matching package.version (0.7.0); the companion `[[exemptions.raft]]` entry carries the SHA-qualified version (`0.7.0@git:<SHA>`). Retirement trigger: raft-rs 0.8+ on crates.io — swap to a versioned registry entry and drop the SHA qualifier on the exemption line."
+
 [policy.raft-engine]
 audit-as-crates-io = true
 notes = """humancto/raft-engine fork of tikv/raft-engine (see ADR 0002 §W5, .planning/fork-raft-engine-lz4-verification.md). `audit-as-crates-io = true` governs how third-party audits are interpreted (git source audited as-if the crates.io tarball at matching package.version), NOT how exemption entries match. Exemptions for a git dep key on the full resolved source (`0.4.2@git:<SHA>`), so the companion `[[exemptions.raft-engine]]` entry carries the SHA-qualified version — see .planning/fork-raft-engine-lz4-verification.md §"Supply-chain audit posture" for the full rule and the retirement/rebase edits it implies. The fork's incremental delta over upstream (two commits feature-gating lz4-sys) is audited separately via rust-expert's two-round review of the fork and via upstream PR tikv/raft-engine#397."""
+
+[policy.raft-proto]
+audit-as-crates-io = true
+notes = "Sibling crate of tikv/raft-rs; contains the generated protobuf types (raft::eraftpb::*). Same SHA-pin and retirement rules as [policy.raft] above."
 
 [policy.xtask-vet-ttl]
 audit-as-crates-io = false
@@ -76,6 +84,11 @@ notes = "review-by: 2026-10-23 — madsim 0.2.30 transitive (dev-dep via mango-m
 version = "1.5.0"
 criteria = "safe-to-deploy"
 notes = "review-by: 2026-10-23 — raft-engine 0.4.2 transitive (build-dep), audit pending"
+
+[[exemptions.autotools]]
+version = "0.2.7"
+criteria = "safe-to-deploy"
+notes = "review-by: 2026-10-23 — raft-rs 0.7.0 transitive (build-dep of protobuf-src for codegen-time pure-C protoc vendoring; our protobuf-codec feature set for raft does NOT invoke protoc but autotools still enters the dep graph as a build-time tool). See ROADMAP:818 and .planning/raft-engine-logstore.plan.md."
 
 [[exemptions.bincode]]
 version = "1.3.3"
@@ -172,6 +185,11 @@ version = "1.2.1"
 criteria = "safe-to-deploy"
 notes = "review-by: 2026-10-23 — madsim 0.2.30 transitive (dev-dep via mango-madsim-demo), audit pending"
 
+[[exemptions.erased-serde]]
+version = "0.3.31"
+criteria = "safe-to-deploy"
+notes = "review-by: 2026-10-23 — raft-rs 0.7.0 transitive via slog 2.x (slog-rs erases logger types through a `dyn` bound). dtolnay maintainership. See ROADMAP:818."
+
 [[exemptions.errno]]
 version = "0.3.14"
 criteria = "safe-to-deploy"
@@ -237,6 +255,11 @@ version = "0.3.32"
 criteria = "safe-to-deploy"
 notes = "review-by: 2026-10-23 — madsim 0.2.30 transitive (dev-dep via mango-madsim-demo), audit pending"
 
+[[exemptions.fxhash]]
+version = "0.2.1"
+criteria = "safe-to-deploy"
+notes = "review-by: 2026-10-23 — raft-rs 0.7.0 transitive. fxhash is a ~100 LoC FxHash (Firefox's simple non-cryptographic hasher) with no unsafe and no parser surface — used by raft-rs for internal HashMap keying (ProgressTracker, etc.) on non-adversarial keys. Formally unmaintained (RUSTSEC-2025-0057 — see deny.toml advisories ignore for the parallel entry). Retirement trigger: raft-rs migration to rustc-hash. See ROADMAP:818 and .planning/raft-engine-logstore.plan.md."
+
 [[exemptions.generator]]
 version = "0.8.8"
 criteria = "safe-to-deploy"
@@ -251,6 +274,11 @@ notes = "review-by: 2026-10-23 — madsim 0.2.30 transitive (dev-dep via mango-m
 version = "0.3.4"
 criteria = "safe-to-deploy"
 notes = "review-by: 2026-10-23 — rust-random, audit pending"
+
+[[exemptions.getset]]
+version = "0.1.6"
+criteria = "safe-to-deploy"
+notes = "review-by: 2026-10-23 — raft-rs 0.7.0 transitive. getset is a small proc-macro crate that derives getter/setter accessors; no runtime surface. See ROADMAP:818."
 
 [[exemptions.hashbrown]]
 version = "0.14.5"
@@ -407,6 +435,16 @@ version = "0.2.37"
 criteria = "safe-to-deploy"
 notes = "review-by: 2026-10-23 — dtolnay, audit pending"
 
+[[exemptions.proc-macro-error-attr2]]
+version = "2.0.0"
+criteria = "safe-to-deploy"
+notes = "review-by: 2026-10-23 — raft-rs 0.7.0 transitive via getset. proc-macro-error2 fork is the maintained successor to the unmaintained proc-macro-error 1.x (no longer depended on by raft-rs). Proc-macro-only; no runtime surface. See ROADMAP:818."
+
+[[exemptions.proc-macro-error2]]
+version = "2.0.1"
+criteria = "safe-to-deploy"
+notes = "review-by: 2026-10-23 — raft-rs 0.7.0 transitive via getset (companion of proc-macro-error-attr2). Proc-macro-only; no runtime surface. See ROADMAP:818."
+
 [[exemptions.proc-macro2]]
 version = "1.0.106"
 criteria = "safe-to-deploy"
@@ -447,6 +485,21 @@ version = "2.28.0"
 criteria = "safe-to-deploy"
 notes = "review-by: 2026-10-23 — raft-engine 0.4.2 transitive (rust-protobuf 2.x via prometheus), audit pending"
 
+[[exemptions.protobuf-build]]
+version = "0.15.1"
+criteria = "safe-to-deploy"
+notes = "review-by: 2026-10-23 — raft-rs 0.7.0 transitive (build-dep only: drives protobuf-codegen at raft-proto build time). No runtime surface. See ROADMAP:818."
+
+[[exemptions.protobuf-codegen]]
+version = "2.28.0"
+criteria = "safe-to-deploy"
+notes = "review-by: 2026-10-23 — raft-rs 0.7.0 transitive (build-dep only: rust-protobuf 2.x codegen). Invoked at raft-proto build time; no runtime path. See ROADMAP:818."
+
+[[exemptions.protobuf-src]]
+version = "1.1.0+21.5"
+criteria = "safe-to-deploy"
+notes = "review-by: 2026-10-23 — raft-rs 0.7.0 transitive (build-dep only: vendors the upstream protoc binary for codegen). No runtime surface; pure build-time tooling. Version suffix `+21.5` tracks the vendored protoc release. See ROADMAP:818."
+
 [[exemptions.quote]]
 version = "1.0.45"
 criteria = "safe-to-deploy"
@@ -457,15 +510,40 @@ version = "5.3.0"
 criteria = "safe-to-deploy"
 notes = "review-by: 2026-10-23 — getrandom transitive, r-efi maintainers, audit pending"
 
+[[exemptions.raft]]
+version = "0.7.0@git:53cf7a5b0bf08d278ad768a60b77e68fa10f93aa"
+criteria = "safe-to-deploy"
+notes = 'review-by: 2026-10-23 — tikv/raft-rs master SHA-pinned (see workspace Cargo.toml `raft` entry, ROADMAP:818). Consumed ONLY for the protobuf type surface (`raft::eraftpb::{Entry, HardState, SnapshotMetadata}`) at the `RaftLogStore` conversion boundary; raft-rs state machine not exercised from mango-storage. cargo-vet keys git-dep exemptions on `<version>@git:<SHA>`; the parallel `[policy.raft] audit-as-crates-io = true` controls how third-party audits match. Retirement trigger: raft-rs 0.8+ on crates.io — swap to a plain versioned exemption and drop the SHA qualifier. See .planning/raft-engine-logstore.plan.md §"Supply-chain audit posture".'
+
 [[exemptions.raft-engine]]
 version = "0.4.2@git:e1d738d9ad1c1fc4f5b21c8c73bf605b5696f535"
 criteria = "safe-to-deploy"
 notes = 'review-by: 2026-10-23 — Mango WAL backend via humancto/raft-engine fork. cargo-vet keys exemptions on the full resolved source (`0.4.2@git:<SHA>` for git deps), NOT on `package.version` alone, even with `[policy.raft-engine] audit-as-crates-io = true`. That means this exemption covers THIS SPECIFIC FORK SHA only: rebasing the fork requires a new exemption line at the new `0.4.2@git:<new-SHA>` form, and retiring to upstream crates.io 0.4.2 requires a new exemption at plain `version = "0.4.2"`. See ADR 0002 §W5 and .planning/fork-raft-engine-lz4-verification.md §"Supply-chain audit posture".'
 
+[[exemptions.raft-proto]]
+version = "0.7.0@git:53cf7a5b0bf08d278ad768a60b77e68fa10f93aa"
+criteria = "safe-to-deploy"
+notes = "review-by: 2026-10-23 — Sibling crate of tikv/raft-rs; generated protobuf types for raft::eraftpb::*. Same SHA-pin and retirement rules as [[exemptions.raft]] above. See ROADMAP:818 and .planning/raft-engine-logstore.plan.md."
+
 [[exemptions.rand]]
 version = "0.8.6"
 criteria = "safe-to-deploy"
 notes = "review-by: 2026-10-23 — madsim 0.2.30 transitive (dev-dep via mango-madsim-demo), audit pending"
+
+[[exemptions.rand]]
+version = "0.9.4"
+criteria = "safe-to-deploy"
+notes = "review-by: 2026-10-23 — raft-rs 0.7.0 transitive (non-adversarial randomness: election-timer jitter). rust-random maintainership. See ROADMAP:818."
+
+[[exemptions.rand_chacha]]
+version = "0.9.0"
+criteria = "safe-to-deploy"
+notes = "review-by: 2026-10-23 — raft-rs 0.7.0 transitive (rand 0.9.x PRNG backend). rust-random maintainership. See ROADMAP:818."
+
+[[exemptions.rand_core]]
+version = "0.9.5"
+criteria = "safe-to-deploy"
+notes = "review-by: 2026-10-23 — raft-rs 0.7.0 transitive (rand 0.9.x core trait). rust-random maintainership. See ROADMAP:818."
 
 [[exemptions.rand_xoshiro]]
 version = "0.6.0"
@@ -571,6 +649,11 @@ notes = "review-by: 2026-10-23 — madsim 0.2.30 transitive (dev-dep via mango-m
 version = "0.4.12"
 criteria = "safe-to-deploy"
 notes = "review-by: 2026-10-23 — madsim 0.2.30 transitive (dev-dep via mango-madsim-demo), audit pending"
+
+[[exemptions.slog]]
+version = "2.8.2"
+criteria = "safe-to-deploy"
+notes = "review-by: 2026-10-23 — raft-rs 0.7.0 transitive. slog is the structured-logger raft-rs emits internal events through; mango-storage does NOT attach a slog Drain (raft-rs accepts a no-op logger by default). No runtime surface in practice. See ROADMAP:818."
 
 [[exemptions.smartstring]]
 version = "1.0.1"
