@@ -46,9 +46,11 @@ on:
     paths:
       - "crates/**/src/**"
       - "crates/**/tests/**"
+      - "crates/**/build.rs"
       - "crates/**/Cargo.toml"
       - "Cargo.toml"
       - "Cargo.lock"
+      - "rust-toolchain.toml"
       - ".github/workflows/madsim.yml"
       - "scripts/madsim-crates.sh"
       - "scripts/madsim-scripts-test.sh"
@@ -59,9 +61,11 @@ on:
     paths:
       - "crates/**/src/**"
       - "crates/**/tests/**"
+      - "crates/**/build.rs"
       - "crates/**/Cargo.toml"
       - "Cargo.toml"
       - "Cargo.lock"
+      - "rust-toolchain.toml"
       - ".github/workflows/madsim.yml"
       - "scripts/madsim-crates.sh"
       - "scripts/madsim-scripts-test.sh"
