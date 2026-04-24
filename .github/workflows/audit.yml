@@ -67,3 +67,15 @@ jobs:
       - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998  # v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          # Keep this list in lockstep with `[advisories].ignore` in
+          # deny.toml — rustsec/audit-check does NOT read deny.toml, so
+          # the two layers drift silently if only one is updated.
+          # Every entry here must have a matching deny.toml entry with
+          # the full multi-line justification; this file records only
+          # the IDs.
+          #
+          # RUSTSEC-2024-0437 — protobuf 2.28 uncontrolled recursion.
+          #   Transitive via raft-engine → prometheus (metrics only, not
+          #   a network-facing deserializer). Full rationale and
+          #   re-audit triggers live in deny.toml.
+          ignore: RUSTSEC-2024-0437

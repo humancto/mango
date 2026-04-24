@@ -8,9 +8,11 @@ dependencies declared but _no trait or impl code yet_:
 - `redb` (KV storage engine per ADR 0002)
 - `raft-engine` pinned to the `humancto/raft-engine` fork at
   SHA `e1d738d9ad1c1fc4f5b21c8c73bf605b5696f535`, with
-  `default-features = false` and `features = ["internals", "scripting"]` —
+  `default-features = false` and `features = ["internals"]` —
   the fork removes `lz4-sys` from the build graph per ADR 0002 §W5's
-  build-time mitigation.
+  build-time mitigation. (The plan originally called for
+  `["internals", "scripting"]`; dropped during implementation — see
+  "Deviations from plan" below.)
 
 Line 816 (trait definition) is a separate item. This PR closes line 815
 only. The Cargo.toml dep entries prove the fork integrates cleanly end
@@ -139,10 +141,17 @@ redb = "4.1.0"
 # tikv/raft-engine via the humancto/raft-engine fork.
 # Fork exists to feature-gate lz4-sys (C FFI) out of the default build
 # graph — see .planning/fork-raft-engine-lz4-verification.md and ADR
-# 0002 §W5. `default-features = false` drops `lz4-compression`; the
-# other two upstream defaults ("internals", "scripting") are re-enabled
-# explicitly so the skeleton proves the no-lz4 build compiles for the
-# feature set the impl PRs will actually use.
+# 0002 §W5. `default-features = false` drops ALL THREE upstream
+# defaults (`lz4-compression`, `scripting`, `internals`); we re-enable
+# ONLY `internals` (the Raft log reader/writer types mango-raft needs).
+# `scripting` is dropped because it pulls rhai -> smartstring (MPL-2.0),
+# an allow-list widening mango does not want to take for a feature
+# mango does not use. `lz4-compression` is dropped because that's the
+# entire reason the fork exists.
+# `version = "0.4.2"` is load-bearing for cargo-deny (wildcards = "deny"
+# requires an explicit version on git deps) AND for cargo-vet
+# (`[policy.raft-engine] audit-as-crates-io = true` keys exemptions on
+# the package.version, not the git rev).
 #
 # Mango configs MUST set batch-compression-threshold = 0 (enforced at
 # runtime by the fork's Config::sanitize when lz4-compression is off).
@@ -152,9 +161,8 @@ redb = "4.1.0"
 # .planning/fork-raft-engine-lz4-verification.md §"Retirement plan").
 # Dependabot does NOT auto-bump git rev pins; retirement is a manual
 # action.
-raft-engine = { git = "https://github.com/humancto/raft-engine", rev = "e1d738d9ad1c1fc4f5b21c8c73bf605b5696f535", default-features = false, features = [
+raft-engine = { version = "0.4.2", git = "https://github.com/humancto/raft-engine", rev = "e1d738d9ad1c1fc4f5b21c8c73bf605b5696f535", default-features = false, features = [
     "internals",
-    "scripting",
 ] }
 ```
 
@@ -341,3 +349,45 @@ For the reviewer's artifact-of-record:
   proving the build-time pure-Rust north-star is intact).
 - `cargo tree --workspace --duplicates` output (proves `[bans] multiple-versions = "deny"` is not tripped).
 - Pointer to the fork-tracking doc and ADR 0002 §W5 for reviewer context.
+
+## Deviations from plan (during implementation)
+
+1. **`features = ["internals"]` instead of `["internals", "scripting"]`.**
+   The plan called for `["internals", "scripting"]` (both non-lz4 upstream
+   defaults). During implementation `cargo deny check licenses` failed
+   with MPL-2.0 from `smartstring` 1.0.1, pulled in by `rhai` which is
+   pulled in by `raft-engine`'s `scripting` feature. Rationale for
+   dropping `scripting` rather than widening the allow-list: `scripting`
+   is raft-engine's TiKV-admin-CLI path; mango has no consumer of it, so
+   widening the license allow-list for a feature mango will never use is
+   the wrong tradeoff. Fork-tracking doc
+   (`.planning/fork-raft-engine-lz4-verification.md`) updated in the
+   same PR to match. If a future rebase of the fork moves anything mango
+   needs from `internals` into `scripting`, re-enable `scripting` AND
+   widen the license allow-list for MPL-2.0 in the same PR.
+
+2. **`version = "0.4.2"` added to the git dep line.**
+   The plan didn't list this. Added after `cargo deny check bans` failed
+   with `wildcards = "deny"` on a git dep lacking a `version =` field.
+   Load-bearing: without it, cargo-deny rejects the PR. Also aligns with
+   cargo-vet's `[policy.raft-engine] audit-as-crates-io = true` behavior
+   (keys the exemption on `package.version` = `"0.4.2"`).
+
+3. **`skip` entries in `[bans]` for 4 transitive duplicates.**
+   `bitflags@1.3.2`, `getrandom@0.2.17`, `hashbrown@0.14.5`, `syn@1.0.109`
+   — all major-version gaps in raft-engine 0.4.2's transitive graph vs
+   the modern workspace tree. Not listed in the plan's edge-cases
+   section explicitly; added with retirement triggers pointing at the
+   upstream raft-engine bump. Matches the plan's "Edge cases and risks"
+   item #5, which anticipated this class of friction but did not
+   enumerate the specific crates.
+
+4. **RUSTSEC-2024-0437 added to `[advisories] ignore`.**
+   `protobuf` 2.28 (uncontrolled recursion) is pulled in transitively
+   via `raft-engine` → `prometheus` (metrics only, not a network-facing
+   deserializer). Added to deny.toml's ignore list with a multi-line
+   justification and three named re-audit triggers. Also mirrored in
+   `.github/workflows/audit.yml` as `ignore: RUSTSEC-2024-0437` input to
+   `rustsec/audit-check` (that action does NOT read deny.toml). Not
+   listed in the plan — discovered when `cargo deny check advisories`
+   ran as part of local validation.

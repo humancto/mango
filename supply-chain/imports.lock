@@ -1,13 +1,6 @@
 
 # cargo-vet imports lock
 
-[[publisher.bumpalo]]
-version = "3.20.2"
-when = "2026-02-19"
-user-id = 696
-user-login = "fitzgen"
-user-name = "Nick Fitzgerald"
-
 [[publisher.wasip2]]
 version = "1.0.3+wasi-0.2.9"
 when = "2026-04-17"
@@ -23,7 +16,7 @@ trusted-publisher = "github:bytecodealliance/wit-bindgen"
 [[audits.bytecode-alliance.wildcard-audits.bumpalo]]
 who = "Nick Fitzgerald <fitzgen@gmail.com>"
 criteria = "safe-to-deploy"
-user-id = 696 # Nick Fitzgerald (fitzgen)
+user-id = 696
 start = "2019-03-16"
 end = "2026-08-21"
 

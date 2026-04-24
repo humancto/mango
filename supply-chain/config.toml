@@ -35,7 +35,7 @@ notes = "first-party workspace crate; audit-as-crates-io=false so cargo-vet does
 
 [policy.raft-engine]
 audit-as-crates-io = true
-notes = "humancto/raft-engine fork of tikv/raft-engine (see ADR 0002 §W5, .planning/fork-raft-engine-lz4-verification.md). audit-as-crates-io=true tells cargo-vet to treat this git-sourced dep as the crates.io tarball at the matching version (0.4.2), so a single [[exemptions.raft-engine]] entry on that version covers both the active fork and the post-retirement upstream. The fork's incremental delta over upstream (two commits feature-gating lz4-sys) is audited separately via rust-expert's two-round review of the fork and via upstream PR tikv/raft-engine#397."
+notes = "humancto/raft-engine fork of tikv/raft-engine (see ADR 0002 §W5, .planning/fork-raft-engine-lz4-verification.md). `audit-as-crates-io = true` governs how third-party audits are interpreted (git source audited as-if the crates.io tarball at matching package.version), NOT how exemption entries match. Exemptions for a git dep key on the full resolved source (`0.4.2@git:<SHA>`), so the companion `[[exemptions.raft-engine]]` entry carries the SHA-qualified version — see .planning/fork-raft-engine-lz4-verification.md §\"Supply-chain audit posture\" for the full rule and the retirement/rebase edits it implies. The fork's incremental delta over upstream (two commits feature-gating lz4-sys) is audited separately via rust-expert's two-round review of the fork and via upstream PR tikv/raft-engine#397."
 
 [policy.xtask-vet-ttl]
 audit-as-crates-io = false
@@ -115,6 +115,7 @@ notes = "review-by: 2026-10-23 — raft-engine 0.4.2 transitive, audit pending"
 [[exemptions.crc32fast]]
 version = "1.5.0"
 criteria = "safe-to-deploy"
+notes = "review-by: 2026-10-23 — raft-engine 0.4.2 transitive, audit pending"
 
 [[exemptions.crossbeam]]
 version = "0.8.4"
@@ -459,7 +460,7 @@ notes = "review-by: 2026-10-23 — getrandom transitive, r-efi maintainers, audi
 [[exemptions.raft-engine]]
 version = "0.4.2@git:e1d738d9ad1c1fc4f5b21c8c73bf605b5696f535"
 criteria = "safe-to-deploy"
-notes = "review-by: 2026-10-23 — Mango WAL backend via humancto/raft-engine fork; policy.raft-engine audit-as-crates-io=true means this exemption covers both the active fork and post-retirement upstream 0.4.2. See ADR 0002 §W5 and .planning/fork-raft-engine-lz4-verification.md. Re-exempt on version bump."
+notes = 'review-by: 2026-10-23 — Mango WAL backend via humancto/raft-engine fork. cargo-vet keys exemptions on the full resolved source (`0.4.2@git:<SHA>` for git deps), NOT on `package.version` alone, even with `[policy.raft-engine] audit-as-crates-io = true`. That means this exemption covers THIS SPECIFIC FORK SHA only: rebasing the fork requires a new exemption line at the new `0.4.2@git:<new-SHA>` form, and retiring to upstream crates.io 0.4.2 requires a new exemption at plain `version = "0.4.2"`. See ADR 0002 §W5 and .planning/fork-raft-engine-lz4-verification.md §"Supply-chain audit posture".'
 
 [[exemptions.rand]]
 version = "0.8.6"

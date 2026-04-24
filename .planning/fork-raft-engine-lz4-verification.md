@@ -55,16 +55,36 @@ In `Cargo.toml` at the workspace root:
 
 ```toml
 [workspace.dependencies]
-raft-engine = { git = "https://github.com/humancto/raft-engine", rev = "e1d738d9ad1c1fc4f5b21c8c73bf605b5696f535", default-features = false, features = ["internals", "scripting"] }
+raft-engine = { version = "0.4.2", git = "https://github.com/humancto/raft-engine", rev = "e1d738d9ad1c1fc4f5b21c8c73bf605b5696f535", default-features = false, features = [
+    "internals",
+] }
 ```
 
-- `default-features = false` strips `lz4-compression` from the default list.
-- `features = ["internals", "scripting"]` keeps the two other default
-  features `raft-engine` ships with `default = ["internals", "scripting", "lz4-compression"]`.
-- `lz4-compression` is deliberately excluded. Mango configs must set
-  `batch-compression-threshold = 0` (enforced by the fork's
+- `default-features = false` strips ALL three upstream default
+  features: `lz4-compression`, `scripting`, AND `internals`.
+- `features = ["internals"]` re-enables ONLY `internals` — the Raft
+  log reader/writer types that `mango-raft` (Phase 1 impl PRs) needs.
+- `lz4-compression` is deliberately excluded: that's the entire reason
+  the fork exists (it pulls `lz4-sys`, a C FFI dep). Mango configs must
+  set `batch-compression-threshold = 0` (enforced by the fork's
   `Config::sanitize`); compression happens above raft-engine in
   `mango-raft` via `lz4_flex`.
+- `scripting` is deliberately excluded: it pulls `rhai` →
+  `smartstring`, which is MPL-2.0 — an allow-list widening mango does
+  not want to take for a feature mango does not use. `scripting` is
+  raft-engine's TiKV-admin-CLI path; mango has no consumer of that
+  surface. (Diverges from this doc's earlier versions, which listed
+  `["internals", "scripting"]`; dropped during PR #49 implementation
+  after cargo-deny flagged MPL-2.0 transitively. Going forward, fork
+  rebases MUST NOT quietly re-enable `scripting` — if upstream moves
+  anything mango needs from `internals` into `scripting`, update this
+  file and the license allow-list in the SAME PR.)
+- `version = "0.4.2"` on the git dep is load-bearing for cargo-deny
+  (`wildcards = "deny"` rejects a git dep without `version =`). It
+  also matches the fork's `package.version`, so the single
+  `[[exemptions.raft-engine]] version = "0.4.2"` cargo-vet entry
+  continues to cover both the active fork and the post-retirement
+  upstream (see §"Supply-chain audit posture" below).
 
 Verified absence of lz4-sys:
 
@@ -84,8 +104,12 @@ Retirement steps (in order):
 2. Run `cargo update -p raft-engine` in a mango branch, repoint the
    workspace dep to `tikv/raft-engine` at the merged SHA:
    ```toml
-   raft-engine = { git = "https://github.com/tikv/raft-engine", rev = "<merged-sha>", default-features = false, features = ["internals", "scripting"] }
+   raft-engine = { version = "<merged-version>", git = "https://github.com/tikv/raft-engine", rev = "<merged-sha>", default-features = false, features = [
+       "internals",
+   ] }
    ```
+   (Keep `features = ["internals"]` only — do NOT re-add `scripting`;
+   see §"How mango consumes the fork" for the license rationale.)
 3. Run the full mango test suite (`cargo nextest run --workspace`).
 4. If tests pass, open a mango PR with the repointing, get
    `rust-expert` APPROVE, merge.
@@ -150,25 +174,47 @@ If mango needs a newer upstream SHA before #397 merges:
 ## Supply-chain audit posture
 
 The fork is public, pinned by SHA (not tag, not branch), and adds
-zero `unsafe` tokens on top of upstream. `cargo vet` keys
-exemptions on `(crate_name, crate_version)` — both the fork and
-upstream ship `package.version = "0.4.2"`, so the same
-`[[exemptions.raft-engine]] version = "0.4.2"` entry in
-`supply-chain/config.toml` covers both while the fork is active
-and after retirement.
+zero `unsafe` tokens on top of upstream.
 
-Caveats that change this:
+**Exemption keying (load-bearing, verified against cargo-vet 0.10
+behavior).** `cargo vet` keys exemptions on the fully-resolved
+source, which for a git dep is
+`<package.version>@git:<resolved-SHA>` — not on `package.version`
+alone. This is true EVEN when `[policy.raft-engine]` sets
+`audit-as-crates-io = true` (which governs how audits are
+interpreted, not how exemptions are matched). As a result, the
+mango exemption in `supply-chain/config.toml` MUST carry the
+SHA-qualified form:
 
-1. **Patch-version bumps are not auto-covered.** If either the
-   fork or upstream bumps `package.version` (raft-engine
-   historically bumps on master without publishing to crates.io
-   — see ADR 0002 §B3), the exemption stops matching and needs
-   a new `version = "0.4.3"` line. Watch for this on rebase.
-2. **SHA swaps are silent to vet.** `cargo vet` verifies the
-   resolved git hash against the locked source, but the hash is
-   not part of exemption identity. Changing the fork SHA without
-   bumping `package.version` requires no vet edits.
-3. **`review-by` is a mango convention, not a vet behavior.**
+```toml
+[[exemptions.raft-engine]]
+version = "0.4.2@git:e1d738d9ad1c1fc4f5b21c8c73bf605b5696f535"
+criteria = "safe-to-deploy"
+```
+
+This exemption covers the active fork at this specific SHA only.
+It does NOT automatically cover:
+
+- A rebased fork SHA — new exemption line at the new
+  `0.4.2@git:<new-SHA>` form required (the old line can be removed
+  in the same PR).
+- Post-retirement upstream crates.io 0.4.2 — new exemption line at
+  plain `version = "0.4.2"` required (the SHA-qualified line can
+  be removed in the retirement PR).
+
+In short: every fork rebase and the fork retirement are
+exemption-churning events. Those are already flagged as manual
+actions in the "Rebase policy" and "Retirement plan" sections;
+this section just spells out the specific config.toml edit.
+
+Other caveats:
+
+1. **Patch-version bumps on either side are not auto-covered.**
+   If either the fork or upstream bumps `package.version`
+   (raft-engine historically bumps on master without publishing
+   to crates.io — see ADR 0002 §B3), the exemption stops matching
+   and needs a new line. Watch for this on rebase.
+2. **`review-by` is a mango convention, not a vet behavior.**
    Mango annotates every exemption with a `review-by: YYYY-MM-DD`
    note. Those dates do not auto-regenerate on source change.
    When rebasing the fork OR retiring to upstream, manually
@@ -177,6 +223,8 @@ Caveats that change this:
 
 ## Last updated
 
-2026-04-24 (fork created, PR #397 opened, mango still on skeleton
-phase — dep not yet wired into a workspace `Cargo.toml`; that lands
-with PR-1).
+2026-04-24 — PR #49 wires the dep into the workspace and
+`crates/mango-storage` skeleton. Feature set tightened to
+`["internals"]` only (dropped `scripting` after cargo-deny flagged
+MPL-2.0 via `rhai`/`smartstring`; see §"How mango consumes the fork"
+for the full rationale). Fork created, upstream PR #397 open.
