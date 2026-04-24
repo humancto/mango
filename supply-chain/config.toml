@@ -258,6 +258,11 @@ version = "0.2.0"
 criteria = "safe-to-deploy"
 notes = "review-by: 2026-10-23 — madsim 0.2.30 transitive (dev-dep via mango-madsim-demo), audit pending"
 
+[[exemptions.num-conv]]
+version = "0.2.1"
+criteria = "safe-to-deploy"
+notes = "review-by: 2026-10-23 — time 0.3.47 transitive (cascade from RUSTSEC-2026-0009 fix, ADR 0003 MSRV bump); Mozilla has a 0.1.0 audit but not a 0.1.0 -> 0.2.1 delta yet"
+
 [[exemptions.once_cell]]
 version = "1.21.4"
 criteria = "safe-to-deploy"
