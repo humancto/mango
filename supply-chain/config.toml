@@ -460,6 +460,11 @@ version = "0.5.1"
 criteria = "safe-to-deploy"
 notes = "review-by: 2026-10-23 — raft-engine 0.4.2 transitive (prometheus helper), audit pending"
 
+[[exemptions.proptest]]
+version = "1.11.0"
+criteria = "safe-to-run"
+notes = "review-by: 2026-10-23 — AltSysrq, test-only via mango-storage differential harness (ROADMAP:819). 26k-line inspect backlog; running with exemption until upstream vet audit published or in-house review completes. Not on any runtime path."
+
 [[exemptions.prost]]
 version = "0.13.5"
 criteria = "safe-to-deploy"
@@ -545,6 +550,11 @@ version = "0.9.5"
 criteria = "safe-to-deploy"
 notes = "review-by: 2026-10-23 — raft-rs 0.7.0 transitive (rand 0.9.x core trait). rust-random maintainership. See ROADMAP:818."
 
+[[exemptions.rand_xorshift]]
+version = "0.4.0"
+criteria = "safe-to-run"
+notes = "review-by: 2026-10-23 — proptest 1.11.0 transitive (rust-random/dhardy), test-only via mango-storage differential harness (ROADMAP:819), audit pending"
+
 [[exemptions.rand_xoshiro]]
 version = "0.6.0"
 criteria = "safe-to-deploy"
@@ -605,6 +615,11 @@ version = "1.0.22"
 criteria = "safe-to-deploy"
 notes = "review-by: 2026-10-23 — dtolnay, audit pending"
 
+[[exemptions.rusty-fork]]
+version = "0.3.1"
+criteria = "safe-to-run"
+notes = "review-by: 2026-10-23 — proptest 1.11.0 transitive (AltSysrq), test-only via mango-storage differential harness (ROADMAP:819), audit pending"
+
 [[exemptions.scoped-tls]]
 version = "1.0.1"
 criteria = "safe-to-deploy"
@@ -629,6 +644,11 @@ notes = "review-by: 2026-10-23 — serde-rs/dtolnay, audit pending"
 version = "1.0.228"
 criteria = "safe-to-deploy"
 notes = "review-by: 2026-10-23 — serde-rs/dtolnay, audit pending"
+
+[[exemptions.serde_json]]
+version = "1.0.149"
+criteria = "safe-to-run"
+notes = "review-by: 2026-10-23 — dtolnay, test-only via mango-storage differential harness (ROADMAP:819), audit pending"
 
 [[exemptions.serde_repr]]
 version = "0.1.20"
@@ -879,3 +899,8 @@ notes = "review-by: 2026-10-23 — madsim 0.2.30 transitive (dev-dep via mango-m
 version = "0.8.48"
 criteria = "safe-to-deploy"
 notes = "review-by: 2026-10-23 — madsim 0.2.30 transitive (dev-dep via mango-madsim-demo), audit pending"
+
+[[exemptions.zmij]]
+version = "1.0.21"
+criteria = "safe-to-run"
+notes = "review-by: 2026-10-23 — serde_json 1.0.149 transitive (itoa renamed by dtolnay), test-only path via mango-storage differential harness (ROADMAP:819), audit pending"
