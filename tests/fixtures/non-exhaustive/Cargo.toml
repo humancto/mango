@@ -7,13 +7,16 @@
 # drift across clippy point releases. Each member exercises one of
 # three outcomes the script asserts on:
 #
-#   - `compliant`: `#[non_exhaustive] pub enum ...` → clippy clean
-#   - `allowed`:   `// reason: ...` + `#[allow(...)]` → clippy clean
-#   - `bad`:       bare `pub enum ...` → clippy must fail with
-#                  `-D clippy::exhaustive_enums`
+#   - `compliant`:           `#[non_exhaustive] pub enum ...` → clippy clean
+#   - `allowed`:             `// reason: ...` + `#[allow(...)]` → clippy clean
+#   - `allowed-derive-after`: `#[derive(...)] #[non_exhaustive] pub enum`
+#                             → clippy clean (tests attribute-cluster
+#                             awareness in the backstop's awk)
+#   - `bad`:                 bare `pub enum ...` → clippy must fail with
+#                             `-D clippy::exhaustive_enums`
 #
 # Keep dependency-free so the test doesn't drag the registry on
 # every CI run. Precedent: `tests/fixtures/geiger-toy-workspace/`.
 [workspace]
 resolver = "2"
-members = ["compliant", "bad", "allowed"]
+members = ["compliant", "bad", "allowed", "allowed-derive-after"]
