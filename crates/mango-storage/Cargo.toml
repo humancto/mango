@@ -26,12 +26,32 @@ thiserror.workspace = true
 # ROADMAP:817 (Backend impl): parking_lot for the Database RwLock.
 # See Cargo.toml workspace entry for the ban-override rationale.
 parking_lot.workspace = true
+# ROADMAP:817: tokio::task::spawn_blocking is required so async commit
+# methods do NOT block tokio worker threads with redb's synchronous
+# fsync. `rt` alone covers spawn_blocking — `rt-multi-thread` is
+# deliberately NOT listed because the caller owns their runtime
+# flavor. Workspace entry renames to madsim-tokio; under default
+# build it re-exports real tokio, under --cfg madsim it substitutes
+# the deterministic simulator. See docs/madsim.md.
+tokio = { workspace = true, features = ["rt"] }
 
 [dev-dependencies]
 # ROADMAP:817 integration tests open a real redb on disk in a
 # tempdir; tempfile is the workspace-standard primitive. Exemption
 # already present in supply-chain/config.toml (tempfile@3.27.0).
 tempfile = "3"
+# ROADMAP:817: madsim `#[madsim::test]` macro for the smoke test
+# under `--cfg madsim`. mango-storage joins the curated subset in
+# this PR (see [workspace.metadata.mango.madsim].crates).
+madsim = { workspace = true }
+# ROADMAP:817 integration tests drive the async commit API through
+# `#[tokio::test]`; the concurrent-committer test needs a real
+# multi-thread runtime. Features here are ADDITIVE to the main
+# `tokio = { features = ["rt"] }` dep; cargo merges them in the test
+# target. Under `--cfg madsim` these features are a no-op (the sim
+# runtime ignores them) but the test file itself is gated
+# `#![cfg(not(madsim))]`.
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [lints]
 workspace = true
