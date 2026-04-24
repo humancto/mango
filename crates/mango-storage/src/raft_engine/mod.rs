@@ -539,7 +539,13 @@ fn map_join_error(e: &tokio::task::JoinError) -> BackendError {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    // The async tests that exercise `append` use these; they are
+    // gated `#[cfg(not(madsim))]` below because `spawn_blocking` is
+    // not supported in the simulator. Mirror that gate on the imports
+    // so the madsim build doesn't emit `unused_imports`.
+    #[cfg(not(madsim))]
     use crate::backend::RaftEntryType;
+    #[cfg(not(madsim))]
     use bytes::Bytes;
     use tempfile::TempDir;
 
@@ -588,6 +594,13 @@ mod tests {
         }
     }
 
+    // The async tests below drive `append` / `save_hard_state`, which
+    // route through `tokio::task::spawn_blocking`. Under `--cfg
+    // madsim`, the simulator refuses to spawn OS threads; the full
+    // async surface is exercised by `tests/raft_engine_logstore.rs`
+    // (gated `#![cfg(not(madsim))]`) and the madsim-side smoke lives
+    // in `tests/raft_engine_madsim_smoke.rs`.
+    #[cfg(not(madsim))]
     #[tokio::test]
     async fn append_empty_is_noop() {
         let (store, _dir) = open_fresh();
@@ -596,6 +609,7 @@ mod tests {
         store.close().unwrap();
     }
 
+    #[cfg(not(madsim))]
     #[tokio::test]
     async fn append_rejects_non_consecutive() {
         let (store, _dir) = open_fresh();
@@ -617,6 +631,7 @@ mod tests {
         store.close().unwrap();
     }
 
+    #[cfg(not(madsim))]
     #[tokio::test]
     async fn closed_store_returns_closed_error() {
         let (store, _dir) = open_fresh();
