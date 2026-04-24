@@ -61,15 +61,29 @@ type request struct {
 	// Op-specific fields — flattened into the top level rather
 	// than nested under a `body` key so requests remain easy to
 	// hand-write / jq.
-	Path   string `json:"path,omitempty"`
-	Fsync  bool   `json:"fsync,omitempty"`
+	Path    string      `json:"path,omitempty"`
+	Fsync   bool        `json:"fsync,omitempty"`
+	Bucket  string      `json:"bucket,omitempty"`
+	Name    string      `json:"name,omitempty"`
+	Key     string      `json:"key,omitempty"`
+	Value   string      `json:"value,omitempty"`
+	Start   string      `json:"start,omitempty"`
+	End     string      `json:"end,omitempty"`
+	Limit   int         `json:"limit,omitempty"`
+	Batches [][]groupOp `json:"batches,omitempty"`
+}
+
+// groupOp is an inner op inside a `commit_group` batch. Only
+// mutating ops are legal; reads in a group would need their own
+// txn (forbidden by the single-writer invariant) and are never
+// emitted by the Rust harness.
+type groupOp struct {
+	Op     string `json:"op"`
 	Bucket string `json:"bucket,omitempty"`
-	Name   string `json:"name,omitempty"`
 	Key    string `json:"key,omitempty"`
 	Value  string `json:"value,omitempty"`
 	Start  string `json:"start,omitempty"`
 	End    string `json:"end,omitempty"`
-	Limit  int    `json:"limit,omitempty"`
 }
 
 // response is the common envelope for every line on stdout. Only
@@ -200,6 +214,12 @@ func dispatch(st *state, req *request) response {
 		return opSnapshot(st, req)
 	case "size":
 		return opSize(st, req)
+	case "delete_range":
+		return opDeleteRange(st, req)
+	case "commit_group":
+		return opCommitGroup(st, req)
+	case "compact":
+		return opCompact(st, req)
 	default:
 		return response{
 			OK:    false,
@@ -387,6 +407,195 @@ func opDelete(st *state, req *request) response {
 	if delErr := b.Delete(key); delErr != nil {
 		return response{OK: false, Error: fmt.Sprintf("app: Delete: %s", delErr.Error())}
 	}
+	return response{OK: true}
+}
+
+// opDeleteRange removes all keys in `[start, end)` from the named
+// bucket inside the active writable txn. bbolt has no native
+// delete_range (plan §4 item 4) so we emulate with a cursor walk.
+// Two-pass (collect then delete) is used because deleting through a
+// cursor mid-iteration is supported but fragile — the two-pass form
+// is simpler to reason about and matches what the redb wrapper does
+// internally. `start == end` or `start > end` degenerates to a
+// no-op; bbolt reports no error for an empty delete set.
+func opDeleteRange(st *state, req *request) response {
+	b, errResp := txBucket(st, req.Bucket)
+	if errResp != nil {
+		return *errResp
+	}
+	start, err := decode64(req.Start)
+	if err != nil {
+		return response{OK: false, Error: fmt.Sprintf("protocol: bad base64 start: %s", err.Error())}
+	}
+	end, err := decode64(req.End)
+	if err != nil {
+		return response{OK: false, Error: fmt.Sprintf("protocol: bad base64 end: %s", err.Error())}
+	}
+	c := b.Cursor()
+	var keysToDelete [][]byte
+	for k, _ := c.Seek(start); k != nil; k, _ = c.Next() {
+		if len(end) != 0 && bytes.Compare(k, end) >= 0 {
+			break
+		}
+		// Copy — k's backing slice is owned by bbolt and only valid
+		// until the next cursor call.
+		kCopy := make([]byte, len(k))
+		copy(kCopy, k)
+		keysToDelete = append(keysToDelete, kCopy)
+	}
+	for _, k := range keysToDelete {
+		if delErr := b.Delete(k); delErr != nil {
+			return response{OK: false, Error: fmt.Sprintf("app: Delete in range: %s", delErr.Error())}
+		}
+	}
+	return response{OK: true}
+}
+
+// opCommitGroup wraps a sequence of batches in a single atomic
+// `db.Update`. Per plan §4 item 2 and §5, this is the Raft-batching
+// primitive — all inner ops land together or not at all. Reject if
+// a writable txn is already active (would deadlock bbolt's writer
+// mutex). Fsync behavior is controlled by the request's Fsync bit,
+// toggled via `db.NoSync` around the commit.
+//
+// Inner ops legal in a batch: put, delete, delete_range. Reads
+// (get / range / snapshot) would need their own view txn and are
+// never emitted by the Rust harness inside a group.
+func opCommitGroup(st *state, req *request) response {
+	if st.db == nil {
+		return response{OK: false, Error: "app: no database open"}
+	}
+	if st.tx != nil {
+		return response{OK: false, Error: "app: cannot commit_group while txn active; commit or rollback first"}
+	}
+	previousNoSync := st.db.NoSync
+	st.db.NoSync = !req.Fsync
+	updateErr := st.db.Update(func(tx *bolt.Tx) error {
+		for _, batch := range req.Batches {
+			for _, op := range batch {
+				if err := applyGroupOp(tx, op); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
+	st.db.NoSync = previousNoSync
+	if updateErr != nil {
+		return response{OK: false, Error: fmt.Sprintf("app: commit_group: %s", updateErr.Error())}
+	}
+	return response{OK: true}
+}
+
+// applyGroupOp executes one inner op inside a commit_group's
+// atomic txn. Errors bubble up and abort the whole group (bbolt
+// rolls back on a non-nil return from the Update closure).
+func applyGroupOp(tx *bolt.Tx, op groupOp) error {
+	b := tx.Bucket([]byte(op.Bucket))
+	if b == nil {
+		return fmt.Errorf("bucket %q not registered", op.Bucket)
+	}
+	switch op.Op {
+	case "put":
+		key, err := decode64(op.Key)
+		if err != nil {
+			return fmt.Errorf("bad base64 key: %w", err)
+		}
+		val, err := decode64(op.Value)
+		if err != nil {
+			return fmt.Errorf("bad base64 value: %w", err)
+		}
+		return b.Put(key, val)
+	case "delete":
+		key, err := decode64(op.Key)
+		if err != nil {
+			return fmt.Errorf("bad base64 key: %w", err)
+		}
+		return b.Delete(key)
+	case "delete_range":
+		start, err := decode64(op.Start)
+		if err != nil {
+			return fmt.Errorf("bad base64 start: %w", err)
+		}
+		end, err := decode64(op.End)
+		if err != nil {
+			return fmt.Errorf("bad base64 end: %w", err)
+		}
+		c := b.Cursor()
+		var keys [][]byte
+		for k, _ := c.Seek(start); k != nil; k, _ = c.Next() {
+			if len(end) != 0 && bytes.Compare(k, end) >= 0 {
+				break
+			}
+			kCopy := make([]byte, len(k))
+			copy(kCopy, k)
+			keys = append(keys, kCopy)
+		}
+		for _, k := range keys {
+			if delErr := b.Delete(k); delErr != nil {
+				return delErr
+			}
+		}
+		return nil
+	default:
+		return fmt.Errorf("unknown group inner op %q", op.Op)
+	}
+}
+
+// opCompact runs bbolt.Compact: close the current DB, compact into
+// a sibling temp file, rename over the original, reopen. Per plan
+// §4 item 5 this is how we lower the redb `defragment` op on the
+// Go side. A writable txn must not be active (we close the DB).
+// The response surfaces nothing beyond OK — the harness asserts
+// pre/post-state equality, not file identity (BBOLT_QUIRKS.md
+// "defragment semantics").
+func opCompact(st *state, _ *request) response {
+	if st.db == nil {
+		return response{OK: false, Error: "app: no database open"}
+	}
+	if st.tx != nil {
+		return response{OK: false, Error: "app: cannot compact while txn active"}
+	}
+	src := st.db
+	tmpPath := st.path + ".compact.tmp"
+	// bbolt.Compact reads from src and writes to dst; dst must be a
+	// freshly opened empty DB. We open it at tmpPath, compact, close
+	// both, then atomic-rename tmpPath over st.path and reopen.
+	dstOpts := &bolt.Options{
+		Timeout:      5 * time.Second,
+		NoSync:       !st.fsync,
+		FreelistType: bolt.FreelistMapType,
+	}
+	dst, err := bolt.Open(tmpPath, 0600, dstOpts)
+	if err != nil {
+		return response{OK: false, Error: fmt.Sprintf("app: open compact dst: %s", err.Error())}
+	}
+	if compErr := bolt.Compact(dst, src, 0); compErr != nil {
+		_ = dst.Close()
+		_ = os.Remove(tmpPath)
+		return response{OK: false, Error: fmt.Sprintf("app: Compact: %s", compErr.Error())}
+	}
+	if closeErr := dst.Close(); closeErr != nil {
+		_ = os.Remove(tmpPath)
+		return response{OK: false, Error: fmt.Sprintf("app: close compact dst: %s", closeErr.Error())}
+	}
+	if closeErr := src.Close(); closeErr != nil {
+		_ = os.Remove(tmpPath)
+		return response{OK: false, Error: fmt.Sprintf("app: close compact src: %s", closeErr.Error())}
+	}
+	st.db = nil
+	if renErr := os.Rename(tmpPath, st.path); renErr != nil {
+		return response{OK: false, Error: fmt.Sprintf("app: rename compacted db: %s", renErr.Error())}
+	}
+	reopened, err := bolt.Open(st.path, 0600, &bolt.Options{
+		Timeout:      5 * time.Second,
+		NoSync:       !st.fsync,
+		FreelistType: bolt.FreelistMapType,
+	})
+	if err != nil {
+		return response{OK: false, Error: fmt.Sprintf("app: reopen after compact: %s", err.Error())}
+	}
+	st.db = reopened
 	return response{OK: true}
 }
 

@@ -324,6 +324,161 @@ func TestSizeReportsPositive(t *testing.T) {
 	}
 }
 
+// TestDeleteRangeHalfOpen: given {a, b, c, d} and range(b, d),
+// only {b, c} are removed. Asserts the `[low, high)` convention.
+func TestDeleteRangeHalfOpen(t *testing.T) {
+	st := openedState(t)
+	_ = dispatch(st, &request{Op: "begin"})
+	for _, k := range []string{"a", "b", "c", "d"} {
+		_ = dispatch(st, &request{Op: "put", Bucket: "b1", Key: b64(k), Value: b64("v-" + k)})
+	}
+	_ = dispatch(st, &request{Op: "commit"})
+
+	_ = dispatch(st, &request{Op: "begin"})
+	if r := dispatch(st, &request{Op: "delete_range", Bucket: "b1", Start: b64("b"), End: b64("d")}); !r.OK {
+		t.Fatalf("delete_range: %q", r.Error)
+	}
+	_ = dispatch(st, &request{Op: "commit"})
+
+	r := dispatch(st, &request{Op: "range", Bucket: "b1", Start: b64("a"), End: b64("z"), Limit: 0})
+	if !r.OK {
+		t.Fatalf("range: %q", r.Error)
+	}
+	if len(r.Entries) != 2 {
+		t.Fatalf("after delete_range, len=%d, want 2; entries=%v", len(r.Entries), r.Entries)
+	}
+	if r.Entries[0][0] != b64("a") || r.Entries[1][0] != b64("d") {
+		t.Fatalf("after delete_range, entries=%v; want [a, d]", r.Entries)
+	}
+}
+
+func TestDeleteRangeEmptyNoop(t *testing.T) {
+	st := openedState(t)
+	_ = dispatch(st, &request{Op: "begin"})
+	// start == end is an empty half-open interval; zero deletes.
+	r := dispatch(st, &request{Op: "delete_range", Bucket: "b1", Start: b64("x"), End: b64("x")})
+	if !r.OK {
+		t.Fatalf("delete_range empty: %q", r.Error)
+	}
+	_ = dispatch(st, &request{Op: "commit"})
+}
+
+func TestDeleteRangeRequiresTxn(t *testing.T) {
+	st := openedState(t)
+	r := dispatch(st, &request{Op: "delete_range", Bucket: "b1", Start: b64("a"), End: b64("z")})
+	if r.OK {
+		t.Fatal("delete_range without begin succeeded")
+	}
+}
+
+// TestCommitGroupAtomic: multiple batches, all ops applied as one
+// atomic unit. After commit_group, snapshot must contain every
+// written key — none are missing, none are partial.
+func TestCommitGroupAtomic(t *testing.T) {
+	st := openedState(t)
+	_ = dispatch(st, &request{Op: "bucket", Name: "b2"})
+
+	req := &request{
+		Op:    "commit_group",
+		Fsync: false,
+		Batches: [][]groupOp{
+			{
+				{Op: "put", Bucket: "b1", Key: b64("k1"), Value: b64("v1")},
+				{Op: "put", Bucket: "b1", Key: b64("k2"), Value: b64("v2")},
+			},
+			{
+				{Op: "put", Bucket: "b2", Key: b64("k3"), Value: b64("v3")},
+				{Op: "delete", Bucket: "b1", Key: b64("k1")},
+			},
+		},
+	}
+	r := dispatch(st, req)
+	if !r.OK {
+		t.Fatalf("commit_group: %q", r.Error)
+	}
+
+	snap := dispatch(st, &request{Op: "snapshot"})
+	if !snap.OK {
+		t.Fatalf("snapshot: %q", snap.Error)
+	}
+	// k1 was deleted; k2 in b1 and k3 in b2 remain.
+	if len(snap.State["b1"]) != 1 || snap.State["b1"][0][0] != b64("k2") {
+		t.Fatalf("b1 after commit_group: %v", snap.State["b1"])
+	}
+	if len(snap.State["b2"]) != 1 || snap.State["b2"][0][0] != b64("k3") {
+		t.Fatalf("b2 after commit_group: %v", snap.State["b2"])
+	}
+}
+
+// TestCommitGroupRollsBackOnError: if any inner op fails, the
+// whole group is rolled back. Bucket-not-registered is a
+// convenient way to trigger mid-batch failure.
+func TestCommitGroupRollsBackOnError(t *testing.T) {
+	st := openedState(t)
+
+	req := &request{
+		Op: "commit_group",
+		Batches: [][]groupOp{
+			{
+				{Op: "put", Bucket: "b1", Key: b64("ok"), Value: b64("v")},
+				{Op: "put", Bucket: "does_not_exist", Key: b64("bad"), Value: b64("v")},
+			},
+		},
+	}
+	r := dispatch(st, req)
+	if r.OK {
+		t.Fatal("commit_group with invalid inner op succeeded")
+	}
+	// The successful first op must NOT have landed.
+	g := dispatch(st, &request{Op: "get", Bucket: "b1", Key: b64("ok")})
+	if g.Value != nil {
+		t.Fatalf("expected rollback after mid-batch error, got value=%q", *g.Value)
+	}
+}
+
+func TestCommitGroupRejectedWhileTxnActive(t *testing.T) {
+	st := openedState(t)
+	_ = dispatch(st, &request{Op: "begin"})
+	r := dispatch(st, &request{Op: "commit_group", Batches: [][]groupOp{
+		{{Op: "put", Bucket: "b1", Key: b64("k"), Value: b64("v")}},
+	}})
+	if r.OK {
+		t.Fatal("commit_group while txn active succeeded")
+	}
+	_ = dispatch(st, &request{Op: "rollback"})
+}
+
+// TestCompactPreservesState: data written before compact must
+// remain readable after. File identity may change (bbolt.Compact
+// writes a new file); the harness only cares about logical state.
+func TestCompactPreservesState(t *testing.T) {
+	st := openedState(t)
+	_ = dispatch(st, &request{Op: "begin"})
+	_ = dispatch(st, &request{Op: "put", Bucket: "b1", Key: b64("k"), Value: b64("v")})
+	_ = dispatch(st, &request{Op: "commit", Fsync: false})
+
+	if r := dispatch(st, &request{Op: "compact"}); !r.OK {
+		t.Fatalf("compact: %q", r.Error)
+	}
+	r := dispatch(st, &request{Op: "get", Bucket: "b1", Key: b64("k")})
+	if !r.OK {
+		t.Fatalf("get after compact: %q", r.Error)
+	}
+	if r.Value == nil || *r.Value != b64("v") {
+		t.Fatalf("post-compact get: value=%v want %q", r.Value, b64("v"))
+	}
+}
+
+func TestCompactRejectedWhileTxnActive(t *testing.T) {
+	st := openedState(t)
+	_ = dispatch(st, &request{Op: "begin"})
+	r := dispatch(st, &request{Op: "compact"})
+	if r.OK {
+		t.Fatal("compact while txn active succeeded")
+	}
+	_ = dispatch(st, &request{Op: "rollback"})
+}
+
 // TestPostReopenPersistence asserts that committed state survives
 // a close + reopen cycle — the hard contract from plan §5.
 func TestPostReopenPersistence(t *testing.T) {
