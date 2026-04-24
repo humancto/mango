@@ -100,6 +100,7 @@ Every verified wart is engaged explicitly. "This is fine" is not an answer.
 ### W1 — redb has no public marquee production user (verification A6)
 
 - **How bad:** moderate. redb is stable (post-1.0 since 2023-06-16, verification A5), actively maintained (master commit 2026-04-23, verification A4), with 1.8M 90-day downloads (verification A10). But "downloads" is not "a load-bearing system's postmortems." heed has Meilisearch (verification E5); redb has Cuprate.
+- **MSRV:** redb 4.x declares `edition = "2024"` with `rust-version` above the workspace floor at the time this ADR was written. Resolved in [ADR 0003](0003-msrv-bump.md) by bumping workspace MSRV 1.80 → 1.89.
 - **Mitigation:** Phase 1 acceptance requires _three_ additional gates beyond the bbolt bench comparison (ROADMAP.md:822):
   1. **Differential test harness** `tests/differential/backend_vs_bbolt.rs`: proptest-generated 10k-op sequences run against mango's `Backend` and against the `benches/oracles/bbolt/` Go binary via JSON IPC; identical visible state after every commit.
   2. **7-day sustained chaos gate** `tests/chaos/backend_7day.rs`: `benches/workloads/storage.toml` workload under disk-EIO + SIGKILL injection for 7 continuous wall-clock days on the `benches/runner/HARDWARE.md` sig.
@@ -123,6 +124,7 @@ Every verified wart is engaged explicitly. "This is fine" is not an answer.
 ### W4 — raft-engine is 24 months stale on crates.io (verification B2, B3, B8)
 
 - **How bad:** moderate. Current crate is 0.4.2 (2024-04-26). Master is active through 2026-03-10. PingCAP ships fixes into TiKV via master, not crates.io releases. No semver/stability policy documented.
+- **MSRV:** raft-engine master declares `rust-version = "1.85"`, above the workspace floor at the time this ADR was written. Resolved in [ADR 0003](0003-msrv-bump.md) by bumping workspace MSRV 1.80 → 1.89.
 - **Mitigation:** git-pin to a specific master SHA in the workspace `Cargo.toml`:
   ```toml
   [workspace.dependencies]
