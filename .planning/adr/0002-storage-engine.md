@@ -139,12 +139,16 @@ Every verified wart is engaged explicitly. "This is fine" is not an answer.
 
 ### W5 — raft-engine pulls `lz4-sys` C FFI by default (verification B6)
 
-- **How bad:** inconsistent with ROADMAP.md:485 which specifies pure-Rust `lz4_flex` as the workspace default.
-- **Mitigation:** **disable raft-engine's compression** in its config and do compression above raft-engine in `mango-raft` using `lz4_flex`. Net effects:
-  - Zero new C FFI.
-  - Compression policy moves to the mango layer (where we want it for tuning).
-  - "Pure Rust" commercial positioning preserved.
-- **Escape hatch:** if above-the-engine compression loses meaningfully to raft-engine's per-batch internal compression (measure in Phase 5), revisit with benchmarks. ~1-day swap if we accept the C dep.
+- **How bad:** inconsistent with ROADMAP.md:485 which specifies pure-Rust `lz4_flex` as the workspace default. Upstream `tikv/raft-engine` master had `lz4-sys = "=1.9.5"` as an unconditional dependency — consumers could not opt out at build time.
+- **Mitigation (build-time, primary):** we run against a patched fork, [`humancto/raft-engine`](https://github.com/humancto/raft-engine) branch `feat/feature-gate-lz4-sys` at SHA `e1d738d9ad1c1fc4f5b21c8c73bf605b5696f535`, which gates `lz4-sys` behind a new `lz4-compression` Cargo feature (default-on upstream; **we consume with `default-features = false` plus the features we need excluding `lz4-compression`**). Under this configuration `cargo tree --edges no-dev | grep lz4` is empty — the C FFI crate is fully absent from mango's build graph.
+- **Mitigation (data-path, secondary):** compression policy stays above raft-engine in `mango-raft` using `lz4_flex`. This was the W5 plan before the fork and remains correct regardless of the build-time gate: keeping compression at the mango layer keeps the tuning knobs in our hands. The `Config::sanitize` reject in the patched fork (`batch-compression-threshold = 0` is the only legal value when the feature is off) enforces this at the config boundary — a misconfigured mango build fails loudly at startup, not silently on the first ≥8KB log batch.
+- **Upstream PR:** [`tikv/raft-engine#397`](https://github.com/tikv/raft-engine/pull/397) tracks upstream adoption of the feature gate. Fork retires (mango pins shift from `humancto/raft-engine` to `tikv/raft-engine` at the merged SHA) when #397 lands. Tracking file: `.planning/fork-raft-engine-lz4-verification.md`.
+- **Net effects:**
+  - Zero C FFI in mango's build graph.
+  - Pure-Rust positioning preserved end-to-end (not just at the data path).
+  - Compression policy tuning owned by mango.
+  - Small ongoing cost: fork maintenance until the upstream PR merges; integration test must re-run on every fork rebase.
+- **Escape hatch:** if above-the-engine compression loses meaningfully to raft-engine's per-batch internal compression (measure in Phase 5), revisit with benchmarks — re-enabling `lz4-compression` in the fork Cargo features would restore the C dep but keep the rest of the fork intact. ~1-day flip.
 
 ### W6 — raft-engine has 49 `unsafe` tokens on master (verification B7)
 
