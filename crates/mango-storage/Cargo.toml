@@ -23,6 +23,15 @@ raft-engine.workspace = true
 # thiserror derives BackendError.
 bytes.workspace = true
 thiserror.workspace = true
+# ROADMAP:817 (Backend impl): parking_lot for the Database RwLock.
+# See Cargo.toml workspace entry for the ban-override rationale.
+parking_lot.workspace = true
+
+[dev-dependencies]
+# ROADMAP:817 integration tests open a real redb on disk in a
+# tempdir; tempfile is the workspace-standard primitive. Exemption
+# already present in supply-chain/config.toml (tempfile@3.27.0).
+tempfile = "3"
 
 [lints]
 workspace = true
