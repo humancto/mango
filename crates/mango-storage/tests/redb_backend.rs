@@ -37,7 +37,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use mango_storage::{
-    Backend, BackendConfig, BackendError, BucketId, ReadSnapshot, RedbBackend, WriteBatch,
+    Backend, BackendConfig, BackendError, BucketId, CommitStamp, ReadSnapshot, RedbBackend,
+    WriteBatch,
 };
 use tempfile::TempDir;
 
@@ -410,6 +411,33 @@ async fn commit_group_partial_failure_aborts_whole_group() {
     assert_eq!(get(&b, KV, b"k"), None);
 }
 
+#[tokio::test]
+async fn failed_commit_does_not_bump_commit_seq() {
+    // Documented contract: `CommitStamp` is strictly monotonic across
+    // *successful* commits. A commit that aborts in the sync prologue
+    // (here: UnknownBucket) MUST NOT bump the sequence, otherwise
+    // callers observing stamps would see gaps that don't correspond
+    // to real commits. Observed indirectly: the next successful
+    // commit must return stamp #1 (not #2).
+    let tmp = TempDir::new().unwrap();
+    let b = open(&tmp);
+    b.register_bucket("kv", KV).unwrap();
+    let mut bad = b.begin_batch().unwrap();
+    bad.put(META, b"k", b"v").unwrap(); // META unregistered
+    assert!(matches!(
+        b.commit_batch(bad, true).await,
+        Err(BackendError::UnknownBucket(_))
+    ));
+    let mut good = b.begin_batch().unwrap();
+    good.put(KV, b"k", b"v").unwrap();
+    let stamp = b.commit_batch(good, true).await.unwrap();
+    assert_eq!(
+        stamp,
+        CommitStamp::new(1),
+        "failed commit bumped commit_seq",
+    );
+}
+
 // ---------- utility --------------------------------------------------
 
 #[tokio::test]
@@ -436,6 +464,14 @@ async fn size_on_disk_grows_after_writes() {
     let _ = b.commit_batch(batch, true).await.unwrap();
     let s1 = b.size_on_disk().unwrap();
     assert!(s1 > s0, "size did not grow: {s0} -> {s1}");
+}
+
+#[tokio::test]
+async fn defragment_on_closed_backend_returns_closed() {
+    let tmp = TempDir::new().unwrap();
+    let b = open(&tmp);
+    b.close().unwrap();
+    assert!(matches!(b.defragment().await, Err(BackendError::Closed)));
 }
 
 #[tokio::test]

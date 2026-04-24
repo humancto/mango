@@ -119,6 +119,7 @@ impl Iterator for RedbRangeIter {
 // Lifetime `'a` is unused by our concrete type (nothing borrows
 // from the snapshot); the trait requires it for the `dyn` trait
 // object but we satisfy it for any `'a` by not capturing anything.
+// The same reasoning applies to `EmptyRangeIter` below.
 impl RangeIter<'_> for RedbRangeIter {}
 
 /// Iterator that yields nothing. Used when the requested bucket
