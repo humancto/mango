@@ -131,6 +131,21 @@ raft-engine = { version = "0.4.2", git = "https://github.com/humancto/raft-engin
     "internals",
 ] }
 
+# Phase 1 trait-surface deps (ROADMAP:816).
+#
+# bytes: ref-counted `Bytes` for Raft entry payloads and snapshot
+# blobs. Cheap clone (AtomicUsize fetch_add), zero-copy slicing.
+# Already in the transitive graph via madsim and several others;
+# a workspace-level declaration just gives the trait crate a stable
+# access point without any new dep-graph churn. cargo-vet exemption
+# already present in supply-chain/config.toml.
+bytes = "1.11"
+# thiserror: idiomatic error-enum derivation for BackendError. The
+# alternative (hand-rolled Display + Error impls) is ~30 LoC of
+# boilerplate per enum with zero additional engineering value.
+# Already in the transitive graph; exemption already present.
+thiserror = "2"
+
 [workspace.package]
 version = "0.1.0"
 edition = "2021"

@@ -81,6 +81,8 @@ skip = [
     { crate = "getrandom@0.2.17", reason = "raft-engine 0.4.2 transitive; modern tree uses getrandom 0.3.x. Retires on raft-engine upstream refresh." },
     { crate = "hashbrown@0.14.5", reason = "raft-engine 0.4.2 transitive; modern tree uses hashbrown 0.16.x. Retires on raft-engine upstream refresh." },
     { crate = "syn@1.0.109", reason = "raft-engine 0.4.2 transitive via older proc-macro crates (serde_repr, strum_macros 0.26, etc.); modern tree uses syn 2.x. Retires on raft-engine upstream refresh." },
+    { crate = "thiserror@1.0.69", reason = "raft-engine 0.4.2 transitive via prometheus 0.13 holds thiserror 1.x; modern mango-storage uses thiserror 2.x directly. Retires on raft-engine upstream refresh (tikv/raft-engine#397 tree). Pinned at this specific version so a future transitive bump surfaces as a refreshable skip entry." },
+    { crate = "thiserror-impl@1.0.69", reason = "Proc-macro half of thiserror 1.x; duplicated for the same raft-engine 0.4.2 transitive reason. Retires on raft-engine upstream refresh." },
 ]
 skip-tree = []
 wildcards = "deny"

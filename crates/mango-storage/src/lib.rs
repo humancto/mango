@@ -1,17 +1,24 @@
 //! mango-storage — the storage backend crate for mango.
 //!
-//! This crate is currently a placeholder skeleton. The `Backend` and
-//! `RaftLogStore` trait definitions land per `ROADMAP.md` (Phase 1);
-//! implementations follow in their own PRs.
+//! The [`Backend`] and [`RaftLogStore`] traits frozen in ADR 0002 §6
+//! live in [`backend`]; impls follow in their own PRs (ROADMAP:817
+//! redb Backend, ROADMAP:818 raft-engine `RaftLogStore`).
 //!
 //! Dependencies declared here — `redb` and a git-pinned fork of
-//! `raft-engine` — are wired so subsequent trait and impl PRs can
-//! consume them via `.workspace = true`. The fork exists to keep
-//! `lz4-sys` (C FFI) out of the default build graph; see
+//! `raft-engine` — are wired so subsequent impl PRs can consume them
+//! via `.workspace = true`. The fork exists to keep `lz4-sys` (C FFI)
+//! out of the default build graph; see
 //! `.planning/adr/0002-storage-engine.md` §W5 and
 //! `.planning/fork-raft-engine-lz4-verification.md`.
 
 #![deny(missing_docs)]
+
+pub mod backend;
+
+pub use backend::{
+    Backend, BackendConfig, BackendError, BucketId, CommitStamp, HardState, RaftEntry,
+    RaftEntryType, RaftLogStore, RaftSnapshotMetadata, RangeIter, ReadSnapshot, WriteBatch,
+};
 
 /// The package version string, captured at build time from
 /// `CARGO_PKG_VERSION`. Kept as a crate-level constant so downstream
@@ -34,10 +41,129 @@ mod tests {
     // oracle for `scripts/test-watchdog.sh` is sufficient and not
     // duplicated per crate.
 
+    use std::error::Error;
+
     use super::*;
 
     #[test]
     fn version_matches_cargo_manifest() {
         assert_eq!(VERSION, "0.1.0");
+    }
+
+    // Compile-time shape assertions. None of these run at test time;
+    // they exist to lock trait-surface invariants so a future refactor
+    // that silently drops `Send`/`Sync`/`Ord`/etc. fails the build.
+
+    #[allow(dead_code)]
+    fn _assert_read_snapshot_object_safe(_: &dyn ReadSnapshot) {}
+
+    #[allow(dead_code)]
+    fn _assert_range_iter_send<'a>(_: Box<dyn RangeIter<'a> + 'a>)
+    where
+        Box<dyn RangeIter<'a> + 'a>: Send,
+    {
+    }
+
+    #[allow(dead_code)]
+    fn _assert_backend_send_sync_static<T: Backend>() {
+        fn needs<T: Send + Sync + 'static>() {}
+        needs::<T>();
+    }
+
+    #[allow(dead_code)]
+    fn _assert_raft_log_store_send_sync_static<T: RaftLogStore>() {
+        fn needs<T: Send + Sync + 'static>() {}
+        needs::<T>();
+    }
+
+    #[test]
+    fn error_display_covers_every_variant() {
+        let cases: Vec<(BackendError, &str)> = vec![
+            (
+                BackendError::Io(std::io::Error::other("disk gone")),
+                "disk gone",
+            ),
+            (BackendError::Corruption("crc".into()), "crc"),
+            (BackendError::UnknownBucket(BucketId::new(7)), "7"),
+            (BackendError::InvalidRange("start > end"), "start > end"),
+            (BackendError::Closed, "closed"),
+            (
+                BackendError::BucketConflict {
+                    id: BucketId::new(1),
+                    existing: "foo".into(),
+                    requested: "bar".into(),
+                },
+                "bar",
+            ),
+            (BackendError::Other("engine boom".into()), "engine boom"),
+        ];
+        for (err, needle) in cases {
+            let rendered = format!("{err}");
+            assert!(!rendered.is_empty(), "variant rendered empty: {err:?}");
+            assert!(
+                rendered.contains(needle),
+                "variant {err:?} did not contain {needle:?}; rendered {rendered:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn backend_error_io_source_chain() {
+        let inner = std::io::Error::other("inner-msg");
+        let err = BackendError::Io(inner);
+        let src = err.source().expect("Io variant exposes a source");
+        assert!(
+            format!("{src}").contains("inner-msg"),
+            "source did not chain through: {src}"
+        );
+    }
+
+    #[test]
+    fn hard_state_default_is_zero() {
+        let hs = HardState::default();
+        assert_eq!(hs, HardState::new(0, 0, 0));
+        assert_eq!(hs.term, 0);
+        assert_eq!(hs.vote, 0);
+        assert_eq!(hs.commit, 0);
+    }
+
+    #[test]
+    fn commit_stamp_is_copy_eq_ord() {
+        let a = CommitStamp::new(1);
+        let b = CommitStamp::new(2);
+        assert_eq!(a, CommitStamp::new(1));
+        assert!(a < b);
+        let copy = a; // `Copy`; original still usable.
+        assert_eq!(a.seq, 1);
+        assert_eq!(copy.seq, 1);
+    }
+
+    #[test]
+    fn raft_entry_type_is_non_exhaustive() {
+        // If `#[non_exhaustive]` is ever removed from `RaftEntryType`,
+        // the `_` arm becomes unreachable at compile time inside the
+        // defining crate, and `unreachable_patterns` fires. The allow
+        // lets the test body stay clean until that happens; dropping
+        // the allow is the signal that the `#[non_exhaustive]` was
+        // removed.
+        #[allow(clippy::wildcard_enum_match_arm, unreachable_patterns)]
+        fn classify(t: RaftEntryType) -> &'static str {
+            match t {
+                RaftEntryType::Normal => "n",
+                RaftEntryType::ConfChange => "c",
+                _ => "future",
+            }
+        }
+        assert_eq!(classify(RaftEntryType::Normal), "n");
+        assert_eq!(classify(RaftEntryType::ConfChange), "c");
+    }
+
+    #[test]
+    fn bucket_id_constructor_and_non_exhaustive() {
+        // `const` construction is load-bearing — downstream crates
+        // will declare bucket ids as `const` values.
+        const KV_BUCKET: BucketId = BucketId::new(1);
+        assert_eq!(KV_BUCKET.raw, 1);
+        assert_eq!(BucketId::new(7).raw, 7);
     }
 }

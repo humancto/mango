@@ -612,10 +612,20 @@ version = "1.0.43"
 criteria = "safe-to-deploy"
 notes = "review-by: 2026-10-23 — raft-engine 0.4.2 transitive, dtolnay, audit pending"
 
+[[exemptions.thiserror]]
+version = "2.0.18"
+criteria = "safe-to-deploy"
+notes = "review-by: 2026-10-24 — direct workspace dep for BackendError derivation (ROADMAP:816). dtolnay; mozilla + bytecode-alliance trust. Retires when the cargo vet diff thiserror 1.0.69 2.0.18 audit lands."
+
 [[exemptions.thiserror-impl]]
 version = "1.0.43"
 criteria = "safe-to-deploy"
 notes = "review-by: 2026-10-23 — raft-engine 0.4.2 transitive, dtolnay, audit pending"
+
+[[exemptions.thiserror-impl]]
+version = "2.0.18"
+criteria = "safe-to-deploy"
+notes = "review-by: 2026-10-24 — proc-macro half of thiserror 2.x (direct via ROADMAP:816). dtolnay; mozilla + bytecode-alliance trust. Same retirement trigger as the thiserror 2.0.18 exemption."
 
 [[exemptions.thread_local]]
 version = "1.1.9"
