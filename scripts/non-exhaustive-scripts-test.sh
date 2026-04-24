@@ -134,6 +134,22 @@ else
     fi
 fi
 
+# --- 7.5. fixture oracle: clippy accepts `allowed-derive-after` -----
+# Covers the attribute-cluster case: #[derive(...)] immediately above
+# #[non_exhaustive] above pub enum. Clippy accepts (attribute order on
+# the enum is semantically free). The backstop's awk must also accept
+# — the pre-cluster prev1/prev2 scheme false-rejected this shape.
+scenario="fixture oracle: clippy accepts allowed-derive-after (#[derive] + #[non_exhaustive])"
+if ! command -v cargo >/dev/null 2>&1; then
+    missing_tool "$scenario" "cargo" "install rustup + cargo"
+else
+    if ( cd "$fixture_root" && cargo clippy --package allowed-derive-after --quiet -- -D clippy::exhaustive_enums >/dev/null 2>&1 ); then
+        pass "$scenario"
+    else
+        fail "$scenario"
+    fi
+fi
+
 # --- 8. fixture oracle: clippy rejects `bad` ------------------------
 # If this ever starts passing, either the lint is not firing (point-
 # release regression) or the fixture's `bad/src/lib.rs` got silently
@@ -152,11 +168,12 @@ fi
 # --- 9. backstop negative test --------------------------------------
 # The backstop script must reject a publishable crate with a naked
 # pub enum. We don't touch the real tree — we construct a synthetic
-# mini-workspace in a tmpdir and point the script at it.
+# mini-workspace in a tmpdir and point the script at it via the
+# $NON_EXHAUSTIVE_REPO_ROOT env var (see scripts/non-exhaustive-check.sh).
 #
-# This exercises the `awk` state machine that the on-tree test in
+# This exercises the awk cluster buffer that the on-tree test in
 # step 4 cannot reach (because the real tree is clean today). If
-# someone breaks the state machine, this test catches it.
+# someone breaks the cluster scan, this test catches it.
 scenario="backstop negative test: rejects naked pub enum"
 tmpdir="$(mktemp -d)"
 cleanup_tmp() { rm -rf "$tmpdir"; }
@@ -181,28 +198,22 @@ edition = "2021"
 [lib]
 path = "src/lib.rs"
 TOML
+# Stub policy doc so the check script's "policy doc exists" assertion
+# is satisfied. Orthogonal to the awk cluster scan we're testing here.
+mkdir -p "$tmpdir/docs"
+: > "$tmpdir/docs/api-stability.md"
+
 cat > "$tmpdir/naked/src/lib.rs" <<'RS'
 pub enum Naked { A, B }
 RS
 
-# Clone the backstop and repoint its cd to the tmpdir. Simplest
-# portable way: copy the script, replace the `cd "$repo_root"` line
-# with `cd "$tmpdir"`.
-cp scripts/non-exhaustive-check.sh "$tmpdir/check.sh"
-# Substitute the cd-to-repo-root line with an explicit tmpdir cd.
-awk -v TMP="$tmpdir" '
-    /^cd "\$repo_root"$/ { print "cd \"" TMP "\""; next }
-    { print }
-' "$tmpdir/check.sh" > "$tmpdir/check.sh.new"
-mv "$tmpdir/check.sh.new" "$tmpdir/check.sh"
-chmod +x "$tmpdir/check.sh"
-
-# Expect the check to exit non-zero with a FAIL_LINE mention.
-if bash "$tmpdir/check.sh" 2>&1 | grep -q 'pub enum without #\[non_exhaustive\]'; then
+# Expect the check to flag the naked enum with a FAIL_LINE mention.
+if NON_EXHAUSTIVE_REPO_ROOT="$tmpdir" bash scripts/non-exhaustive-check.sh 2>&1 \
+    | grep -q 'pub enum without #\[non_exhaustive\]'; then
     pass "$scenario"
 else
     fail "$scenario (backstop did not flag the synthetic naked enum)"
-    bash "$tmpdir/check.sh" 2>&1 || true
+    NON_EXHAUSTIVE_REPO_ROOT="$tmpdir" bash scripts/non-exhaustive-check.sh 2>&1 || true
 fi
 
 # --- 10. backstop negative test: allow without reason ---------------
@@ -214,11 +225,51 @@ cat > "$tmpdir/naked/src/lib.rs" <<'RS'
 pub enum NoReason { A, B }
 RS
 
-if bash "$tmpdir/check.sh" 2>&1 | grep -q 'line-comment on preceding line'; then
+if NON_EXHAUSTIVE_REPO_ROOT="$tmpdir" bash scripts/non-exhaustive-check.sh 2>&1 \
+    | grep -q 'line-comment on preceding line'; then
     pass "$scenario"
 else
     fail "$scenario (backstop accepted an #[allow] without // reason:)"
-    bash "$tmpdir/check.sh" 2>&1 || true
+    NON_EXHAUSTIVE_REPO_ROOT="$tmpdir" bash scripts/non-exhaustive-check.sh 2>&1 || true
+fi
+
+# --- 11. backstop positive test: #[derive] + #[non_exhaustive] ------
+# The cluster rewrite must accept `#[derive(Debug)] #[non_exhaustive]
+# pub enum X` — the shape the pre-cluster prev1/prev2 scheme false-
+# rejected. Positive oracle for the awk cluster buffer rewrite. Without
+# this assertion, the rewrite is only dynamically verified by "the real
+# tree still passes", which is a weak oracle (the real tree's enums are
+# all bare `#[non_exhaustive]` today).
+scenario="backstop positive test: accepts #[derive] + #[non_exhaustive]"
+cat > "$tmpdir/naked/src/lib.rs" <<'RS'
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum OkAfter { A, B }
+RS
+
+if NON_EXHAUSTIVE_REPO_ROOT="$tmpdir" bash scripts/non-exhaustive-check.sh >/dev/null 2>&1; then
+    pass "$scenario"
+else
+    fail "$scenario (backstop rejected a valid attribute-cluster shape)"
+    NON_EXHAUSTIVE_REPO_ROOT="$tmpdir" bash scripts/non-exhaustive-check.sh 2>&1 || true
+fi
+
+# --- 12. backstop positive test: #[non_exhaustive] + #[derive] ------
+# Reverse attribute order. Rustc accepts attributes in any order on an
+# item; the backstop must too. Asymmetric acceptance would mean the
+# backstop flags code clippy is happy with.
+scenario="backstop positive test: accepts #[non_exhaustive] + #[derive]"
+cat > "$tmpdir/naked/src/lib.rs" <<'RS'
+#[non_exhaustive]
+#[derive(Debug)]
+pub enum OkBefore { A, B }
+RS
+
+if NON_EXHAUSTIVE_REPO_ROOT="$tmpdir" bash scripts/non-exhaustive-check.sh >/dev/null 2>&1; then
+    pass "$scenario"
+else
+    fail "$scenario (backstop rejected reverse-order attribute cluster)"
+    NON_EXHAUSTIVE_REPO_ROOT="$tmpdir" bash scripts/non-exhaustive-check.sh 2>&1 || true
 fi
 
 # --- summary --------------------------------------------------------
