@@ -23,6 +23,8 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -42,6 +44,12 @@ type state struct {
 	db    *bolt.DB
 	path  string
 	fsync bool
+	// tx holds the currently-active writable transaction, if any.
+	// Only one writable txn is ever live; bbolt enforces this via
+	// its internal mutex so we don't need our own guard beyond
+	// nil-checking. Reads (get/range/snapshot) do NOT use this
+	// field — they acquire short-lived view txns.
+	tx *bolt.Tx
 }
 
 // request is the common envelope for every line on stdin. Fields
@@ -172,6 +180,26 @@ func dispatch(st *state, req *request) response {
 		return opClose(st, req)
 	case "reopen":
 		return opReopen(st, req)
+	case "bucket":
+		return opBucket(st, req)
+	case "begin":
+		return opBegin(st, req)
+	case "put":
+		return opPut(st, req)
+	case "delete":
+		return opDelete(st, req)
+	case "commit":
+		return opCommit(st, req)
+	case "rollback":
+		return opRollback(st, req)
+	case "get":
+		return opGet(st, req)
+	case "range":
+		return opRange(st, req)
+	case "snapshot":
+		return opSnapshot(st, req)
+	case "size":
+		return opSize(st, req)
 	default:
 		return response{
 			OK:    false,
@@ -252,7 +280,299 @@ func opReopen(st *state, _ *request) response {
 		}
 	}
 	st.db = nil
+	st.tx = nil // any active txn is orphaned by the close above
 	// Rebuild the open request from latched state.
 	reopenReq := &request{Path: st.path, Fsync: st.fsync}
 	return opOpen(st, reopenReq)
+}
+
+// opBucket creates (idempotently) a named bucket. The harness
+// pre-registers all buckets on both engines before any data op
+// runs so the "bbolt auto-creates vs redb requires explicit"
+// delta is eliminated at fixture level (see BBOLT_QUIRKS.md).
+// Idempotent: re-registering an existing bucket returns OK.
+func opBucket(st *state, req *request) response {
+	if st.db == nil {
+		return response{OK: false, Error: "app: no database open"}
+	}
+	if req.Name == "" {
+		return response{OK: false, Error: "protocol: bucket requires non-empty name"}
+	}
+	if st.tx != nil {
+		// Creating a bucket via a new writable txn while one is
+		// already active would deadlock on bbolt's writer mutex.
+		// Force the harness to commit/rollback first.
+		return response{OK: false, Error: "app: cannot register bucket while txn active"}
+	}
+	err := st.db.Update(func(tx *bolt.Tx) error {
+		_, e := tx.CreateBucketIfNotExists([]byte(req.Name))
+		return e
+	})
+	if err != nil {
+		return response{OK: false, Error: fmt.Sprintf("app: CreateBucketIfNotExists: %s", err.Error())}
+	}
+	return response{OK: true}
+}
+
+// opBegin starts a writable transaction. `put`, `delete`, and
+// `delete_range` operate inside this txn; `commit` or `rollback`
+// ends it. Only one writable txn is active at a time.
+func opBegin(st *state, _ *request) response {
+	if st.db == nil {
+		return response{OK: false, Error: "app: no database open"}
+	}
+	if st.tx != nil {
+		return response{OK: false, Error: "app: txn already active; commit or rollback first"}
+	}
+	tx, err := st.db.Begin(true)
+	if err != nil {
+		return response{OK: false, Error: fmt.Sprintf("app: Begin(true): %s", err.Error())}
+	}
+	st.tx = tx
+	return response{OK: true}
+}
+
+// txBucket fetches the named bucket from the active writable txn,
+// or returns a protocol error if the bucket was never registered.
+// Returning (nil, response) lets the caller short-circuit without
+// repeating boilerplate.
+func txBucket(st *state, name string) (*bolt.Bucket, *response) {
+	if st.tx == nil {
+		return nil, &response{OK: false, Error: "app: no active txn; call begin first"}
+	}
+	b := st.tx.Bucket([]byte(name))
+	if b == nil {
+		return nil, &response{OK: false, Error: fmt.Sprintf("app: bucket %q not registered", name)}
+	}
+	return b, nil
+}
+
+// opPut writes a key/value inside the active writable txn. Empty
+// key or empty value is rejected at the bbolt layer (errors
+// `ErrKeyRequired` / `ErrValueNil`); the redb-side wrapper lifts
+// these into the same error class so symmetry holds. See plan §5
+// "Semantic-divergence contract — Hard contracts".
+func opPut(st *state, req *request) response {
+	b, errResp := txBucket(st, req.Bucket)
+	if errResp != nil {
+		return *errResp
+	}
+	key, err := decode64(req.Key)
+	if err != nil {
+		return response{OK: false, Error: fmt.Sprintf("protocol: bad base64 key: %s", err.Error())}
+	}
+	val, err := decode64(req.Value)
+	if err != nil {
+		return response{OK: false, Error: fmt.Sprintf("protocol: bad base64 value: %s", err.Error())}
+	}
+	if putErr := b.Put(key, val); putErr != nil {
+		return response{OK: false, Error: fmt.Sprintf("app: Put: %s", putErr.Error())}
+	}
+	return response{OK: true}
+}
+
+// opDelete removes a key from the active writable txn. Deleting a
+// non-existent key is a no-op in bbolt (returns nil); the
+// harness's redb side matches this behavior. This is NOT a quirk
+// — it's the documented contract of both engines.
+func opDelete(st *state, req *request) response {
+	b, errResp := txBucket(st, req.Bucket)
+	if errResp != nil {
+		return *errResp
+	}
+	key, err := decode64(req.Key)
+	if err != nil {
+		return response{OK: false, Error: fmt.Sprintf("protocol: bad base64 key: %s", err.Error())}
+	}
+	if delErr := b.Delete(key); delErr != nil {
+		return response{OK: false, Error: fmt.Sprintf("app: Delete: %s", delErr.Error())}
+	}
+	return response{OK: true}
+}
+
+// opCommit commits the active writable txn, optionally honoring
+// the per-commit fsync flag. bbolt's per-txn fsync is controlled
+// globally by `db.NoSync`; we toggle it before commit so the
+// protocol's `{"op":"commit","fsync":true/false}` translates to
+// an actual durability guarantee. After the commit the field is
+// restored to the open-time default so subsequent commits inherit
+// the original behavior unless told otherwise.
+func opCommit(st *state, req *request) response {
+	if st.tx == nil {
+		return response{OK: false, Error: "app: no active txn to commit"}
+	}
+	// bbolt commits always flush the page cache; the fsync bit
+	// governs whether the OS is asked to persist. Per-txn
+	// override: flip NoSync around the commit, restore after.
+	previousNoSync := st.db.NoSync
+	st.db.NoSync = !req.Fsync
+	err := st.tx.Commit()
+	st.db.NoSync = previousNoSync
+	st.tx = nil
+	if err != nil {
+		return response{OK: false, Error: fmt.Sprintf("app: Commit: %s", err.Error())}
+	}
+	return response{OK: true}
+}
+
+// opRollback discards the active writable txn.
+func opRollback(st *state, _ *request) response {
+	if st.tx == nil {
+		return response{OK: false, Error: "app: no active txn to rollback"}
+	}
+	err := st.tx.Rollback()
+	st.tx = nil
+	if err != nil {
+		return response{OK: false, Error: fmt.Sprintf("app: Rollback: %s", err.Error())}
+	}
+	return response{OK: true}
+}
+
+// opGet reads one key. Runs inside a short-lived view txn so the
+// read sees the last-committed state, NOT any uncommitted data in
+// an active writable txn. This mirrors mango's `Backend::get`
+// which operates against a snapshot, not against a writer's
+// staging area. A missing key returns `ok: true` with a nil
+// value; the response omits the `value` field entirely (see
+// response type's `*string` + `omitempty`).
+func opGet(st *state, req *request) response {
+	if st.db == nil {
+		return response{OK: false, Error: "app: no database open"}
+	}
+	key, err := decode64(req.Key)
+	if err != nil {
+		return response{OK: false, Error: fmt.Sprintf("protocol: bad base64 key: %s", err.Error())}
+	}
+	var out *string
+	viewErr := st.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte(req.Bucket))
+		if b == nil {
+			// Bucket not registered — treat as bucket-level error,
+			// not as a missing key. Mirrors the wrapper behavior.
+			return fmt.Errorf("bucket %q not registered", req.Bucket)
+		}
+		v := b.Get(key)
+		if v != nil {
+			// Copy — bbolt's value slice is only valid inside the
+			// txn. We need to capture before View returns.
+			s := encode64(v)
+			out = &s
+		}
+		return nil
+	})
+	if viewErr != nil {
+		return response{OK: false, Error: fmt.Sprintf("app: get: %s", viewErr.Error())}
+	}
+	return response{OK: true, Value: out}
+}
+
+// opRange returns all (k, v) pairs in `[start, end)` up to
+// `limit`. The half-open interval and the `limit=0 means no cap`
+// convention are enforced identically on the redb side; see plan
+// §5 for the contract and `main_test.go` for the boundary tests.
+func opRange(st *state, req *request) response {
+	if st.db == nil {
+		return response{OK: false, Error: "app: no database open"}
+	}
+	start, err := decode64(req.Start)
+	if err != nil {
+		return response{OK: false, Error: fmt.Sprintf("protocol: bad base64 start: %s", err.Error())}
+	}
+	end, err := decode64(req.End)
+	if err != nil {
+		return response{OK: false, Error: fmt.Sprintf("protocol: bad base64 end: %s", err.Error())}
+	}
+	var entries [][2]string
+	viewErr := st.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte(req.Bucket))
+		if b == nil {
+			return fmt.Errorf("bucket %q not registered", req.Bucket)
+		}
+		c := b.Cursor()
+		// `Seek` returns the first key >= start, or nil if the
+		// bucket has no such key. From there we walk forward
+		// until k >= end or we've hit the limit.
+		for k, v := c.Seek(start); k != nil; k, v = c.Next() {
+			if len(end) != 0 && bytes.Compare(k, end) >= 0 {
+				break
+			}
+			entries = append(entries, [2]string{encode64(k), encode64(v)})
+			if req.Limit > 0 && len(entries) >= req.Limit {
+				break
+			}
+		}
+		return nil
+	})
+	if viewErr != nil {
+		return response{OK: false, Error: fmt.Sprintf("app: range: %s", viewErr.Error())}
+	}
+	return response{OK: true, Entries: entries}
+}
+
+// opSnapshot returns the full (bucket, key, value) state across
+// every registered bucket. This is the workhorse the Rust harness
+// compares against redb's equivalent after each commit boundary.
+// Ordering: within each bucket, keys are returned in byte-lex
+// order (bbolt's natural cursor order); buckets are returned in
+// the order `tx.ForEach` surfaces them (which is also byte-lex).
+// The Rust side sorts independently before comparing so even if
+// this contract changes, equality still holds.
+func opSnapshot(st *state, _ *request) response {
+	if st.db == nil {
+		return response{OK: false, Error: "app: no database open"}
+	}
+	out := make(map[string][][2]string)
+	err := st.db.View(func(tx *bolt.Tx) error {
+		return tx.ForEach(func(name []byte, b *bolt.Bucket) error {
+			var bucketEntries [][2]string
+			if cerr := b.ForEach(func(k, v []byte) error {
+				bucketEntries = append(bucketEntries, [2]string{encode64(k), encode64(v)})
+				return nil
+			}); cerr != nil {
+				return cerr
+			}
+			out[string(name)] = bucketEntries
+			return nil
+		})
+	})
+	if err != nil {
+		return response{OK: false, Error: fmt.Sprintf("app: snapshot: %s", err.Error())}
+	}
+	return response{OK: true, State: out}
+}
+
+// opSize returns the on-disk size of the db file. Reported for
+// debugging; the harness does NOT assert size equality (bbolt and
+// redb use different page / freelist accounting — documented in
+// BBOLT_QUIRKS.md "On-disk size"). Taken from `os.Stat` rather
+// than `db.Stats()` so we report the actual filesystem footprint,
+// including any trailing unused space.
+func opSize(st *state, _ *request) response {
+	if st.db == nil {
+		return response{OK: false, Error: "app: no database open"}
+	}
+	info, err := os.Stat(st.path)
+	if err != nil {
+		return response{OK: false, Error: fmt.Sprintf("app: Stat: %s", err.Error())}
+	}
+	return response{OK: true, Bytes: info.Size()}
+}
+
+// decode64 wraps base64.StdEncoding.DecodeString so the dispatch
+// layer can surface decode errors as protocol responses instead
+// of panicking. Explicit StdEncoding (not URL-safe, not MIME)
+// guarantees no line-break bytes appear in our wire format — the
+// harness's newline-delimited framing depends on this.
+func decode64(s string) ([]byte, error) {
+	if s == "" {
+		return nil, nil
+	}
+	return base64.StdEncoding.DecodeString(s)
+}
+
+// encode64 is the inverse of decode64. StdEncoding emits no line
+// breaks regardless of payload length; this is the property the
+// protocol depends on.
+func encode64(b []byte) string {
+	return base64.StdEncoding.EncodeToString(b)
 }
