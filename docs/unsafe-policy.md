@@ -189,9 +189,9 @@ To bump:
 
 cargo-geiger runs as a host tool on CI — it is installed via
 `cargo install --locked` with the CI runner's stable toolchain
-and does _not_ build against the workspace's MSRV (1.80).
+and does _not_ build against the workspace's MSRV (1.89).
 What MSRV governs is whether the source parses when geiger
-shells out to `rustc`/`cargo metadata`; stable-1.80 source
+shells out to `rustc`/`cargo metadata`; stable-1.89 source
 parses fine under any recent stable.
 
 Put differently: bumping cargo-geiger is independent of bumping

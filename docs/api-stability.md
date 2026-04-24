@@ -150,32 +150,30 @@ allow with either `#[non_exhaustive]` on every public enum or per-enum
 `// reason:` escapes — dropping the crate-level allow alone would
 red-light clippy on every enum in the crate at once.
 
-## How to add a per-enum exception at MSRV 1.80
+## How to add a per-enum exception
 
-`#[allow(foo, reason = "...")]` (the inline `reason` field) is
-stable from rustc 1.81+. Mango MSRV is 1.80 and `clippy::incompatible_msrv`
-is denied workspace-wide, so the inline `reason = "..."` form would
-fail CI.
-
-**Convention**: put a `// reason: ...` line-comment _immediately
-preceding_ the `#[allow]` attribute.
+Mango's MSRV is 1.89 (ADR 0003). The inline `reason = "..."`
+field on `#[allow]` attributes stabilized in rustc 1.81, so the
+inline form is the preferred spelling across the supported floor:
 
 ```rust
-// reason: <one-sentence justification citing which §1–§4 exception applies>
-#[allow(clippy::exhaustive_enums)]
+#[allow(clippy::exhaustive_enums, reason = "<one-sentence justification citing which §1–§4 exception applies>")]
 pub enum Foo {
     A,
     B,
 }
 ```
 
-- Line-comment only (not `///` doc-comment — those leak into
-  rustdoc output).
-- The backstop script asserts `^\s*// reason:` appears on the line
-  immediately before each `#[allow(clippy::exhaustive_enums)]`.
-- When mango's MSRV bumps to 1.81+, `docs/msrv.md`'s MSRV-bump
-  checklist covers migrating `// reason:` comments to inline
-  `reason = "..."` attribute fields.
+- The inline attribute keeps the rationale welded to the attribute;
+  a refactor that moves the attribute carries the reason with it.
+- The `// reason:` line-comment form used at MSRV ≤ 1.80 is
+  **deprecated** — a tripwire at `scripts/non-exhaustive-check.sh:321`
+  fails CI on any surviving line-comment in a publishable crate's
+  `src/**/*.rs`. Migrate any reintroduction to the inline form
+  instead of disabling the tripwire.
+- The backstop script at `scripts/non-exhaustive-check.sh` asserts
+  each `pub enum` in a publishable crate carries either
+  `#[non_exhaustive]` or the escape attribute above.
 
 ## Struct-like enum variants
 

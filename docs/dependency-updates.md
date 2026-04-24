@@ -41,8 +41,9 @@ named `madsim-family` group for `madsim` + `madsim-tokio` (see
 For every Dependabot PR, verify on the green-CI path:
 
 1. **MSRV gate green** — `ci.yml` + `madsim.yml` both run under
-   workspace MSRV (1.80). A proposed bump that requires rustc >= 1.81
-   red-flags these jobs. See "MSRV-incompatible bumps" below.
+   workspace MSRV (1.89; see [ADR 0003](../.planning/adr/0003-msrv-bump.md)).
+   A proposed bump that requires rustc > 1.89 red-flags these jobs.
+   See "MSRV-incompatible bumps" below.
 2. **cargo-deny green** — license / bans / sources / advisories.
 3. **cargo-vet green** — supply-chain audit. Transitive graph shifts
    are the common failure mode; see "Transitive graph shifts" below.
@@ -140,17 +141,19 @@ When Dependabot proposes a bump that requires rustc >= MSRV+1:
      removal trigger:
      ```yaml
      ignore:
-       - dependency-name: "time"
-         versions: [">=0.3.42"]
-         # Remove when workspace MSRV reaches 1.81. Cross-ref:
-         # deny.toml (RUSTSEC-2026-0009) and this file's header.
+       - dependency-name: "some-crate"
+         versions: [">=X.Y"]
+         # Remove when workspace MSRV reaches 1.ZZ. Cross-ref:
+         # deny.toml and this file's header.
      ```
      Every ignore entry MUST carry a removal trigger in a YAML
      comment — same discipline as deny.toml ignores and vet
      exemptions. Stale ignores accrete; audits miss them.
-   - **Bump MSRV** → open a separate PR bumping
-     `rust-version = "1.80"` in Cargo.toml, ship that first, then
-     return to the Dependabot PR and retry.
+   - **Bump MSRV** → open a separate PR following the process in
+     [`docs/msrv.md`](msrv.md) §"Bumping the MSRV" (write an ADR,
+     update all four machine-checked sources of truth together,
+     sweep docs, rust-expert review, merge). Ship the MSRV bump
+     first, then return to the Dependabot PR and retry.
 
 ## Transitive graph shifts
 
