@@ -1,6 +1,6 @@
 {
   "generated_by": "scripts/geiger-update-baseline.sh",
-  "generated_at": "2026-04-23T00:00:00Z",
+  "generated_at": "2026-04-24T00:00:00Z",
   "cargo_geiger_version": "0.13.0",
   "crates": {
     "mango": {
@@ -18,6 +18,13 @@
       "methods": 0
     },
     "mango-proto": {
+      "functions": 0,
+      "exprs": 0,
+      "item_impls": 0,
+      "item_traits": 0,
+      "methods": 0
+    },
+    "mango-storage": {
       "functions": 0,
       "exprs": 0,
       "item_impls": 0,
