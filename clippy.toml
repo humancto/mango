@@ -42,5 +42,5 @@ disallowed-methods = [
 # toolchain in .github/workflows/ci.yml's msrv job. Enables
 # clippy::incompatible_msrv (denied in Cargo.toml) to flag any
 # stdlib API call newer than MSRV at PR time, in addition to the
-# `cargo check @ 1.80` job catching it at compile time.
-msrv = "1.80"
+# `cargo check @ 1.89` job catching it at compile time.
+msrv = "1.89"

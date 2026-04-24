@@ -114,23 +114,23 @@ jobs:
         run: bash scripts/test-watchdog.sh
 
   msrv:
-    # MSRV enforcement. `cargo check` on the pinned 1.80 toolchain
+    # MSRV enforcement. `cargo check` on the pinned 1.89 toolchain
     # proves the workspace compiles on MSRV; the drift-detection
     # script proves the pin here and the rust-version in Cargo.toml
     # agree. Decouples the declaration (manifest) from the gate
     # (this job), then ties them back together with the script.
-    name: msrv (cargo check @ 1.80)
+    name: msrv (cargo check @ 1.89)
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
-      # `toolchain: "1.80"` is rustup's shorthand — it resolves to
-      # whatever 1.80.z rustup's manifest has at install time
-      # (currently 1.80.1). That's the right amount of pinning for
-      # MSRV enforcement: "minimum 1.80-family," not an exact patch.
+      # `toolchain: "1.89"` is rustup's shorthand — it resolves to
+      # whatever 1.89.z rustup's manifest has at install time. That's
+      # the right amount of pinning for MSRV enforcement: "minimum
+      # 1.89-family," not an exact patch.
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable (action)
         with:
-          toolchain: "1.80"
+          toolchain: "1.89"
       - name: verify workflow MSRV matches Cargo.toml
         # scripts/test-msrv-pin.sh is the single source of the drift
         # check — committed, runnable locally, and invoked here.
@@ -139,31 +139,26 @@ jobs:
         with:
           # Pinned MSRV in the cache key so a future MSRV bump
           # invalidates this job's cache cleanly without a manual rev.
-          prefix-key: v0-msrv-1.80
+          prefix-key: v0-msrv-1.89
           shared-key: ""
       - name: install protoc
         # tonic-build 0.12 + prost-build 0.13 do not vendor protoc.
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      # `--target x86_64-unknown-linux-gnu` scopes both fetch and check
-      # to the Linux subgraph, skipping wasi-only transitives whose
-      # manifests require newer editions than our MSRV toolchain can
-      # parse. See docs/msrv.md and:
-      #   https://github.com/humancto/mango/issues/23
-      # (tempfile -> getrandom 0.3 -> wasip2 -> wit-bindgen 0.57.1,
-      # which declares edition = "2024"; cargo 1.80 rejects the manifest
-      # even though the crate is never compiled on Linux.) Do NOT remove
-      # `--target` without either (a) expanding the target list to match
-      # any new CI matrix, or (b) bumping MSRV high enough that the full
-      # lockfile parses on the MSRV toolchain.
+      # The `--target x86_64-unknown-linux-gnu` workaround (Issue #23)
+      # was retired at the 1.80 → 1.89 MSRV bump (ADR 0003) because
+      # cargo ≥ 1.85 parses `edition = "2024"` manifests natively. The
+      # wasi-only `wit-bindgen 0.57.1` transitive that triggered the
+      # workaround no longer breaks `cargo fetch --locked` on the MSRV
+      # toolchain.
       - name: cargo fetch
-        run: cargo fetch --locked --target x86_64-unknown-linux-gnu
+        run: cargo fetch --locked
       - name: cargo check (workspace, all targets, MSRV toolchain)
         # `cargo check`, not build/test: MSRV cares about compilation
         # feasibility, not artifact production or runtime semantics.
         # `--all-targets` includes tests/benches/examples so the full
         # source tree is typechecked on MSRV, matching the practice in
         # tokio / serde / hyper / reqwest.
-        run: cargo check --workspace --all-targets --locked --target x86_64-unknown-linux-gnu
+        run: cargo check --workspace --all-targets --locked
 
   deny:
     # Supply-chain policy gate: licenses, RustSec advisories, banned

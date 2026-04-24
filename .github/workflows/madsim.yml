@@ -95,7 +95,7 @@ env:
   # MSRV pin; mirrors workspace.package.rust-version. Used by the
   # MSRV check step to prove the curated subset compiles on the
   # oldest supported toolchain under `--cfg madsim`.
-  MSRV: "1.80"
+  MSRV: "1.89"
 
 jobs:
   madsim:
@@ -108,10 +108,17 @@ jobs:
       # MSRV toolchain installed FIRST so the final
       # `dtolnay/rust-toolchain` call (stable, below) becomes the
       # rustup default. If MSRV were installed last, default would
-      # flip to 1.80 and `cargo fetch --locked` would reject
-      # `wit-bindgen` (edition2024 unstable on 1.80). Same failure
-      # mode as Issue #23 / task #15. See
-      # .planning/msrv-wit-bindgen-fix.plan.md for the incident.
+      # flip to the MSRV pin and subsequent non-MSRV cargo
+      # invocations (fetch, nextest, install) would silently run on
+      # the older toolchain. The `cargo +${MSRV}` in the MSRV check
+      # step is the only MSRV-targeted invocation; everything else
+      # must resolve to stable.
+      #
+      # Historical note: a prior incarnation of this comment cited
+      # the `wit-bindgen 0.57.1` / `edition2024` parser failure on
+      # 1.80 (Issue #23) as the motivating incident. That failure
+      # mode is structurally retired at MSRV 1.89 — cargo >= 1.85
+      # parses `edition2024` natively. See ADR 0003.
       - name: install MSRV toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
         with:
@@ -187,7 +194,7 @@ jobs:
       # not a runtime contract.
       # MSRV toolchain referenced via `cargo +${{ env.MSRV }}`.
       # YAML-level expansion (NOT a `run:`-time shell expansion)
-      # produces the literal string `cargo +1.80` at workflow-dispatch
+      # produces the literal string `cargo +1.89` at workflow-dispatch
       # time. The expansion is safe because `env.MSRV` is declared as
       # a static literal at workflow-top — it never carries untrusted
       # input. See scripts/madsim-scripts-test.sh for the matching
