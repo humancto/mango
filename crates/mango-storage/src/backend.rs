@@ -89,9 +89,8 @@ pub enum BackendError {
     Closed,
 
     /// A [`Backend::register_bucket`] call tried to bind an id that
-    /// is already bound to a different name (or bind a name to a
-    /// different id). Structured rather than stringly-typed so
-    /// operators can route on the fields.
+    /// is already bound to a different name. Structured rather than
+    /// stringly-typed so operators can route on the fields.
     #[error("bucket id {id:?} already bound to {existing:?}; cannot rebind to {requested:?}")]
     BucketConflict {
         /// The [`BucketId`] being registered.
@@ -100,6 +99,22 @@ pub enum BackendError {
         existing: String,
         /// The name the caller supplied.
         requested: String,
+    },
+
+    /// A [`Backend::register_bucket`] call tried to bind a name that
+    /// is already bound to a different [`BucketId`]. Structured so
+    /// operators can route on the fields — same shape rationale as
+    /// [`Self::BucketConflict`] (the id-rebind variant).
+    #[error(
+        "bucket name {name:?} already bound to {existing_id:?}; cannot rebind to {requested_id:?}"
+    )]
+    BucketNameConflict {
+        /// The name being registered.
+        name: String,
+        /// The [`BucketId`] currently bound to `name`.
+        existing_id: BucketId,
+        /// The [`BucketId`] the caller supplied.
+        requested_id: BucketId,
     },
 
     /// Any other engine-defined error, wrapped as a string so

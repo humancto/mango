@@ -15,10 +15,16 @@
 
 pub mod backend;
 
+// ROADMAP:817 redb-backed Backend impl. Public surface re-exported
+// below. The module is private; only the named types below are
+// public API.
+mod redb;
+
 pub use backend::{
     Backend, BackendConfig, BackendError, BucketId, CommitStamp, HardState, RaftEntry,
     RaftEntryType, RaftLogStore, RaftSnapshotMetadata, RangeIter, ReadSnapshot, WriteBatch,
 };
+pub use redb::{batch::RedbBatch, snapshot::RedbSnapshot, RedbBackend};
 
 /// The package version string, captured at build time from
 /// `CARGO_PKG_VERSION`. Kept as a crate-level constant so downstream
@@ -94,6 +100,14 @@ mod tests {
                     requested: "bar".into(),
                 },
                 "bar",
+            ),
+            (
+                BackendError::BucketNameConflict {
+                    name: "kv".into(),
+                    existing_id: BucketId::new(1),
+                    requested_id: BucketId::new(2),
+                },
+                "kv",
             ),
             (BackendError::Other("engine boom".into()), "engine boom"),
         ];

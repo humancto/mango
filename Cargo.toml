@@ -50,7 +50,7 @@ crates = ["mango-loom-demo"]
 # (Cargo does not validate metadata contents) — the regression
 # test is `scripts/madsim-scripts-test.sh`.
 [workspace.metadata.mango.madsim]
-crates = ["mango-madsim-demo"]
+crates = ["mango-madsim-demo", "mango-storage"]
 
 # Exact-version pin for loom. Env-var semantics (LOOM_MAX_PREEMPTIONS,
 # LOOM_MAX_BRANCHES, etc.) and model behavior can drift between minor
@@ -146,6 +146,18 @@ bytes = "1.11"
 # Already in the transitive graph; exemption already present.
 thiserror = "2"
 
+# Phase 1 Backend-impl deps (ROADMAP:817).
+#
+# parking_lot: sync-path Mutex/RwLock — the blessed alternative to
+# std::sync per clippy.toml's `disallowed-types` ban (std's lock
+# poisoning is a footgun we deliberately don't adopt). Used by
+# RedbBackend to serialize `Database::compact(&mut self)` against
+# concurrent `&self` operations — redb 4.x's compact takes `&mut`,
+# so the backend wraps the Database in `parking_lot::RwLock` and
+# upgrades to a write-guard only in `defragment`. cargo-vet
+# exemption already present (parking_lot@0.12.5, parking_lot_core@0.9.12).
+parking_lot = "0.12"
+
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
@@ -157,6 +169,13 @@ authors = ["mango contributors"]
 [workspace.lints.rust]
 unsafe_code = "forbid"
 unreachable_pub = "warn"
+# `--cfg madsim` is the ecosystem-standard activation mechanism
+# (see docs/madsim.md). Registering it at the workspace level lets
+# any crate carry `#[cfg(madsim)]` / `#[cfg(not(madsim))]` gates
+# without tripping `unexpected_cfgs`. No-op for crates that do not
+# reference the cfg. mango-madsim-demo opts out of workspace lints
+# entirely and declares this locally; every other crate inherits.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(madsim)"] }
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
