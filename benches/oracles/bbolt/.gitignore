@@ -1,0 +1,20 @@
+# Built oracle binaries — produced by build.sh, `go build`, or
+# `go test -c`. Each contributor builds locally; we don't ship
+# pre-built binaries. The Rust harness's subprocess invocation
+# expects `./bbolt-oracle` (see build.sh). `bbolt` / `bbolt.test`
+# cover the default `go build` / `go test -c` artifact names that
+# derive from the module basename.
+/bbolt-oracle
+/bbolt-oracle.exe
+/bbolt
+/bbolt.exe
+/bbolt.test
+
+# Transient test artifacts. Go test drops temp .db files when the
+# test writes them to the working dir (we write to TempDir, but
+# guard against accidents).
+*.db
+
+# Coverage / profiling — may appear during local dev, not shipped.
+*.out
+*.prof

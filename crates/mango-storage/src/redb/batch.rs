@@ -117,8 +117,30 @@ impl RedbBatch {
     }
 }
 
+/// Error text returned when a caller attempts to stage an empty
+/// key. Matches the wire-level error string emitted by the bbolt
+/// oracle so the differential harness sees byte-identical errors
+/// from both engines (plan §5 "Hard contracts — Empty keys").
+pub(crate) const EMPTY_KEY_ERROR: &str = "empty key";
+
+/// Error text returned for empty values. Same rationale as
+/// [`EMPTY_KEY_ERROR`] — see plan §5 "Hard contracts — Empty values".
+pub(crate) const EMPTY_VALUE_ERROR: &str = "empty value";
+
 impl WriteBatch for RedbBatch {
     fn put(&mut self, bucket: BucketId, key: &[u8], value: &[u8]) -> Result<(), BackendError> {
+        // Reject empty key/value at stage time so we match bbolt's
+        // `ErrKeyRequired` / `ErrValueNil`. redb itself tolerates
+        // both, which would otherwise cause a differential
+        // divergence (plan §5 Hard contract). Checked here — the
+        // only entry point into the staging buffer — so every
+        // commit path inherits the invariant.
+        if key.is_empty() {
+            return Err(BackendError::Other(EMPTY_KEY_ERROR.to_owned()));
+        }
+        if value.is_empty() {
+            return Err(BackendError::Other(EMPTY_VALUE_ERROR.to_owned()));
+        }
         self.staged.push(StagedOp::Put {
             bucket,
             key: key.to_vec(),
@@ -128,6 +150,9 @@ impl WriteBatch for RedbBatch {
     }
 
     fn delete(&mut self, bucket: BucketId, key: &[u8]) -> Result<(), BackendError> {
+        if key.is_empty() {
+            return Err(BackendError::Other(EMPTY_KEY_ERROR.to_owned()));
+        }
         self.staged.push(StagedOp::Delete {
             bucket,
             key: key.to_vec(),
@@ -141,6 +166,9 @@ impl WriteBatch for RedbBatch {
         start: &[u8],
         end: &[u8],
     ) -> Result<(), BackendError> {
+        // `start`/`end` can legally be empty — they denote the min
+        // and max of the keyspace respectively (see oracle's
+        // cursor-walk in main.go). No lifting here.
         self.staged.push(StagedOp::DeleteRange {
             bucket,
             start: start.to_vec(),
@@ -173,6 +201,52 @@ mod tests {
         b.put(BucketId::new(1), b"k", b"v").unwrap();
         b.delete(BucketId::new(1), b"k").unwrap();
         b.delete_range(BucketId::new(1), b"a", b"z").unwrap();
+        assert_eq!(b.staged_len(), 3);
+    }
+
+    #[test]
+    fn put_empty_key_is_rejected() {
+        let mut b = RedbBatch::new();
+        let err = b.put(BucketId::new(1), b"", b"v").unwrap_err();
+        match err {
+            BackendError::Other(msg) => assert_eq!(msg, EMPTY_KEY_ERROR),
+            other => panic!("expected Other(empty key), got {other:?}"),
+        }
+        assert_eq!(b.staged_len(), 0, "rejected op must not stage");
+    }
+
+    #[test]
+    fn put_empty_value_is_rejected() {
+        let mut b = RedbBatch::new();
+        let err = b.put(BucketId::new(1), b"k", b"").unwrap_err();
+        match err {
+            BackendError::Other(msg) => assert_eq!(msg, EMPTY_VALUE_ERROR),
+            other => panic!("expected Other(empty value), got {other:?}"),
+        }
+        assert_eq!(b.staged_len(), 0);
+    }
+
+    #[test]
+    fn delete_empty_key_is_rejected() {
+        let mut b = RedbBatch::new();
+        let err = b.delete(BucketId::new(1), b"").unwrap_err();
+        match err {
+            BackendError::Other(msg) => assert_eq!(msg, EMPTY_KEY_ERROR),
+            other => panic!("expected Other(empty key), got {other:?}"),
+        }
+        assert_eq!(b.staged_len(), 0);
+    }
+
+    #[test]
+    fn delete_range_tolerates_empty_bounds() {
+        // `start = []` means "from the min of the keyspace";
+        // `end = []` means "to the max". Both are legal and must
+        // NOT be lifted into an error — see plan §5 and the bbolt
+        // oracle's cursor-walk comments.
+        let mut b = RedbBatch::new();
+        b.delete_range(BucketId::new(1), b"", b"").unwrap();
+        b.delete_range(BucketId::new(1), b"", b"z").unwrap();
+        b.delete_range(BucketId::new(1), b"a", b"").unwrap();
         assert_eq!(b.staged_len(), 3);
     }
 
