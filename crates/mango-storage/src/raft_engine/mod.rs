@@ -1,4 +1,4 @@
-//! `raft-engine`-backed [`RaftLogStore`](crate::RaftLogStore) impl.
+//! `raft-engine`-backed [`RaftLogStore`] impl.
 //!
 //! The public entry points are [`RaftEngineLogStore`] and the
 //! companion [`RaftEngineConfig`]. Supporting modules:
@@ -90,9 +90,8 @@ impl ::raft_engine::MessageExt for EntryMessageExt {
 /// cloneable (`Arc<Inner>` internally); every clone shares the same
 /// engine handle and `close` state.
 ///
-/// See the [module docstring](self) for the
-/// close-always-before-drop invariant and the Phase 3 truncation
-/// deferral.
+/// See the module docstring for the close-always-before-drop
+/// invariant and the Phase 3 truncation deferral.
 #[derive(Clone)]
 pub struct RaftEngineLogStore {
     inner: Arc<Inner>,
@@ -127,8 +126,8 @@ struct Inner {
     /// cut.
     closed: AtomicBool,
     /// Index of the most recently installed snapshot (0 when no
-    /// snapshot has been installed). Consulted by [`Self::first_index`]
-    /// and [`Self::last_index`] so the trait's
+    /// snapshot has been installed). Consulted by `first_index` and
+    /// `last_index` on [`RaftEngineLogStore`] so the trait's
     /// "`first_index() == snapshot.index + 1` after install" contract
     /// holds even when all log entries have been compacted out.
     ///
@@ -152,7 +151,8 @@ impl RaftEngineLogStore {
     /// # Errors
     ///
     /// Any engine-level error (I/O, corruption, invalid argument) is
-    /// translated through [`map_engine_error`].
+    /// translated through the internal `map_engine_error` helper
+    /// into [`BackendError`].
     pub fn open(cfg: RaftEngineConfig) -> Result<Self, BackendError> {
         let data_dir = cfg.data_dir.clone();
         let engine_cfg = cfg.into_engine_config();
@@ -220,7 +220,8 @@ impl RaftEngineLogStore {
     ///
     /// # Errors
     ///
-    /// Engine-level errors translate through [`map_engine_error`].
+    /// Engine-level errors translate through the internal
+    /// `map_engine_error` helper into [`BackendError`].
     pub fn purge_expired_files(&self) -> Result<Vec<u64>, BackendError> {
         let engine = self.engine_handle()?;
         engine.purge_expired_files().map_err(map_engine_error)
