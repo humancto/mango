@@ -131,6 +131,37 @@ raft-engine = { version = "0.4.2", git = "https://github.com/humancto/raft-engin
     "internals",
 ] }
 
+# raft (raft-rs) at master SHA — provides `raft::eraftpb::{Entry,
+# HardState, SnapshotMetadata}` used at the `RaftLogStore` conversion
+# boundary in mango-storage (ROADMAP:818). We do NOT depend on raft-rs
+# for its state machine in Phase 1 — only for the protobuf-generated
+# types that raft-engine's `MessageExtTyped` expects. Phase 3
+# `mango-raft` will exercise the state machine properly.
+#
+# Pin shape:
+# - `version = "0.7"` is the matching crates.io version (0.7.0); the
+#   SHA-pin below takes precedence, but the version string is required
+#   by cargo-deny's `wildcards = "deny"` rule for git deps.
+# - `rev = "<SHA>"` — raft-rs master does not publish every commit to
+#   crates.io, and mango workspace policy is SHA-pin for every git dep.
+#   Dependabot does NOT auto-bump git rev pins; rebase is manual.
+# - `default-features = false` drops `default-logger` (slog-stdlog +
+#   slog-envlogger + slog-term — we don't want a global logger config
+#   leaking in from a transitive dep).
+# - `features = ["protobuf-codec"]` keeps the rust-protobuf v2 types
+#   that raft-engine's `internals` feature consumes. `prost-codec`
+#   would produce Entry types that don't satisfy raft-engine's
+#   `Message` bound (rust-protobuf vs prost are separate Message
+#   traits).
+#
+# See .planning/raft-engine-logstore.plan.md §"Dependency surface"
+# for the expert-reviewed rationale and
+# .planning/fork-raft-engine-lz4-verification.md for the
+# sibling-pin (raft-engine fork).
+raft = { version = "0.7", git = "https://github.com/tikv/raft-rs", rev = "53cf7a5b0bf08d278ad768a60b77e68fa10f93aa", default-features = false, features = [
+    "protobuf-codec",
+] }
+
 # Phase 1 trait-surface deps (ROADMAP:816).
 #
 # bytes: ref-counted `Bytes` for Raft entry payloads and snapshot

@@ -62,6 +62,7 @@ unsound = "all"
 ignore = [
     { id = "RUSTSEC-2025-0141", reason = "bincode 1.3.3 formally unmaintained (the bincode team ceased development after a harassment incident; they consider 1.3.3 a complete version). Pulled in as a TRANSITIVE DEV-DEP of madsim 0.2.30 through mango-madsim-demo; not a runtime dep of any mango crate (sim scaffolding only). Blast radius: deterministic-simulator tests that serialize data the test itself controls — no untrusted input path. The advisory is informational (category `unmaintained`, no active CVE). Re-audit trigger: next madsim minor bump (0.3.x) — upstream may migrate to postcard/bitcode — or by 2026-10-23. See docs/madsim.md and .planning/0-5-3-madsim-dev-dep.plan.md." },
     { id = "RUSTSEC-2024-0437", reason = "protobuf 2.28.0 uncontrolled recursion (stack overflow on crafted input). Pulled TRANSITIVELY through raft-engine 0.4.2 → prometheus 0.13.4 (metrics, internal use only — not a network-facing deserializer). Patch is protobuf >= 3.7.2, but the dep is behind two upstream crates we do not control in this PR. Mitigations in the mango skeleton: (a) mango-storage ships no code that invokes protobuf parsing; (b) when mango-raft (Phase 1 impl PRs) starts calling raft-engine APIs that deserialize, those call sites will be under the `parser fuzz in the phase that introduces the parser` rule from ROADMAP's Reviewer's contract, with crafted-input fuzz corpora as the direct mitigation for this advisory class. Re-audit triggers (any): (1) raft-engine upstream bumps prometheus past the fixed protobuf version, (2) tikv/raft-engine#397 merges and we re-pin against a fresher master that may have bumped prometheus, (3) review-by 2026-10-23. See ADR 0002 §W5 and .planning/fork-raft-engine-lz4-verification.md." },
+    { id = "RUSTSEC-2025-0057", reason = "fxhash 0.2.1 formally unmaintained (repo stale, owner inactive; upstream recommends rustc-hash). Pulled TRANSITIVELY through raft v0.7.0 only (raft-rs's internal HashMap keying for ProgressTracker and similar bookkeeping — not a network-facing or untrusted-input surface). fxhash is a simple non-cryptographic hasher (≈100 LoC, no unsafe, no parser surface); there is no known CVE and no active vulnerability — the advisory is informational (category `unmaintained`). Mango never calls fxhash directly. Patch path requires upstream raft-rs migration to rustc-hash (tracked at tikv/raft-rs; they are gradually de-Prometheus-ing the 0.8 line). Re-audit triggers (any): (1) raft-rs 0.8+ release, (2) when we bump the workspace raft dep rev past the current SHA (53cf7a5b…), or (3) review-by 2026-10-23. See ROADMAP:818 and .planning/raft-engine-logstore.plan.md." },
 ]
 
 [bans]
@@ -83,6 +84,19 @@ skip = [
     { crate = "syn@1.0.109", reason = "raft-engine 0.4.2 transitive via older proc-macro crates (serde_repr, strum_macros 0.26, etc.); modern tree uses syn 2.x. Retires on raft-engine upstream refresh." },
     { crate = "thiserror@1.0.69", reason = "raft-engine 0.4.2 transitive via prometheus 0.13 holds thiserror 1.x; modern mango-storage uses thiserror 2.x directly. Retires on raft-engine upstream refresh (tikv/raft-engine#397 tree). Pinned at this specific version so a future transitive bump surfaces as a refreshable skip entry." },
     { crate = "thiserror-impl@1.0.69", reason = "Proc-macro half of thiserror 1.x; duplicated for the same raft-engine 0.4.2 transitive reason. Retires on raft-engine upstream refresh." },
+    # --- raft-rs 0.7.0 (SHA 53cf7a5b…) vs raft-engine 0.4.2 rand-ecosystem gap ---
+    # raft-rs master has migrated to rand 0.9.x while raft-engine 0.4.2's
+    # `fail` dep (fault-injection harness, dev/test-time) still pins rand 0.8.x,
+    # and madsim 0.2.30 also lands on rand 0.8.x. Both sides are transitive;
+    # neither is in mango's direct dep graph. No crypto/security surface —
+    # both versions are used for non-adversarial randomness (raft-rs's
+    # internal election-timer jitter, fail's random injection points,
+    # madsim's deterministic sim seeding). Retirement trigger: raft-engine
+    # upstream bump of `fail` past rand 0.9, or raft-rs backing off to 0.8
+    # (unlikely). Pinned to specific versions so a refresh surfaces the skip.
+    { crate = "rand@0.8.6", reason = "raft-engine 0.4.2 + madsim 0.2.30 transitive; modern raft-rs uses rand 0.9.x. Retires on raft-engine/madsim upstream bumps." },
+    { crate = "rand_chacha@0.3.1", reason = "rand 0.8.x transitive; dupe driver is the rand major-version gap above. Retires with rand@0.8.6." },
+    { crate = "rand_core@0.6.4", reason = "rand 0.8.x transitive; dupe driver is the rand major-version gap above. Retires with rand@0.8.6." },
 ]
 skip-tree = []
 wildcards = "deny"
@@ -113,4 +127,13 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 # Retirement trigger: upstream tikv/raft-engine#397 merging — when that
 # lands, swap the workspace `raft-engine` dep to point at tikv/raft-engine
 # at the merged SHA and DROP this allow-git entry in the same PR.
-allow-git = ["https://github.com/humancto/raft-engine"]
+allow-git = [
+    "https://github.com/humancto/raft-engine",
+    # tikv/raft-rs is consumed SHA-pinned (see workspace Cargo.toml `raft`
+    # entry) because no released version exposes the 0.7 master surface
+    # we depend on. Retirement trigger: raft-rs 0.8+ release on crates.io —
+    # at that point, swap the workspace dep to a versioned registry entry
+    # and DROP this allow-git line. See ROADMAP:818 and
+    # .planning/raft-engine-logstore.plan.md for the SHA-pin rationale.
+    "https://github.com/tikv/raft-rs",
+]
