@@ -23,10 +23,11 @@
 //!   `commit_group`: staged ops are grouped by `BucketId` (via a
 //!   `BTreeMap` — deterministic ordering is helpful for testing and
 //!   never hurts) so each redb `Table` is opened exactly once per
-//!   commit. redb's `WriteTransaction::open_table` uses an internal
-//!   `Mutex`; opening the same table twice in one txn is a panic, not
-//!   an error, so grouping is correctness-load-bearing, not just
-//!   performance.
+//!   commit. redb 4.x's `WriteTransaction::open_table` returns
+//!   `TableError::TableAlreadyOpen` (not a panic) when the same
+//!   table is opened twice in one txn; grouping is
+//!   correctness-load-bearing because the recovery path from that
+//!   error is uglier than pre-sorting the ops.
 //! - **Close** flips an `AtomicBool` via `compare_exchange`
 //!   (idempotent) and drops the `Database` handle by replacing the
 //!   `Option<Database>` with `None`. Subsequent methods see
@@ -61,6 +62,13 @@ pub(crate) mod snapshot;
 use batch::{RedbBatch, StagedOp};
 use registry::{physical_table_name, RegisterOutcome, Registry, REGISTRY_TABLE_NAME};
 use snapshot::RedbSnapshot;
+
+/// Map a `tokio::task::JoinError` into [`BackendError`]. Used by
+/// every `spawn_blocking`-based commit path; factored so the
+/// rendered message is identical across them.
+fn map_join_error(e: &tokio::task::JoinError) -> BackendError {
+    BackendError::Other(format!("spawn_blocking join: {e}"))
+}
 
 /// Name of the single redb file inside the user-supplied data
 /// directory. Kept as a constant rather than a config knob — the
@@ -172,6 +180,17 @@ fn map_database_error(e: ::redb::DatabaseError) -> BackendError {
         ::redb::DatabaseError::Storage(se) => map_storage_error(se),
         ::redb::DatabaseError::DatabaseAlreadyOpen => {
             BackendError::Other("database file already locked by another process".to_owned())
+        }
+        // The file's on-disk format is unreadable by this binary —
+        // either it was written by a newer redb, or its header is
+        // damaged. Callers routing on `Corruption` (operator alert,
+        // restore from snapshot, etc.) want to see this, not a
+        // generic `Other`.
+        ::redb::DatabaseError::UpgradeRequired(v) => {
+            BackendError::Corruption(format!("redb upgrade required (file format v{v})"))
+        }
+        ::redb::DatabaseError::RepairAborted => {
+            BackendError::Corruption("redb repair aborted by callback".to_owned())
         }
         other => BackendError::Other(format!("database error: {other}")),
     }
@@ -348,11 +367,16 @@ impl Backend for RedbBackend {
     fn register_bucket(&self, name: &str, id: BucketId) -> Result<(), BackendError> {
         self.inner.check_open()?;
 
-        // Hold the registry write-lock across the disk write so a
-        // concurrent caller cannot see the in-memory state update
-        // before the on-disk mirror lands.
+        // Two-phase: (1) `check_only` decides the outcome WITHOUT
+        // mutating the in-memory registry; (2) on `Inserted` we
+        // persist to disk; (3) only after the commit succeeds do we
+        // apply the in-memory insert. A failed commit therefore
+        // leaves the registry identical to the on-disk mirror — the
+        // backend remains usable after an `Err(Io)`. The write-lock
+        // is held across all three phases so a concurrent caller
+        // cannot observe the half-applied state.
         let mut reg = self.inner.registry.write();
-        match reg.check_and_insert(name, id)? {
+        match reg.check_only(name, id)? {
             RegisterOutcome::AlreadyRegistered => Ok(()),
             RegisterOutcome::Inserted => {
                 let db_guard = self.inner.db.read();
@@ -363,6 +387,7 @@ impl Backend for RedbBackend {
                     table.insert(name, id.raw).map_err(map_storage_error)?;
                 }
                 txn.commit().map_err(map_commit_error)?;
+                reg.force_insert(name.to_owned(), id);
                 Ok(())
             }
         }
@@ -405,7 +430,7 @@ impl Backend for RedbBackend {
                 commit_staged(&inner, staged)
             })
             .await
-            .map_err(|e| BackendError::Other(format!("spawn_blocking join: {e}")))?
+            .map_err(|e| map_join_error(&e))?
         }
     }
 
@@ -428,7 +453,7 @@ impl Backend for RedbBackend {
                 commit_staged(&inner, staged)
             })
             .await
-            .map_err(|e| BackendError::Other(format!("spawn_blocking join: {e}")))?
+            .map_err(|e| map_join_error(&e))?
         }
     }
 
@@ -442,6 +467,12 @@ impl Backend for RedbBackend {
         Ok(meta.len())
     }
 
+    // NOTE: `defragment` holds `Inner::db.write()` across the
+    // blocking `db.compact()` call. Every concurrent commit,
+    // snapshot, and register_bucket will block on that guard for
+    // the compact's duration (seconds → minutes on multi-GiB
+    // files). Acceptable for Phase 1; the Phase 6 operability
+    // bars will want online compaction that yields.
     fn defragment(&self) -> impl core::future::Future<Output = Result<(), BackendError>> + Send {
         let inner = Arc::clone(&self.inner);
         async move {
@@ -453,7 +484,7 @@ impl Backend for RedbBackend {
                 Ok(())
             })
             .await
-            .map_err(|e| BackendError::Other(format!("spawn_blocking join: {e}")))?
+            .map_err(|e| map_join_error(&e))?
         }
     }
 }

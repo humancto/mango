@@ -32,7 +32,7 @@ pub(crate) fn physical_table_name(id: BucketId) -> String {
     format!("bucket_{:04x}", id.raw)
 }
 
-/// Outcome of [`Registry::check_and_insert`]. Distinguishes
+/// Outcome of [`Registry::check_only`]. Distinguishes
 /// idempotent re-registration (no disk write required) from a
 /// genuine insert (caller must persist).
 #[derive(Debug, PartialEq, Eq)]
@@ -66,8 +66,16 @@ impl Registry {
     /// const table). Ordering is documented rather than load-
     /// bearing; a caller that exercises both simultaneously gets
     /// one of the two variants deterministically.
-    pub(crate) fn check_and_insert(
-        &mut self,
+    ///
+    /// Read-only: does NOT mutate the registry. The caller is
+    /// responsible for persisting the new row to the on-disk
+    /// mirror AND then applying the in-memory insert via
+    /// [`Registry::force_insert`]. This two-phase split lets the
+    /// backend roll back the in-memory state when the on-disk
+    /// commit fails (otherwise the registry would diverge from the
+    /// file on I/O errors).
+    pub(crate) fn check_only(
+        &self,
         name: &str,
         id: BucketId,
     ) -> Result<RegisterOutcome, BackendError> {
@@ -88,8 +96,6 @@ impl Registry {
                 requested_id: id,
             });
         }
-        self.by_name.insert(name.to_owned(), id);
-        self.by_id.insert(id.raw, name.to_owned());
         Ok(RegisterOutcome::Inserted)
     }
 
@@ -165,27 +171,57 @@ mod tests {
         assert!(!r.contains_id(BucketId::new(42)));
     }
 
+    /// Helper: the old `check_and_insert` semantic, expressed in
+    /// terms of the new two-phase split. Preserves the existing
+    /// unit-test shape.
+    fn check_and_insert(
+        r: &mut Registry,
+        name: &str,
+        id: BucketId,
+    ) -> Result<RegisterOutcome, BackendError> {
+        match r.check_only(name, id)? {
+            RegisterOutcome::AlreadyRegistered => Ok(RegisterOutcome::AlreadyRegistered),
+            RegisterOutcome::Inserted => {
+                r.force_insert(name.to_owned(), id);
+                Ok(RegisterOutcome::Inserted)
+            }
+        }
+    }
+
     #[test]
     fn insert_is_inserted_then_already_registered() {
         let mut r = Registry::default();
         assert_eq!(
-            r.check_and_insert("kv", BucketId::new(1)).unwrap(),
+            check_and_insert(&mut r, "kv", BucketId::new(1)).unwrap(),
             RegisterOutcome::Inserted
         );
         assert_eq!(r.len(), 1);
         assert!(r.contains_id(BucketId::new(1)));
         assert_eq!(
-            r.check_and_insert("kv", BucketId::new(1)).unwrap(),
+            check_and_insert(&mut r, "kv", BucketId::new(1)).unwrap(),
             RegisterOutcome::AlreadyRegistered
         );
         assert_eq!(r.len(), 1);
     }
 
     #[test]
+    fn check_only_does_not_mutate_on_inserted_outcome() {
+        // Load-bearing for the commit-failure rollback story in
+        // `register_bucket`: if `check_only` returned `Inserted`
+        // but also mutated, a failing on-disk commit would leave
+        // the in-memory registry ahead of the file.
+        let r = Registry::default();
+        let outcome = r.check_only("kv", BucketId::new(1)).unwrap();
+        assert_eq!(outcome, RegisterOutcome::Inserted);
+        assert_eq!(r.len(), 0);
+        assert!(!r.contains_id(BucketId::new(1)));
+    }
+
+    #[test]
     fn id_rebind_returns_bucket_conflict() {
         let mut r = Registry::default();
-        r.check_and_insert("kv", BucketId::new(1)).unwrap();
-        match r.check_and_insert("meta", BucketId::new(1)) {
+        check_and_insert(&mut r, "kv", BucketId::new(1)).unwrap();
+        match check_and_insert(&mut r, "meta", BucketId::new(1)) {
             Err(BackendError::BucketConflict {
                 id,
                 existing,
@@ -202,8 +238,8 @@ mod tests {
     #[test]
     fn name_rebind_returns_bucket_name_conflict() {
         let mut r = Registry::default();
-        r.check_and_insert("kv", BucketId::new(1)).unwrap();
-        match r.check_and_insert("kv", BucketId::new(2)) {
+        check_and_insert(&mut r, "kv", BucketId::new(1)).unwrap();
+        match check_and_insert(&mut r, "kv", BucketId::new(2)) {
             Err(BackendError::BucketNameConflict {
                 name,
                 existing_id,
@@ -224,9 +260,9 @@ mod tests {
         // name ("a" → 1) are rebind conflicts; the registry
         // documents that id-rebind wins.
         let mut r = Registry::default();
-        r.check_and_insert("a", BucketId::new(1)).unwrap();
-        r.check_and_insert("b", BucketId::new(2)).unwrap();
-        match r.check_and_insert("a", BucketId::new(2)) {
+        check_and_insert(&mut r, "a", BucketId::new(1)).unwrap();
+        check_and_insert(&mut r, "b", BucketId::new(2)).unwrap();
+        match check_and_insert(&mut r, "a", BucketId::new(2)) {
             Err(BackendError::BucketConflict { existing, .. }) => {
                 assert_eq!(existing, "b");
             }
