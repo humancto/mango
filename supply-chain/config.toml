@@ -16,22 +16,22 @@ url = "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
 [policy.mango]
 audit-as-crates-io = false
 criteria = "safe-to-deploy"
-notes = "review-by: 2026-10-23 — madsim 0.2.30 transitive (dev-dep via mango-madsim-demo), audit pending"
+notes = "first-party workspace crate; audit-as-crates-io=false so cargo-vet does not require third-party audits for mango's own code. safe-to-deploy is governed by in-tree review (CODEOWNERS + PR review)."
 
 [policy.mango-loom-demo]
 audit-as-crates-io = false
 criteria = "safe-to-deploy"
-notes = "review-by: 2026-10-23 — madsim 0.2.30 transitive (dev-dep via mango-madsim-demo), audit pending"
+notes = "first-party workspace crate; audit-as-crates-io=false so cargo-vet does not require third-party audits for mango's own code. safe-to-deploy is governed by in-tree review (CODEOWNERS + PR review)."
 
 [policy.mango-proto]
 audit-as-crates-io = false
 criteria = "safe-to-deploy"
-notes = "review-by: 2026-10-23 — madsim 0.2.30 transitive (dev-dep via mango-madsim-demo), audit pending"
+notes = "first-party workspace crate; audit-as-crates-io=false so cargo-vet does not require third-party audits for mango's own code. safe-to-deploy is governed by in-tree review (CODEOWNERS + PR review)."
 
 [policy.xtask-vet-ttl]
 audit-as-crates-io = false
 criteria = "safe-to-deploy"
-notes = "review-by: 2026-10-23 — madsim 0.2.30 transitive (dev-dep via mango-madsim-demo), audit pending"
+notes = "first-party workspace crate; audit-as-crates-io=false so cargo-vet does not require third-party audits for mango's own code. safe-to-deploy is governed by in-tree review (CODEOWNERS + PR review)."
 
 [[exemptions.ahash]]
 version = "0.8.12"
