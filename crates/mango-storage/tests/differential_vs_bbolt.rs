@@ -200,8 +200,31 @@ impl Drop for GoOracle {
     }
 }
 
+/// Locate the oracle binary without panicking. Returns `None` when
+/// neither the `MANGO_BBOLT_ORACLE` env var nor the default relative
+/// path resolve to an existing file. Callers decide whether to
+/// panic (interactive `oracle_binary`), or to skip (`test` CI job,
+/// via [`skip_without_oracle`]).
+///
+/// An `MANGO_BBOLT_ORACLE` env var pointing at a non-existent path
+/// still panics via [`oracle_binary`] — that's a user error worth
+/// surfacing loudly, not a "binary missing" skip signal.
+fn oracle_binary_opt() -> Option<PathBuf> {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let candidate = manifest_dir.join(ORACLE_REL);
+    if candidate.exists() {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
 /// Resolve the oracle binary path. Panics with an actionable
 /// message if it cannot be found — see module docs for rationale.
+///
+/// Tests that should skip (rather than fail) in CI environments
+/// without the oracle built should call [`skip_without_oracle`]
+/// instead.
 fn oracle_binary() -> PathBuf {
     if let Ok(p) = std::env::var(ORACLE_ENV) {
         let path = PathBuf::from(p);
@@ -213,17 +236,41 @@ fn oracle_binary() -> PathBuf {
             path.display()
         );
     }
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let candidate = manifest_dir.join(ORACLE_REL);
-    if candidate.exists() {
-        return candidate;
+    oracle_binary_opt().unwrap_or_else(|| {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let candidate = manifest_dir.join(ORACLE_REL);
+        panic!(
+            "bbolt oracle binary not found at {} \
+             and {ORACLE_ENV} is unset. Build it first: \
+             `cd benches/oracles/bbolt && ./build.sh`",
+            candidate.display()
+        )
+    })
+}
+
+/// Return `Some(path)` if the oracle binary is available, or `None`
+/// with a skip-line on stderr otherwise. The skip branch is what
+/// keeps the default `test` CI job green — that job does not build
+/// the oracle (the dedicated `differential` CI job does, per plan
+/// commit 10). Local dev: run `./benches/oracles/bbolt/build.sh`
+/// once and every test flips from skipped to exercised.
+///
+/// An explicit `MANGO_BBOLT_ORACLE` env override still forces the
+/// panic path via [`oracle_binary`] — a mis-set override is a bug
+/// the developer needs to see, not a silent skip.
+fn skip_without_oracle(test_name: &str) -> Option<PathBuf> {
+    if std::env::var(ORACLE_ENV).is_ok() {
+        return Some(oracle_binary());
     }
-    panic!(
-        "bbolt oracle binary not found at {} \
-         and {ORACLE_ENV} is unset. Build it first: \
-         `cd benches/oracles/bbolt && ./build.sh`",
-        candidate.display()
-    );
+    if let Some(p) = oracle_binary_opt() {
+        Some(p)
+    } else {
+        eprintln!(
+            "{test_name}: SKIP — bbolt oracle binary not built. \
+             Run `cd benches/oracles/bbolt && ./build.sh` to enable."
+        );
+        None
+    }
 }
 
 /// Assert `resp["ok"] == true`, or return an error describing the
@@ -663,12 +710,11 @@ fn snapshot_and_diff(redb: &RedbBackend, oracle: &mut GoOracle) -> Result<(), St
 /// `Ok(())` iff every post-commit snapshot diff agreed. Errors
 /// carry a human-readable message; the proptest runner promotes
 /// them into `TestCaseError::fail`.
-fn run_case(ops: &[DiffOp]) -> Result<(), String> {
-    let binary = oracle_binary();
+fn run_case(binary: &Path, ops: &[DiffOp]) -> Result<(), String> {
     // Default true; override with MANGO_DIFFERENTIAL_FSYNC=0 for
     // local macOS iteration (plan §7).
     let fsync = std::env::var("MANGO_DIFFERENTIAL_FSYNC").as_deref() != Ok("0");
-    let mut case = Case::new(&binary, fsync)?;
+    let mut case = Case::new(binary, fsync)?;
 
     // Single-threaded runtime is sufficient: RedbBackend's
     // commit_batch internally uses spawn_blocking (the blocking
@@ -787,7 +833,9 @@ fn proptest_cases() -> u32 {
 /// relying on drop-guard kill.
 #[test]
 fn smoke_ten_ops_protocol_round_trip() {
-    let binary = oracle_binary();
+    let Some(binary) = skip_without_oracle("smoke_ten_ops_protocol_round_trip") else {
+        return;
+    };
     let tmp = TempDir::new().expect("tempdir");
     let db_path = tmp.path().join("oracle.db");
 
@@ -898,7 +946,9 @@ fn smoke_ten_ops_protocol_round_trip() {
 /// nextest timeout or `ps` residue post-run.
 #[test]
 fn drop_without_close_reaps_child() {
-    let binary = oracle_binary();
+    let Some(binary) = skip_without_oracle("drop_without_close_reaps_child") else {
+        return;
+    };
     let tmp = TempDir::new().expect("tempdir");
     let db_path = tmp.path().join("oracle.db");
 
@@ -931,6 +981,9 @@ fn drop_without_close_reaps_child() {
 /// 10. `Commit` — diff #3 (state: {})
 #[test]
 fn smoke_10_ops_no_divergence() {
+    let Some(binary) = skip_without_oracle("smoke_10_ops_no_divergence") else {
+        return;
+    };
     let ops = vec![
         DiffOp::Put {
             bucket: 0,
@@ -966,7 +1019,7 @@ fn smoke_10_ops_no_divergence() {
         },
         DiffOp::Commit { fsync: false },
     ];
-    run_case(&ops).expect("smoke 10 ops diverged");
+    run_case(&binary, &ops).expect("smoke 10 ops diverged");
 }
 
 /// Proptest-driven 256-case (default) / 10k-case (thorough) sweep.
@@ -983,6 +1036,9 @@ fn smoke_10_ops_no_divergence() {
 /// the printed `ops` (formatted Debug) is the minimal reproducer.
 #[test]
 fn proptest_256_cases_no_divergence() {
+    let Some(binary) = skip_without_oracle("proptest_256_cases_no_divergence") else {
+        return;
+    };
     // Manual `TestRunner` (instead of the `proptest!` macro) so the
     // case count can be resolved at test-start from the env var
     // (plan §1: `MANGO_DIFFERENTIAL_THOROUGH=1` → 10_000). The
@@ -1001,7 +1057,7 @@ fn proptest_256_cases_no_divergence() {
     let strategy = op_sequence_strat();
     runner
         .run(&strategy, |ops| {
-            run_case(&ops).map_err(TestCaseError::fail)?;
+            run_case(&binary, &ops).map_err(TestCaseError::fail)?;
             Ok(())
         })
         .unwrap_or_else(|e| panic!("proptest divergence: {e}"));
