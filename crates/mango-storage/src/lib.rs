@@ -15,6 +15,11 @@
 
 pub mod backend;
 
+// ROADMAP:817 redb-backed Backend impl. Public surface re-exported
+// below once the impl types land; this initial commit contains only
+// the internal registry module.
+mod redb;
+
 pub use backend::{
     Backend, BackendConfig, BackendError, BucketId, CommitStamp, HardState, RaftEntry,
     RaftEntryType, RaftLogStore, RaftSnapshotMetadata, RangeIter, ReadSnapshot, WriteBatch,
