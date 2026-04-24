@@ -250,7 +250,11 @@ fn validate_ops(registry: &Registry, ops: &[StagedOp]) -> Result<(), BackendErro
             return Err(BackendError::UnknownBucket(b));
         }
         if let StagedOp::DeleteRange { start, end, .. } = op {
-            if start > end {
+            // Empty `end` means "unbounded upper" per the engine-neutral
+            // DeleteRange contract (matches bbolt's `len(end) == 0`
+            // semantics). When end is unbounded, any start is legal —
+            // including one that would otherwise exceed a non-empty end.
+            if !end.is_empty() && start > end {
                 return Err(BackendError::InvalidRange("start > end"));
             }
         }
@@ -288,9 +292,22 @@ fn apply_staged(txn: &::redb::WriteTransaction, ops: Vec<StagedOp>) -> Result<()
                     // `retain_in` keeps items for which the predicate
                     // returns `true`; a constant-`false` predicate
                     // deletes the whole half-open range in one pass.
-                    table
-                        .retain_in::<&[u8], _>(start.as_slice()..end.as_slice(), |_, _| false)
-                        .map_err(map_storage_error)?;
+                    //
+                    // Empty `end` means "unbounded upper" per the
+                    // engine-neutral DeleteRange contract (matches
+                    // bbolt's `len(end) == 0` semantics). Splitting
+                    // the branches here because a `[]..[]` half-open
+                    // range is the empty range on redb, while we want
+                    // "delete everything from `start` onward".
+                    if end.is_empty() {
+                        table
+                            .retain_in::<&[u8], _>(start.as_slice().., |_, _| false)
+                            .map_err(map_storage_error)?;
+                    } else {
+                        table
+                            .retain_in::<&[u8], _>(start.as_slice()..end.as_slice(), |_, _| false)
+                            .map_err(map_storage_error)?;
+                    }
                 }
             }
         }
