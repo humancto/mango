@@ -620,8 +620,12 @@ name = "mango-storage"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "madsim",
+ "madsim-tokio",
+ "parking_lot",
  "raft-engine",
  "redb",
+ "tempfile",
  "thiserror 2.0.18",
 ]
 

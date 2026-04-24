@@ -50,7 +50,7 @@ crates = ["mango-loom-demo"]
 # (Cargo does not validate metadata contents) — the regression
 # test is `scripts/madsim-scripts-test.sh`.
 [workspace.metadata.mango.madsim]
-crates = ["mango-madsim-demo"]
+crates = ["mango-madsim-demo", "mango-storage"]
 
 # Exact-version pin for loom. Env-var semantics (LOOM_MAX_PREEMPTIONS,
 # LOOM_MAX_BRANCHES, etc.) and model behavior can drift between minor
@@ -169,6 +169,13 @@ authors = ["mango contributors"]
 [workspace.lints.rust]
 unsafe_code = "forbid"
 unreachable_pub = "warn"
+# `--cfg madsim` is the ecosystem-standard activation mechanism
+# (see docs/madsim.md). Registering it at the workspace level lets
+# any crate carry `#[cfg(madsim)]` / `#[cfg(not(madsim))]` gates
+# without tripping `unexpected_cfgs`. No-op for crates that do not
+# reference the cfg. mango-madsim-demo opts out of workspace lints
+# entirely and declares this locally; every other crate inherits.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(madsim)"] }
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
