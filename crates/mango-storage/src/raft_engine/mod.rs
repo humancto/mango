@@ -40,7 +40,7 @@
 
 use std::future::Future;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -126,6 +126,18 @@ struct Inner {
     /// concurrent in-flight operations see one consistent "closed"
     /// cut.
     closed: AtomicBool,
+    /// Index of the most recently installed snapshot (0 when no
+    /// snapshot has been installed). Consulted by [`Self::first_index`]
+    /// and [`Self::last_index`] so the trait's
+    /// "`first_index() == snapshot.index + 1` after install" contract
+    /// holds even when all log entries have been compacted out.
+    ///
+    /// raft-engine itself has no notion of a snapshot cursor — its
+    /// `first_index` / `last_index` only report the bounds of extant
+    /// log entries. We persist the cursor alongside the snapshot
+    /// metadata under [`SNAPSHOT_META_KEY`] and cache it here to keep
+    /// index lookups O(1) on the hot path.
+    snapshot_index: AtomicU64,
     /// Data directory; captured at open time for error messages and
     /// future diagnostics. Intentionally unused on the hot path.
     #[allow(dead_code)]
@@ -145,10 +157,21 @@ impl RaftEngineLogStore {
         let data_dir = cfg.data_dir.clone();
         let engine_cfg = cfg.into_engine_config();
         let engine = ::raft_engine::Engine::open(engine_cfg).map_err(map_engine_error)?;
+
+        // Recover the snapshot cursor from SNAPSHOT_META_KEY so
+        // `first_index` / `last_index` honor the
+        // "install_snapshot → first_index == snap.index+1" invariant
+        // across restarts.
+        let snap_proto: Option<::raft::eraftpb::SnapshotMetadata> = engine
+            .get_message(RAFT_GROUP_ID, SNAPSHOT_META_KEY)
+            .map_err(map_engine_error)?;
+        let snapshot_index = snap_proto.map_or(0, |p| p.index);
+
         Ok(Self {
             inner: Arc::new(Inner {
                 engine: Mutex::new(Some(Arc::new(engine))),
                 closed: AtomicBool::new(false),
+                snapshot_index: AtomicU64::new(snapshot_index),
                 data_dir,
             }),
         })
@@ -236,11 +259,14 @@ impl RaftEngineLogStore {
         };
 
         // Strict consecutivity: first.index == last_index + 1.
-        // Truncation lives in Phase 3 (see module docstring).
-        let expected = engine
-            .last_index(RAFT_GROUP_ID)
-            .unwrap_or(0)
-            .wrapping_add(1);
+        // `last_index` here is the trait-level last_index (max of the
+        // engine's last entry and any installed-snapshot cursor), so
+        // the first post-snapshot append after an empty-log reopen
+        // expects `snapshot.index + 1` rather than `1`. Truncation
+        // lives in Phase 3 (see module docstring).
+        let engine_last = engine.last_index(RAFT_GROUP_ID).unwrap_or(0);
+        let snap_last = self.inner.snapshot_index.load(Ordering::Acquire);
+        let expected = engine_last.max(snap_last).wrapping_add(1);
         if first.index != expected {
             return Err(BackendError::Other(format!(
                 "non-consecutive append: expected index {expected}, got {actual}",
@@ -311,10 +337,14 @@ impl RaftLogStore for RaftEngineLogStore {
         if low == high {
             return Ok(Vec::new());
         }
+        // Range bounds are checked against the engine's actual entry
+        // bounds (NOT the snapshot-adjusted trait-level indices) —
+        // reading entries that have been compacted out must fail
+        // even if `first_index()` reports them as notionally present
+        // (post-snapshot, `first_index() == snap.index + 1` but the
+        // engine may have nothing to return).
         let first = engine.first_index(RAFT_GROUP_ID).unwrap_or(0);
         let last = engine.last_index(RAFT_GROUP_ID).unwrap_or(0);
-        // `first_index` is `None` iff no entries exist; in that case
-        // `first == 0` and any non-empty range is out of bounds.
         if first == 0 || low < first || high > last.wrapping_add(1) {
             return Err(BackendError::InvalidRange(
                 "range outside [first_index, last_index+1]",
@@ -332,12 +362,30 @@ impl RaftLogStore for RaftEngineLogStore {
 
     fn last_index(&self) -> Result<u64, BackendError> {
         let engine = self.engine_handle()?;
-        Ok(engine.last_index(RAFT_GROUP_ID).unwrap_or(0))
+        // Max of the engine's reported last entry and any installed
+        // snapshot cursor, so the
+        // "`last_index() >= snapshot.index` after install" invariant
+        // holds even when all log entries have been compacted out.
+        let engine_last = engine.last_index(RAFT_GROUP_ID).unwrap_or(0);
+        let snap_last = self.inner.snapshot_index.load(Ordering::Acquire);
+        Ok(engine_last.max(snap_last))
     }
 
     fn first_index(&self) -> Result<u64, BackendError> {
         let engine = self.engine_handle()?;
-        Ok(engine.first_index(RAFT_GROUP_ID).unwrap_or(0))
+        // If the engine has any extant entries, its first_index is
+        // authoritative (it is always `>= snap_index + 1` because
+        // install_snapshot compacts through `snap_index`). When the
+        // engine is empty post-snapshot, fall through to
+        // `snap_index + 1` so the trait's
+        // "`first_index() == snapshot.index + 1` after install"
+        // invariant holds.
+        let engine_first = engine.first_index(RAFT_GROUP_ID);
+        if let Some(idx) = engine_first {
+            return Ok(idx);
+        }
+        let snap = self.inner.snapshot_index.load(Ordering::Acquire);
+        Ok(if snap == 0 { 0 } else { snap.wrapping_add(1) })
     }
 
     fn compact(&self, idx: u64) -> impl Future<Output = Result<(), BackendError>> + Send {
@@ -372,6 +420,7 @@ impl RaftLogStore for RaftEngineLogStore {
             let idx = snapshot.index;
             Ok((engine, proto, idx))
         })();
+        let inner = self.inner.clone();
 
         async move {
             let (engine, proto, idx) = prologue?;
@@ -380,9 +429,16 @@ impl RaftLogStore for RaftEngineLogStore {
                 batch
                     .put_message(RAFT_GROUP_ID, SNAPSHOT_META_KEY.to_vec(), &proto)
                     .map_err(map_engine_error)?;
+                // `Command::Compact { index: N }` removes entries with
+                // `idx < N`. To discard every entry AT OR BEFORE
+                // `snapshot.index` (per the trait contract: entries
+                // strictly before `snapshot.index + 1` may be
+                // discarded), pass `snapshot.index + 1`.
                 batch.add_command(
                     RAFT_GROUP_ID,
-                    ::raft_engine::Command::Compact { index: idx },
+                    ::raft_engine::Command::Compact {
+                        index: idx.wrapping_add(1),
+                    },
                 );
                 engine
                     .write(&mut batch, /*sync=*/ true)
@@ -390,7 +446,23 @@ impl RaftLogStore for RaftEngineLogStore {
                     .map_err(map_engine_error)
             })
             .await
-            .map_err(|e| map_join_error(&e))?
+            .map_err(|e| map_join_error(&e))??;
+
+            // Cache the cursor only after the durable write succeeded.
+            // Monotonic update: never regress on a stale install.
+            let mut cur = inner.snapshot_index.load(Ordering::Acquire);
+            while idx > cur {
+                match inner.snapshot_index.compare_exchange_weak(
+                    cur,
+                    idx,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => break,
+                    Err(observed) => cur = observed,
+                }
+            }
+            Ok(())
         }
     }
 
