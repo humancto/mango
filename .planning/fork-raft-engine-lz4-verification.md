@@ -95,6 +95,45 @@ Retirement steps (in order):
 6. Archive `humancto/raft-engine` repo (GitHub → Settings → Danger
    Zone → Archive) so it cannot drift.
 
+## What if upstream rejects the approach or stalls
+
+The retirement plan above assumes PR #397 merges. Two other
+endings need named handling:
+
+### (a) #397 closed without merge, upstream proposes a different shape
+
+If TiKV maintainers reject the Cargo-feature approach in favor of
+a different upstream shape (e.g. a runtime `Config::enable_lz4`
+knob, or a separate `raft-engine-core` crate split):
+
+1. Engage upstream on the accepted shape; open a fresh fork branch
+   built from that direction.
+2. Update this file: replace `Fork branch`, `Fork SHA`, and
+   `Upstream PR` rows to point at the new tracking PR. Mark the
+   old #397 state as "Closed, superseded by #NNN" in a "Historical"
+   section at the bottom.
+3. Retirement now keys on the replacement PR merging, following
+   the same six steps as the primary retirement plan.
+
+### (b) #397 stalls for 12+ months with no maintainer engagement
+
+Matches ADR 0002 §W4's "pre-1.0 / stale on crates.io" escape
+hatch. If the fork's only deviation from upstream is still the
+feature gate and no mango code depends on any internals that
+upstream hasn't addressed:
+
+1. Escalate to §W4 escape hatch (b): vendor the pinned fork SHA
+   under `crates/vendored-raft-engine/` with a CODEOWNERS stanza
+   forcing maintainer review.
+2. Mango's workspace dep flips from `git = ...` to `path = "crates/vendored-raft-engine"`.
+3. Archive `humancto/raft-engine` — no further rebases.
+4. Annotate this file: "Status: vendored. See `crates/vendored-raft-engine/`."
+
+This is the "upstream is functionally dead for our use case" exit.
+Do not do this before the 12-month mark without explicit
+discussion — vendoring a 20 kLOC storage engine is not a decision
+to take lightly.
+
 ## Rebase policy while the fork lives
 
 If mango needs a newer upstream SHA before #397 merges:
@@ -110,12 +149,31 @@ If mango needs a newer upstream SHA before #397 merges:
 
 ## Supply-chain audit posture
 
-The fork is public, pinned by SHA (not tag, not branch), and has zero
-`unsafe` additions on top of upstream. `cargo vet` handles the fork
-the same way it handles any git-pinned crate — the exemption is on
-`raft-engine` regardless of origin. When retiring the fork, the
-exemption continues to apply against the new upstream SHA without
-edits (same crate name, same version `0.4.2`).
+The fork is public, pinned by SHA (not tag, not branch), and adds
+zero `unsafe` tokens on top of upstream. `cargo vet` keys
+exemptions on `(crate_name, crate_version)` — both the fork and
+upstream ship `package.version = "0.4.2"`, so the same
+`[[exemptions.raft-engine]] version = "0.4.2"` entry in
+`supply-chain/config.toml` covers both while the fork is active
+and after retirement.
+
+Caveats that change this:
+
+1. **Patch-version bumps are not auto-covered.** If either the
+   fork or upstream bumps `package.version` (raft-engine
+   historically bumps on master without publishing to crates.io
+   — see ADR 0002 §B3), the exemption stops matching and needs
+   a new `version = "0.4.3"` line. Watch for this on rebase.
+2. **SHA swaps are silent to vet.** `cargo vet` verifies the
+   resolved git hash against the locked source, but the hash is
+   not part of exemption identity. Changing the fork SHA without
+   bumping `package.version` requires no vet edits.
+3. **`review-by` is a mango convention, not a vet behavior.**
+   Mango annotates every exemption with a `review-by: YYYY-MM-DD`
+   note. Those dates do not auto-regenerate on source change.
+   When rebasing the fork OR retiring to upstream, manually
+   refresh the `review-by` date on the `raft-engine` exemption
+   to reflect that the code under review changed.
 
 ## Last updated
 
