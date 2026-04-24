@@ -733,7 +733,14 @@ func opSnapshot(st *state, _ *request) response {
 	out := make(map[string][][2]string)
 	err := st.db.View(func(tx *bolt.Tx) error {
 		return tx.ForEach(func(name []byte, b *bolt.Bucket) error {
-			var bucketEntries [][2]string
+			// Initialize to an empty slice (not nil) so JSON
+			// marshals empty buckets as `[]`, not `null`. The
+			// Rust harness decodes the snapshot via
+			// `Value::as_array()` and would reject `null` as a
+			// protocol error; keeping the wire shape uniformly
+			// "array of pairs, possibly empty" is the framing
+			// contract.
+			bucketEntries := [][2]string{}
 			if cerr := b.ForEach(func(k, v []byte) error {
 				bucketEntries = append(bucketEntries, [2]string{encode64(k), encode64(v)})
 				return nil

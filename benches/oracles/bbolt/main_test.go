@@ -14,6 +14,7 @@ package main
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"path/filepath"
 	"testing"
 )
@@ -310,6 +311,53 @@ func TestSnapshotCapturesAllBuckets(t *testing.T) {
 	}
 	if len(r.State["b2"]) != 1 || r.State["b2"][0][0] != b64("y") {
 		t.Fatalf("snapshot b2: %v", r.State["b2"])
+	}
+}
+
+// TestSnapshotEmptyBucketMarshalsAsArray guards the invariant that
+// an empty registered bucket serializes to `[]`, not `null`. The
+// Rust differential harness decodes the `state` object with
+// `Value::as_array()` and treats `null` as a framing error —
+// silently letting empty buckets through would make the Rust side
+// reject every snapshot that includes a registered-but-empty
+// bucket (the common case early in a case's op sequence before
+// any writes target that bucket).
+func TestSnapshotEmptyBucketMarshalsAsArray(t *testing.T) {
+	st := openedState(t)
+	_ = dispatch(st, &request{Op: "bucket", Name: "b2"})
+	_ = dispatch(st, &request{Op: "bucket", Name: "b3"})
+
+	// Write only into b1; leave b2 and b3 registered but empty.
+	_ = dispatch(st, &request{Op: "begin"})
+	_ = dispatch(st, &request{Op: "put", Bucket: "b1", Key: b64("k"), Value: b64("v")})
+	_ = dispatch(st, &request{Op: "commit"})
+
+	r := dispatch(st, &request{Op: "snapshot"})
+	if !r.OK {
+		t.Fatalf("snapshot: %q", r.Error)
+	}
+	// Round-trip through json to observe the wire shape. Asserting
+	// on the in-memory `[][2]string` would hide the `nil`→`null`
+	// marshaling bug this test was written to catch.
+	bytes, err := json.Marshal(r)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var decoded struct {
+		State map[string]json.RawMessage `json:"state"`
+	}
+	if err := json.Unmarshal(bytes, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for _, bucket := range []string{"b1", "b2", "b3"} {
+		raw, ok := decoded.State[bucket]
+		if !ok {
+			t.Fatalf("snapshot missing bucket %q; state=%s", bucket, string(bytes))
+		}
+		if string(raw) == "null" {
+			t.Fatalf("snapshot bucket %q serialized as null (want []); state=%s",
+				bucket, string(bytes))
+		}
 	}
 }
 
