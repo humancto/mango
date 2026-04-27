@@ -60,11 +60,14 @@
     clippy::too_many_lines
 )]
 
-use std::collections::BTreeMap;
-use std::io::{self, BufRead, BufReader, BufWriter, Write};
+use std::collections::{BTreeMap, VecDeque};
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use parking_lot::Mutex;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
@@ -97,6 +100,14 @@ const ORACLE_REL: &str = "../../benches/oracles/bbolt/bbolt-oracle";
 /// `BufReader` capacity is `16 MiB` to match the oracle's
 /// `bufio.Scanner` buffer — realistic `snapshot` responses over
 /// ~1K keys can exceed the default 64 KiB.
+///
+/// Stderr is captured into [`StderrDrainer`] — a 1 MiB ring-buffer
+/// fed by a non-joining background thread (plan §9 commit 9 step 4).
+/// Snapshots of the buffer feed `stderr.log` in failure-artifact
+/// dumps. Crucially the drainer must keep up with the child's writes:
+/// the OS pipe (~64 KiB on Linux) is the real backpressure layer; if
+/// the drainer stalls, the child blocks on write once the kernel
+/// pipe fills.
 struct GoOracle {
     child: Child,
     stdin: BufWriter<ChildStdin>,
@@ -105,22 +116,40 @@ struct GoOracle {
     /// back verbatim by the oracle so we can detect reply-skew; the
     /// harness otherwise does not rely on it.
     next_id: u64,
+    /// Shared ring-buffer of the child's stderr bytes. Cloned into
+    /// the drainer thread; the thread never joins (see plan §9
+    /// commit 9 step 4: joining from `Drop` risks a deadlock if the
+    /// kernel hasn't closed the pipe yet). The thread exits naturally
+    /// when the child's stderr closes on kill/wait. Read by
+    /// [`GoOracle::stderr_snapshot`] (used in the failure-artifact
+    /// dump path landing in plan §9 commit 9 step 3 on this branch).
+    stderr_buf: Arc<Mutex<VecDeque<u8>>>,
 }
+
+/// Soft cap on the captured-stderr ring buffer. 1 MiB is enough to
+/// hold the tail of any reasonable Go panic + stack trace; the
+/// drainer's `pop_front` eviction loop bounds memory at that size
+/// regardless of how chatty the child gets. See
+/// [`spawn_stderr_drainer`].
+const STDERR_RING_CAP: usize = 1 << 20;
 
 impl GoOracle {
     /// Spawn the oracle and send the initial `open` request at
     /// `db_path` with the given fsync bit.
     ///
-    /// Stderr is inherited — any Go-side panic or log line surfaces
-    /// in the `cargo test` output immediately. We do NOT capture
-    /// stderr because it can block the child if the harness
-    /// never reads it (classic unbounded-pipe deadlock).
+    /// Stderr is captured via `Stdio::piped()` into a bounded ring
+    /// buffer (see [`STDERR_RING_CAP`] and the type-level docs).
+    /// We do NOT inherit stderr — capturing lets divergence reports
+    /// snapshot the child's stderr at failure time without depending
+    /// on `cargo test --nocapture` interleaving. The drainer thread
+    /// must keep up to avoid pipe-fill back-pressure on the child;
+    /// see the inline comment on the read loop.
     fn spawn(binary: &Path, db_path: &Path, fsync: bool) -> io::Result<Self> {
         let mut child = Command::new(binary)
             .args(["--mode=diff"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::piped())
             .spawn()?;
         let stdin = BufWriter::new(
             child
@@ -135,11 +164,20 @@ impl GoOracle {
                 .take()
                 .ok_or_else(|| io::Error::other("child stdout pipe missing"))?,
         );
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| io::Error::other("child stderr pipe missing"))?;
+        let stderr_buf: Arc<Mutex<VecDeque<u8>>> =
+            Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_RING_CAP)));
+        spawn_stderr_drainer(stderr, Arc::clone(&stderr_buf));
+
         let mut oracle = Self {
             child,
             stdin,
             stdout,
             next_id: 0,
+            stderr_buf,
         };
         let resp = oracle.call(&json!({
             "op": "open",
@@ -148,6 +186,21 @@ impl GoOracle {
         }))?;
         require_ok(&resp, "open")?;
         Ok(oracle)
+    }
+
+    /// Snapshot the captured stderr ring buffer. Cheap (one mutex
+    /// acquire + bytewise copy under `STDERR_RING_CAP`). The buffer
+    /// is shared with the drainer thread, so concurrent writes from
+    /// the child between the `lock` and `unlock` simply land *after*
+    /// the snapshot — at-most-one-eviction lag is acceptable for
+    /// a divergence dump.
+    #[expect(
+        dead_code,
+        reason = "consumed by the failure-artifact dump path landing in plan §9 commit 9 step 3 on this branch"
+    )]
+    fn stderr_snapshot(&self) -> Vec<u8> {
+        let g = self.stderr_buf.lock();
+        g.iter().copied().collect()
     }
 
     /// Send one JSON request, read one JSON response. The request
@@ -173,6 +226,51 @@ impl GoOracle {
         }
         serde_json::from_str(buf.trim_end()).map_err(io::Error::other)
     }
+}
+
+/// Spin up a non-joining drainer thread that reads from `stderr` in
+/// 4 KiB chunks and pushes bytes into the shared ring buffer.
+/// Eviction policy: after every push, while the buffer length
+/// exceeds [`STDERR_RING_CAP`], `pop_front` until back under the
+/// cap. `VecDeque::pop_front` is O(1) amortized, unlike a
+/// `Vec::drain` pattern that's O(n) per write and pathologizes on
+/// bursty stderr (rust-expert NIT-4b on the PR-B plan).
+///
+/// The thread is detached. It exits naturally when the child closes
+/// its stderr on `kill`/`wait`. Joining from `Drop` would risk a
+/// deadlock if the kernel hasn't yet closed the pipe at the moment
+/// we want to reap the child. The `Arc` keeps the buffer alive past
+/// the thread for late `stderr_snapshot` reads from divergence
+/// reports.
+///
+/// Pipe back-pressure ≠ user-space cap: the OS pipe (~64 KiB on
+/// Linux) is the real flow-control point. If this thread stops
+/// reading, the child blocks on write once the kernel pipe fills,
+/// which would deadlock the protocol — so the loop is tight, with
+/// the lock held only across the push + eviction (no I/O under the
+/// lock).
+fn spawn_stderr_drainer(mut stderr: ChildStderr, buf: Arc<Mutex<VecDeque<u8>>>) {
+    std::thread::Builder::new()
+        .name("bbolt-oracle-stderr".into())
+        .spawn(move || {
+            let mut chunk = [0u8; 4096];
+            loop {
+                match stderr.read(&mut chunk) {
+                    // EOF (Ok(0)) and pipe-broken (Err) both mean
+                    // the child's stderr has closed; the drainer has
+                    // nothing left to do and exits naturally.
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => {
+                        let mut g = buf.lock();
+                        g.extend(chunk[..n].iter().copied());
+                        while g.len() > STDERR_RING_CAP {
+                            g.pop_front();
+                        }
+                    }
+                }
+            }
+        })
+        .expect("spawn stderr drainer thread");
 }
 
 impl Drop for GoOracle {
