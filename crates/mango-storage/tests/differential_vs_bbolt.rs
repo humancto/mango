@@ -2215,6 +2215,65 @@ fn proptest_256_cases_no_divergence() {
         .unwrap_or_else(|e| panic!("proptest divergence: {e}"));
 }
 
+/// Replay every committed regression seed under
+/// `tests/differential_vs_bbolt/seeds/*.json` before any
+/// proptest-sampled case runs in CI. A seed is the minimized op
+/// sequence for a previously-observed divergence; replaying it on
+/// every PR guarantees the same bug cannot regress without the test
+/// suite catching it on the very first run, regardless of proptest
+/// seeding luck.
+///
+/// Empty-directory contract: at this commit no divergences have been
+/// recorded, so the seeds directory contains only `README.md`. The
+/// `.json` filter yields zero entries and the test passes
+/// trivially. The directory itself is committed so git keeps it
+/// alive — see `seeds/README.md` for the format spec and the rules
+/// for adding/pruning seeds.
+///
+/// Skip semantics: gated on `skip_without_oracle` because every seed
+/// re-runs the full `run_case` pipeline (oracle subprocess + redb
+/// backend + snapshot diff). Without the bbolt binary the test is
+/// inert and skips with a printed message, matching every other
+/// oracle-driven test in this file.
+///
+/// Ordering: seeds are sorted by path so the failure output is
+/// deterministic across runs (filesystem `read_dir` does not
+/// guarantee order).
+#[test]
+fn replay_committed_seeds() {
+    let Some(binary) = skip_without_oracle("replay_committed_seeds") else {
+        return;
+    };
+    let seeds_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("differential_vs_bbolt")
+        .join("seeds");
+    if !seeds_dir.exists() {
+        // Directory was removed in a hand edit — not a test failure
+        // by itself, but worth surfacing in the log so a contributor
+        // notices before the next divergence has nowhere to land.
+        eprintln!(
+            "replay_committed_seeds: seeds dir missing at {}; skipping",
+            seeds_dir.display()
+        );
+        return;
+    }
+    let mut seeds: Vec<PathBuf> = std::fs::read_dir(&seeds_dir)
+        .unwrap_or_else(|e| panic!("read_dir {}: {e}", seeds_dir.display()))
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("json"))
+        .collect();
+    seeds.sort();
+    for seed in &seeds {
+        let bytes = std::fs::read(seed).unwrap_or_else(|e| panic!("read {}: {e}", seed.display()));
+        let ops: Vec<DiffOp> = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|e| panic!("parse {}: {e}", seed.display()));
+        run_case(&binary, &ops)
+            .unwrap_or_else(|e| panic!("seed {} reproduced divergence: {e}", seed.display()));
+    }
+}
+
 /// Unit test for `Divergence::dump_to` — exercised independently of
 /// the live oracle so the artifact-write contract has a fast,
 /// deterministic regression even when no bbolt binary is installed
