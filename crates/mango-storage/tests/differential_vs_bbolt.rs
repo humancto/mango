@@ -1543,6 +1543,83 @@ fn smoke_10_ops_no_divergence() {
     run_case(&binary, &ops).expect("smoke 10 ops diverged");
 }
 
+/// Deterministic regression test for every advanced op variant
+/// (`CommitGroup`, `CloseReopen`, `Defragment`, `PutNilKey`).
+/// Independent of proptest — guarantees these paths are exercised
+/// every test run even if a proptest config change zeros their
+/// weights. Each op is followed by enough state-mutating context
+/// to make a divergence observable (writes before/after, a final
+/// commit + snapshot diff).
+#[test]
+fn smoke_advanced_ops_no_divergence() {
+    let Some(binary) = skip_without_oracle("smoke_advanced_ops_no_divergence") else {
+        return;
+    };
+    let ops = vec![
+        // Seed: two committed keys so Defragment/CloseReopen have
+        // real state to preserve.
+        DiffOp::Put {
+            bucket: 0,
+            key: b"k1".to_vec(),
+            value: b"v1".to_vec(),
+        },
+        DiffOp::Put {
+            bucket: 1,
+            key: b"k2".to_vec(),
+            value: b"v2".to_vec(),
+        },
+        DiffOp::Commit { fsync: false },
+        // PutNilKey: both engines must reject with normalized
+        // "empty key". A successful put on either side is divergence.
+        DiffOp::PutNilKey {
+            bucket: 0,
+            value: b"v".to_vec(),
+        },
+        DiffOp::Commit { fsync: false },
+        // CommitGroup with a non-empty multi-batch group.
+        DiffOp::CommitGroup {
+            batches: vec![
+                vec![
+                    GroupOp::Put {
+                        bucket: 0,
+                        key: b"g1".to_vec(),
+                        value: b"a".to_vec(),
+                    },
+                    GroupOp::Delete {
+                        bucket: 0,
+                        key: b"k1".to_vec(),
+                    },
+                ],
+                vec![GroupOp::Put {
+                    bucket: 2,
+                    key: b"g2".to_vec(),
+                    value: b"b".to_vec(),
+                }],
+            ],
+            fsync: false,
+        },
+        // CommitGroup edge case: empty outer Vec is a legal no-op.
+        DiffOp::CommitGroup {
+            batches: vec![],
+            fsync: false,
+        },
+        // Defragment: post-state must remain byte-identical.
+        DiffOp::Defragment,
+        // CloseReopen: durability across a "process restart". The
+        // committed state from above must survive intact.
+        DiffOp::CloseReopen,
+        // Final write + commit so the snapshot-diff has a fresh
+        // mutation to compare across the full op sequence.
+        DiffOp::Put {
+            bucket: 1,
+            key: b"k3".to_vec(),
+            value: b"v3".to_vec(),
+        },
+        DiffOp::Commit { fsync: false },
+    ];
+    run_case(&binary, &ops).expect("smoke advanced ops diverged");
+}
+
 /// Proptest-driven 256-case (default) / 10k-case (thorough) sweep.
 ///
 /// Every generated sequence ends in `Commit`, so the terminal op
