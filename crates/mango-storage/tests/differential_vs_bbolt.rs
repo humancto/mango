@@ -371,6 +371,13 @@ enum DiffOp {
     /// snapshot diff: post-reopen state must be byte-identical
     /// between engines.
     CloseReopen,
+    /// Attempt to put with an empty key. Both engines must reject
+    /// at stage time with their respective "empty key" error variants
+    /// (`backend: empty key` on redb, `app: Put: key required` on
+    /// bbolt) which `normalize_err` collapses to the shared
+    /// `"empty key"`. No batch state changes on either side — the
+    /// staging-time rejection means the pending txn is unaffected.
+    PutNilKey { bucket: u8, value: Vec<u8> },
 }
 
 /// Mutable per-case state threaded through [`apply_op`]. Tracks the
@@ -752,6 +759,46 @@ fn apply_op(
             snapshot_and_diff(redb, oracle)?;
             Ok(())
         }
+        DiffOp::PutNilKey { bucket, value } => {
+            ensure_txn(case, state)?;
+            let bucket_id = bucket_id_of(*bucket);
+            let bucket_name = bucket_name_of(*bucket);
+            let redb_res = state
+                .pending
+                .as_mut()
+                .expect("ensure_txn left pending unset")
+                .put(bucket_id, b"", value);
+            let resp = case
+                .oracle_mut()
+                .call(&json!({
+                    "op":"put","bucket":bucket_name,
+                    "key":b64(b""),"value":b64(value),
+                }))
+                .map_err(|e| format!("oracle put_nil_key: {e}"))?;
+            let oracle_err = oracle_error(&resp);
+            match (redb_res, oracle_err) {
+                (Err(e), Some(oe)) => {
+                    let redb_norm = normalize_err(&e.to_string());
+                    let oracle_norm = normalize_err(&oe);
+                    if redb_norm != oracle_norm {
+                        return Err(format!(
+                            "symmetric put_nil_key error but normalized strings diverge: \
+                             redb={redb_norm:?} (raw={e}), oracle={oracle_norm:?} (raw={oe})"
+                        ));
+                    }
+                    Ok(())
+                }
+                (Ok(()), None) => {
+                    Err("divergence on put_nil_key: both engines accepted an empty key".to_owned())
+                }
+                (Ok(()), Some(oe)) => Err(format!(
+                    "divergence on put_nil_key: redb accepted, oracle rejected ({oe})"
+                )),
+                (Err(e), None) => Err(format!(
+                    "divergence on put_nil_key: redb rejected ({e}), oracle accepted"
+                )),
+            }
+        }
         DiffOp::CloseReopen => {
             // Discard the pending batch on the Rust side — close
             // throws away any uncommitted state on the oracle child
@@ -963,26 +1010,34 @@ fn close_reopen_strat() -> Just<DiffOp> {
     Just(DiffOp::CloseReopen)
 }
 
+/// Generates a `PutNilKey` op — empty key, non-empty value, random
+/// bucket. Pinned to value-`1..=16` (the same key alphabet) so the
+/// rejection path is the only error axis under test.
+fn put_nil_key_strat() -> impl Strategy<Value = DiffOp> {
+    (bucket_idx(), value_bytes()).prop_map(|(bucket, value)| DiffOp::PutNilKey { bucket, value })
+}
+
 /// Per-op strategy. Weights derived from plan §3 by zeroing the op
-/// classes that don't yet exist (`CommitGroup`, `Defragment`,
-/// error-triggering) and renormalizing.
+/// classes that don't yet exist (`CommitGroup`, `Defragment`) and
+/// renormalizing.
 ///
-/// Put 49 / Delete 19 / `DeleteRange` 5 / Commit 20 / Rollback 5 /
-/// `CloseReopen` 2 = total 100. `CloseReopen` weight is small on
-/// purpose: each fires drops both engine handles and respawns a Go
-/// subprocess (~50 ms), so heavy oversampling would dominate runtime
-/// without proportional bug-finding power. Two percent over a
-/// length-1..=40 sequence yields ~0.8 close-reopen events per case
-/// on average — enough to exercise the path frequently across the
-/// 256-case sweep without blowing past the 60 s budget.
+/// Put 47 / Delete 19 / `DeleteRange` 5 / Commit 20 / Rollback 5 /
+/// `CloseReopen` 2 / `PutNilKey` 2 = total 100. `CloseReopen` weight
+/// is small on purpose (~50 ms per fire on subprocess respawn);
+/// `PutNilKey` is small because every fire is a guaranteed
+/// rejection-path test — diminishing returns past one or two per
+/// case. Two percent over a length-1..=40 sequence yields ~0.8
+/// fires per case on average — enough to exercise both error and
+/// durability axes frequently without blowing past the 60 s budget.
 fn op_strat() -> impl Strategy<Value = DiffOp> {
     prop_oneof![
-        49 => put_strat(),
+        47 => put_strat(),
         19 => delete_strat(),
         5  => delete_range_strat(),
         20 => commit_strat(),
         5  => rollback_strat(),
         2  => close_reopen_strat(),
+        2  => put_nil_key_strat(),
     ]
 }
 
