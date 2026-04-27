@@ -61,6 +61,7 @@
 )]
 
 use std::collections::{BTreeMap, VecDeque};
+use std::fmt::Write as _;
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
@@ -194,10 +195,6 @@ impl GoOracle {
     /// the child between the `lock` and `unlock` simply land *after*
     /// the snapshot — at-most-one-eviction lag is acceptable for
     /// a divergence dump.
-    #[expect(
-        dead_code,
-        reason = "consumed by the failure-artifact dump path landing in plan §9 commit 9 step 3 on this branch"
-    )]
     fn stderr_snapshot(&self) -> Vec<u8> {
         let g = self.stderr_buf.lock();
         g.iter().copied().collect()
@@ -693,6 +690,27 @@ impl Case {
         )
     }
 
+    /// Path to bbolt's on-disk database file. Stable across
+    /// `close_and_reopen` because the `bbolt_dir` `TempDir` is
+    /// preserved across the cycle.
+    fn bbolt_db_path(&self) -> PathBuf {
+        self.bbolt_dir
+            .as_ref()
+            .expect("bbolt_dir slot non-empty")
+            .path()
+            .join("oracle.db")
+    }
+
+    /// Path to redb's tempdir. Caller copies every flat file beneath
+    /// it on the failure-artifact path.
+    fn redb_dir_path(&self) -> PathBuf {
+        self.redb_dir
+            .as_ref()
+            .expect("redb_dir slot non-empty")
+            .path()
+            .to_path_buf()
+    }
+
     /// Drop both engine handles, then respawn against the same on-disk
     /// state. Tests that durable writes survive a "process restart"
     /// (plan §3 axis B6 / §9 commit 8 step 5).
@@ -832,7 +850,7 @@ fn apply_op(
     case: &mut Case,
     state: &mut RunState,
     op: &DiffOp,
-) -> Result<(), String> {
+) -> Result<(), OpError> {
     match op {
         DiffOp::Put { bucket, key, value } => {
             ensure_txn(case, state)?;
@@ -918,17 +936,21 @@ fn apply_op(
                     let redb_norm = normalize_err(&e.to_string());
                     let oracle_norm = normalize_err(&oe);
                     if redb_norm != oracle_norm {
-                        return Err(format!(
+                        return Err(OpError::Other(format!(
                             "symmetric commit error but normalized strings diverge: \
                              redb={redb_norm:?} (raw={e}), oracle={oracle_norm:?} (raw={oe})"
-                        ));
+                        )));
                     }
                 }
                 (Ok(_), Some(oe)) => {
-                    return Err(format!("divergence on commit: redb ok, oracle err={oe}"));
+                    return Err(OpError::Other(format!(
+                        "divergence on commit: redb ok, oracle err={oe}"
+                    )));
                 }
                 (Err(e), None) => {
-                    return Err(format!("divergence on commit: redb err={e}, oracle ok"));
+                    return Err(OpError::Other(format!(
+                        "divergence on commit: redb err={e}, oracle ok"
+                    )));
                 }
             }
             let (redb, oracle) = case.split_redb_and_oracle();
@@ -973,22 +995,22 @@ fn apply_op(
                     let redb_norm = normalize_err(&e.to_string());
                     let oracle_norm = normalize_err(&oe);
                     if redb_norm != oracle_norm {
-                        return Err(format!(
+                        return Err(OpError::Other(format!(
                             "symmetric put_nil_key error but normalized strings diverge: \
                              redb={redb_norm:?} (raw={e}), oracle={oracle_norm:?} (raw={oe})"
-                        ));
+                        )));
                     }
                     Ok(())
                 }
-                (Ok(()), None) => {
-                    Err("divergence on put_nil_key: both engines accepted an empty key".to_owned())
-                }
-                (Ok(()), Some(oe)) => Err(format!(
+                (Ok(()), None) => Err(OpError::Other(
+                    "divergence on put_nil_key: both engines accepted an empty key".to_owned(),
+                )),
+                (Ok(()), Some(oe)) => Err(OpError::Other(format!(
                     "divergence on put_nil_key: redb accepted, oracle rejected ({oe})"
-                )),
-                (Err(e), None) => Err(format!(
+                ))),
+                (Err(e), None) => Err(OpError::Other(format!(
                     "divergence on put_nil_key: redb rejected ({e}), oracle accepted"
-                )),
+                ))),
             }
         }
         DiffOp::CloseReopen => {
@@ -1103,21 +1125,21 @@ fn apply_op(
                     let redb_norm = normalize_err(&e.to_string());
                     let oracle_norm = normalize_err(&oe);
                     if redb_norm != oracle_norm {
-                        return Err(format!(
+                        return Err(OpError::Other(format!(
                             "symmetric commit_group error but normalized strings diverge: \
                              redb={redb_norm:?} (raw={e}), oracle={oracle_norm:?} (raw={oe})"
-                        ));
+                        )));
                     }
                 }
                 (Ok(()), Some(oe)) => {
-                    return Err(format!(
+                    return Err(OpError::Other(format!(
                         "divergence on commit_group: redb ok, oracle err={oe}"
-                    ));
+                    )));
                 }
                 (Err(e), None) => {
-                    return Err(format!(
+                    return Err(OpError::Other(format!(
                         "divergence on commit_group: redb err={e}, oracle ok"
-                    ));
+                    )));
                 }
             }
             let (redb, oracle) = case.split_redb_and_oracle();
@@ -1151,17 +1173,21 @@ fn apply_op(
                     let redb_norm = normalize_err(&e.to_string());
                     let oracle_norm = normalize_err(&oe);
                     if redb_norm != oracle_norm {
-                        return Err(format!(
+                        return Err(OpError::Other(format!(
                             "symmetric defrag error but normalized strings diverge: \
                              redb={redb_norm:?} (raw={e}), oracle={oracle_norm:?} (raw={oe})"
-                        ));
+                        )));
                     }
                 }
                 (Ok(()), Some(oe)) => {
-                    return Err(format!("divergence on defrag: redb ok, oracle err={oe}"));
+                    return Err(OpError::Other(format!(
+                        "divergence on defrag: redb ok, oracle err={oe}"
+                    )));
                 }
                 (Err(e), None) => {
-                    return Err(format!("divergence on defrag: redb err={e}, oracle ok"));
+                    return Err(OpError::Other(format!(
+                        "divergence on defrag: redb err={e}, oracle ok"
+                    )));
                 }
             }
             let (redb, oracle) = case.split_redb_and_oracle();
@@ -1182,6 +1208,223 @@ const RANGE_END_SENTINEL: &[u8] = &[0xff; 17];
 /// materialized via iteration over each registered bucket. Used by
 /// [`snapshot_and_diff`] to compare byte-identically.
 type StateMap = BTreeMap<(String, Vec<u8>), Vec<u8>>;
+
+// ============================================================================
+// Failure-artifact reporting (plan §9 commit 9 step 2)
+// ----------------------------------------------------------------------------
+// On any post-commit-boundary divergence we preserve a self-contained
+// repro under `target/differential-failures/<utc>-<hash8>/` so the
+// next investigator can re-run the exact case against the exact
+// engine state without re-deriving anything from CI logs.
+// ============================================================================
+
+/// One row of disagreement between bbolt's snapshot and redb's
+/// snapshot at a commit boundary. `bbolt_val == None` means "key
+/// absent from bbolt"; same for `redb_val`. Rendered into `diff.txt`
+/// human-readable form; not serde-serialized (the wire artifact is
+/// `ops.json`, not the diff).
+#[derive(Debug, Clone)]
+struct DiffEntry {
+    bucket: String,
+    key: Vec<u8>,
+    bbolt_val: Option<Vec<u8>>,
+    redb_val: Option<Vec<u8>>,
+}
+
+/// Error variant for `apply_op`. Splitting `Divergence` from
+/// `Other` lets `run_case` route the two paths differently:
+/// `Divergence` triggers an artifact dump and a divergence-shaped
+/// error message; `Other` is a harness or oracle fault and passes
+/// through as a plain string. Without this split we'd have to
+/// reverse-engineer the kind from a stringified message at the
+/// `run_case` boundary.
+#[derive(Debug)]
+enum OpError {
+    /// Snapshot diff disagreed at a commit boundary. Carries the
+    /// per-key entries so the caller can dump them.
+    Divergence(Vec<DiffEntry>),
+    /// Anything else: oracle subprocess error, redb engine error,
+    /// JSON build error, normalization mismatch on a symmetric
+    /// failure path. Already a human-readable string by the time
+    /// the inner `?` operator wraps it.
+    Other(String),
+}
+
+impl From<String> for OpError {
+    fn from(s: String) -> Self {
+        Self::Other(s)
+    }
+}
+
+impl std::fmt::Display for OpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Divergence(entries) => {
+                write!(f, "snapshot divergence ({} differing keys)", entries.len())
+            }
+            Self::Other(s) => f.write_str(s),
+        }
+    }
+}
+
+/// A complete failure case: the op sequence that produced the
+/// divergence, the per-key diff at the moment of detection, and a
+/// stable hash of the ops for the artifact dirname. Constructed by
+/// `run_case` on the divergence path; written to disk via `dump_to`.
+struct Divergence {
+    /// FNV-1a-64 hash of the ops sequence in JSON form. Surfaces in
+    /// the dump dirname (first 8 hex chars) so the same op-sequence
+    /// always lands in the same dirname slot, making CI artifact
+    /// upload deterministic across re-runs of the same seed.
+    case_hash: u64,
+    /// The full op sequence run before divergence. Round-trippable
+    /// via the serde derives added in commit 9a.
+    ops: Vec<DiffOp>,
+    /// Per-key disagreements at the commit boundary where divergence
+    /// was first detected. Ordered by `(bucket, key)` ascending.
+    diff: Vec<DiffEntry>,
+}
+
+impl Divergence {
+    /// Hash the JSON-serialized ops with FNV-1a-64. We hand-roll FNV
+    /// rather than pull `sha2` (and its 6 transitives needing supply-
+    /// chain exemptions) because `case_hash` is a developer-facing
+    /// identifier — only 8 hex chars surface in the dirname — not a
+    /// security primitive. See `Cargo.toml` dev-deps comment for the
+    /// deviation rationale.
+    fn new(ops: &[DiffOp], diff: Vec<DiffEntry>) -> Self {
+        let json = serde_json::to_vec(ops).unwrap_or_default();
+        Self {
+            case_hash: fnv1a_64(&json),
+            ops: ops.to_vec(),
+            diff,
+        }
+    }
+
+    /// Write all artifacts under `<root>/<utc-secs>-<hash8>/`:
+    ///
+    /// * `ops.json`   — pretty-printed `Vec<DiffOp>` for replay
+    /// * `oracle.db`  — copy of bbolt's on-disk file
+    /// * `mango.redb` — copy of redb's data file (whichever file in
+    ///   the redb tempdir matches; redb writes a single file)
+    /// * `diff.txt`   — human-readable per-key diff
+    /// * `stderr.log` — bbolt oracle's stderr ring-buffer snapshot
+    ///
+    /// Returns the dirname on success. Errors are surfaced as
+    /// `io::Error` so a partial dump still propagates a useful
+    /// message; we deliberately do NOT swallow them — a silent
+    /// dump-failure on a real divergence would defeat the whole
+    /// point.
+    fn dump_to(
+        &self,
+        root: &Path,
+        bbolt_db: &Path,
+        redb_dir: &Path,
+        stderr: &[u8],
+    ) -> io::Result<PathBuf> {
+        let utc_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let hash8 = format!("{:016x}", self.case_hash);
+        let dirname = format!("{utc_secs}-{}", &hash8[..8]);
+        let dir = root.join(dirname);
+        std::fs::create_dir_all(&dir)?;
+
+        // ops.json — round-trippable via serde derives.
+        let ops_json = serde_json::to_vec_pretty(&self.ops).map_err(io::Error::other)?;
+        std::fs::write(dir.join("ops.json"), ops_json)?;
+
+        // oracle.db — copy by path. bbolt's file lock is released by
+        // the time we get here only if the oracle child is dead;
+        // since `Case` is still alive at dump time, the child still
+        // holds the flock. `fs::copy` on Linux/macOS does not require
+        // exclusive access (just read access on the source), so the
+        // copy succeeds despite the live flock.
+        if bbolt_db.exists() {
+            std::fs::copy(bbolt_db, dir.join("oracle.db"))?;
+        }
+
+        // redb writes a single file inside the dir; copy every flat
+        // file in it (no recursion — the tempdir is flat by
+        // construction in `Case::new`).
+        if redb_dir.exists() {
+            for entry in std::fs::read_dir(redb_dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.is_file() {
+                    let name = entry.file_name();
+                    std::fs::copy(&path, dir.join(name))?;
+                }
+            }
+        }
+
+        // diff.txt — first 100 entries human-readable, base64 for
+        // bytes. 100 is enough to spot a pattern but bounds the
+        // artifact size on pathological multi-MB diffs. `writeln!`
+        // into the String avoids the temporary alloc that
+        // `push_str(&format!(...))` would create per row (clippy
+        // `format_push_string`); the trait import lives at file top.
+        let mut diff_text = String::new();
+        writeln!(
+            &mut diff_text,
+            "DIVERGENCE: {} differing keys (showing up to 100)\n",
+            self.diff.len()
+        )
+        .map_err(io::Error::other)?;
+        for entry in self.diff.iter().take(100) {
+            let key_b64 = BASE64.encode(&entry.key);
+            let bbolt = entry
+                .bbolt_val
+                .as_ref()
+                .map_or_else(|| "<absent>".to_owned(), |v| BASE64.encode(v));
+            let redb = entry
+                .redb_val
+                .as_ref()
+                .map_or_else(|| "<absent>".to_owned(), |v| BASE64.encode(v));
+            writeln!(
+                &mut diff_text,
+                "{}/{key_b64}\n  bbolt: {bbolt}\n  redb:  {redb}",
+                entry.bucket
+            )
+            .map_err(io::Error::other)?;
+        }
+        std::fs::write(dir.join("diff.txt"), diff_text)?;
+
+        // stderr.log — drained ring-buffer snapshot. May be empty if
+        // bbolt was quiet; written unconditionally so the artifact
+        // set is shape-stable.
+        std::fs::write(dir.join("stderr.log"), stderr)?;
+
+        Ok(dir)
+    }
+}
+
+/// FNV-1a-64. Hand-rolled per the supply-chain decision: 8 hex chars
+/// of a developer-facing dirname does not warrant 7 supply-chain
+/// exemptions. Constants are the standardized 64-bit FNV offset
+/// basis (`0xcbf2_9ce4_8422_2325`) and prime (`0x0000_0100_0000_01b3`).
+fn fnv1a_64(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+/// Resolve the `target/differential-failures/` root. Honors
+/// `CARGO_TARGET_TMPDIR`'s parent (workspace target dir) so the
+/// path tracks `CARGO_TARGET_DIR` overrides automatically — nextest,
+/// custom out-of-tree builds, and CI runners that relocate target/
+/// all just work without env-var plumbing.
+fn failure_artifacts_root() -> PathBuf {
+    let tmpdir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    tmpdir
+        .parent()
+        .map_or_else(|| tmpdir.clone(), Path::to_path_buf)
+        .join("differential-failures")
+}
 
 fn full_snapshot_redb(redb: &RedbBackend) -> Result<StateMap, String> {
     let snap = redb.snapshot().map_err(|e| format!("redb snapshot: {e}"))?;
@@ -1242,51 +1485,53 @@ fn full_snapshot_oracle(oracle: &mut GoOracle) -> Result<StateMap, String> {
 }
 
 /// Snapshot both engines at the same logical cut and assert
-/// byte-identical state. Commit 9 layers on artifact preservation
-/// (`target/differential-failures/<case>/{ops,bbolt,redb,diff}`);
-/// for now a plain `Err` with the minimal diff is sufficient — the
-/// proptest runner surfaces the message and the test fails loud.
-fn snapshot_and_diff(redb: &RedbBackend, oracle: &mut GoOracle) -> Result<(), String> {
-    let r = full_snapshot_redb(redb)?;
-    let o = full_snapshot_oracle(oracle)?;
+/// byte-identical state.
+///
+/// Returns `Ok(())` on equality. On disagreement returns
+/// `Err(OpError::Divergence(...))` carrying the per-key diff so
+/// [`run_case`] can dump artifacts before stringifying. Engine /
+/// oracle communication errors (snapshot fetch failures) surface as
+/// `Err(OpError::Other(...))` — those are harness faults, not data
+/// divergences, and must NOT trigger an artifact dump.
+fn snapshot_and_diff(redb: &RedbBackend, oracle: &mut GoOracle) -> Result<(), OpError> {
+    let r = full_snapshot_redb(redb).map_err(OpError::Other)?;
+    let o = full_snapshot_oracle(oracle).map_err(OpError::Other)?;
     if r == o {
         return Ok(());
     }
-    let mut lines = Vec::new();
-    lines.push(format!(
-        "DIVERGENCE: redb has {} entries, oracle has {}",
-        r.len(),
-        o.len()
-    ));
-    // Collect first 20 differing keys for minimal readable output.
-    let mut shown = 0usize;
+    let mut entries = Vec::new();
     let mut keys: std::collections::BTreeSet<&(String, Vec<u8>)> =
         std::collections::BTreeSet::new();
     keys.extend(r.keys());
     keys.extend(o.keys());
     for key in keys {
-        if shown >= 20 {
-            lines.push("...(truncated)".into());
-            break;
-        }
         let rv = r.get(key);
         let ov = o.get(key);
         if rv == ov {
             continue;
         }
-        shown += 1;
-        lines.push(format!(
-            "{}/{:?}: redb={:?}, oracle={:?}",
-            key.0, key.1, rv, ov
-        ));
+        entries.push(DiffEntry {
+            bucket: key.0.clone(),
+            key: key.1.clone(),
+            bbolt_val: ov.cloned(),
+            redb_val: rv.cloned(),
+        });
     }
-    Err(lines.join("\n"))
+    Err(OpError::Divergence(entries))
 }
 
 /// Run a sequence of [`DiffOp`]s against both engines. Returns
 /// `Ok(())` iff every post-commit snapshot diff agreed. Errors
 /// carry a human-readable message; the proptest runner promotes
 /// them into `TestCaseError::fail`.
+///
+/// On `OpError::Divergence` we dump a self-contained repro to
+/// `target/differential-failures/<utc>-<hash8>/` (see
+/// [`Divergence::dump_to`]). The dump path is included in the
+/// returned error message so CI logs and local proptest output
+/// surface it directly. Dump failures are folded into the message
+/// rather than masking the underlying divergence — a missing dump
+/// must never cause the test to "pass" silently.
 fn run_case(binary: &Path, ops: &[DiffOp]) -> Result<(), String> {
     // Default true; override with MANGO_DIFFERENTIAL_FSYNC=0 for
     // local macOS iteration (plan §7).
@@ -1304,7 +1549,26 @@ fn run_case(binary: &Path, ops: &[DiffOp]) -> Result<(), String> {
     let mut state = RunState::default();
 
     for (idx, op) in ops.iter().enumerate() {
-        apply_op(&rt, &mut case, &mut state, op).map_err(|e| format!("op[{idx}] {op:?}: {e}"))?;
+        match apply_op(&rt, &mut case, &mut state, op) {
+            Ok(()) => {}
+            Err(OpError::Other(s)) => return Err(format!("op[{idx}] {op:?}: {s}")),
+            Err(OpError::Divergence(diff)) => {
+                let divergence = Divergence::new(ops, diff);
+                let bbolt_path = case.bbolt_db_path();
+                let redb_path = case.redb_dir_path();
+                let stderr = case.oracle_mut().stderr_snapshot();
+                let dump =
+                    divergence.dump_to(&failure_artifacts_root(), &bbolt_path, &redb_path, &stderr);
+                let suffix = match dump {
+                    Ok(p) => format!(" (artifacts: {})", p.display()),
+                    Err(e) => format!(" (artifact dump failed: {e})"),
+                };
+                return Err(format!(
+                    "op[{idx}] {op:?}: snapshot divergence ({} differing keys){suffix}",
+                    divergence.diff.len()
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -1868,4 +2132,130 @@ fn proptest_256_cases_no_divergence() {
             Ok(())
         })
         .unwrap_or_else(|e| panic!("proptest divergence: {e}"));
+}
+
+/// Unit test for `Divergence::dump_to` — exercised independently of
+/// the live oracle so the artifact-write contract has a fast,
+/// deterministic regression even when no bbolt binary is installed
+/// (CI without the Go toolchain, contributor laptops, Miri runs).
+///
+/// Verifies:
+/// 1. The dirname format is `<utc-secs>-<hash8>` (8 hex chars).
+/// 2. All five artifacts (`ops.json`, `oracle.db`, `mango.redb`,
+///    `diff.txt`, `stderr.log`) are present.
+/// 3. `ops.json` round-trips back to the original `Vec<DiffOp>` via
+///    serde — pinning the wire shape that the seed-replay driver
+///    relies on.
+/// 4. `diff.txt` is human-readable and references the divergence
+///    bucket name verbatim.
+/// 5. `stderr.log` contains the bytes we passed in.
+/// 6. FNV-1a-64 of an empty op list is the algorithm's known
+///    initial-state value (`0xcbf2_9ce4_8422_2325`), so a future
+///    constant-tweak can't silently land.
+#[test]
+fn divergence_dump_to_writes_all_artifacts() {
+    // Constants are the standard FNV-1a-64 offset basis. If this
+    // assert ever fails, someone changed the algorithm.
+    assert_eq!(fnv1a_64(b""), 0xcbf2_9ce4_8422_2325);
+
+    let root = TempDir::new().unwrap();
+    let src = TempDir::new().unwrap();
+    let bbolt_db = src.path().join("oracle.db");
+    let redb_dir = src.path().join("redb");
+    std::fs::create_dir(&redb_dir).unwrap();
+
+    // Synthetic source files so dump_to has something to copy.
+    std::fs::write(&bbolt_db, b"BBOLT_FAKE_DB").unwrap();
+    std::fs::write(redb_dir.join("data.redb"), b"REDB_FAKE_DATA").unwrap();
+
+    let ops = vec![
+        DiffOp::Put {
+            bucket: 0,
+            key: b"k".to_vec(),
+            value: b"v".to_vec(),
+        },
+        DiffOp::Commit { fsync: false },
+    ];
+    let diff = vec![DiffEntry {
+        bucket: "alpha".to_owned(),
+        key: b"k".to_vec(),
+        bbolt_val: Some(b"v_bbolt".to_vec()),
+        redb_val: None,
+    }];
+    let divergence = Divergence::new(&ops, diff);
+
+    let dir = divergence
+        .dump_to(root.path(), &bbolt_db, &redb_dir, b"BBOLT_STDERR_BYTES")
+        .expect("dump_to succeeds");
+
+    // Dirname shape: `<digits>-<8 hex>` ⇒ split on '-' from the right.
+    let name = dir.file_name().unwrap().to_str().unwrap();
+    let (secs, hash) = name.rsplit_once('-').expect("dirname has dash");
+    assert!(
+        secs.chars().all(|c| c.is_ascii_digit()),
+        "secs prefix not all digits: {secs}"
+    );
+    assert_eq!(hash.len(), 8, "hash suffix wrong width: {hash}");
+    assert!(
+        hash.chars().all(|c| c.is_ascii_hexdigit()),
+        "hash suffix not hex: {hash}"
+    );
+
+    // All five artifacts present.
+    for name in [
+        "ops.json",
+        "oracle.db",
+        "data.redb",
+        "diff.txt",
+        "stderr.log",
+    ] {
+        assert!(
+            dir.join(name).exists(),
+            "artifact {name} missing under {}",
+            dir.display()
+        );
+    }
+
+    // ops.json round-trips back to the original sequence.
+    let ops_bytes = std::fs::read(dir.join("ops.json")).unwrap();
+    let ops_back: Vec<DiffOp> = serde_json::from_slice(&ops_bytes).unwrap();
+    assert_eq!(ops_back.len(), ops.len());
+    match (&ops_back[0], &ops[0]) {
+        (
+            DiffOp::Put {
+                bucket: ba,
+                key: ka,
+                value: va,
+            },
+            DiffOp::Put {
+                bucket: bb,
+                key: kb,
+                value: vb,
+            },
+        ) => {
+            assert_eq!(ba, bb);
+            assert_eq!(ka, kb);
+            assert_eq!(va, vb);
+        }
+        other => panic!("ops[0] round-trip mismatch: {other:?}"),
+    }
+
+    // diff.txt mentions the divergence bucket verbatim.
+    let diff_text = std::fs::read_to_string(dir.join("diff.txt")).unwrap();
+    assert!(
+        diff_text.contains("alpha/"),
+        "diff.txt missing bucket marker: {diff_text}"
+    );
+    assert!(
+        diff_text.contains("DIVERGENCE: 1 differing keys"),
+        "diff.txt missing summary: {diff_text}"
+    );
+
+    // stderr.log preserves the bytes we passed in.
+    let stderr = std::fs::read(dir.join("stderr.log")).unwrap();
+    assert_eq!(stderr, b"BBOLT_STDERR_BYTES");
+
+    // bbolt copy preserves source bytes.
+    let bbolt_copy = std::fs::read(dir.join("oracle.db")).unwrap();
+    assert_eq!(bbolt_copy, b"BBOLT_FAKE_DB");
 }
