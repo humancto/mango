@@ -69,7 +69,8 @@ use std::time::{Duration, Instant};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use mango_storage::{
-    Backend, BackendConfig, BucketId, ReadSnapshot, RedbBackend, RedbBatch, WriteBatch,
+    Backend, BackendConfig, BackendError, BucketId, ReadSnapshot, RedbBackend, RedbBatch,
+    WriteBatch,
 };
 use proptest::prelude::*;
 use proptest::test_runner::{Config as ProptestConfig, TestCaseError, TestRunner};
@@ -386,6 +387,48 @@ enum DiffOp {
     /// Followed by a snapshot diff: post-defrag state must remain
     /// byte-identical between engines.
     Defragment,
+    /// Commit multiple batches atomically as a single group. Mirrors
+    /// `Backend::commit_group` on the Rust side and the oracle's
+    /// `commit_group` (whose `req.Batches` is `[][]groupOp`). All
+    /// inner mutations succeed-or-fail as one — bbolt's Update
+    /// closure rolls back on any error, redb's `commit_group` commits
+    /// all staged batches in a single write txn. Pre-condition:
+    /// no active txn (both engines reject otherwise), so the harness
+    /// rolls back any pending batch first.
+    CommitGroup {
+        /// Outer Vec is batches; inner is the ops in that batch.
+        /// Empty inner Vecs and an empty outer Vec are intentionally
+        /// generated to exercise the no-op edge cases on both engines.
+        batches: Vec<Vec<GroupOp>>,
+        /// Threaded through to bbolt's `db.NoSync` flip and
+        /// redb's commit-time fsync. Macroaligned with `Commit`
+        /// to keep the durability axis consistent.
+        fsync: bool,
+    },
+}
+
+/// One mutation inside a [`DiffOp::CommitGroup`] batch. Mirrors the
+/// Go oracle's `groupOp` struct field-for-field (see
+/// `benches/oracles/bbolt/main.go::groupOp`). Reads are intentionally
+/// excluded — a read inside a write group would need its own txn
+/// (forbidden by the single-writer invariant) and is never emitted
+/// by the harness.
+#[derive(Debug, Clone)]
+enum GroupOp {
+    Put {
+        bucket: u8,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    },
+    Delete {
+        bucket: u8,
+        key: Vec<u8>,
+    },
+    DeleteRange {
+        bucket: u8,
+        start: Vec<u8>,
+        end: Vec<u8>,
+    },
 }
 
 /// Mutable per-case state threaded through [`apply_op`]. Tracks the
@@ -819,6 +862,127 @@ fn apply_op(
             snapshot_and_diff(redb, oracle)?;
             Ok(())
         }
+        DiffOp::CommitGroup { batches, fsync } => {
+            // commit_group requires no active txn on both engines.
+            // Roll back the pending batch symmetrically before the
+            // call so the operation under test is the multi-batch
+            // commit, not a txn-active error path.
+            if state.pending.take().is_some() {
+                let resp = case
+                    .oracle_mut()
+                    .call(&json!({"op":"rollback"}))
+                    .map_err(|e| format!("oracle pre-commit_group rollback: {e}"))?;
+                require_ok(&resp, "pre-commit_group rollback").map_err(|e| e.to_string())?;
+            }
+
+            // Build the JSON wire shape for the oracle's
+            // `[][]groupOp` field. Done before any redb staging so
+            // a JSON build error doesn't leave us with an
+            // open-ended state on either side.
+            let json_batches: Vec<Vec<Value>> = batches
+                .iter()
+                .map(|inner| {
+                    inner
+                        .iter()
+                        .map(|op| match op {
+                            GroupOp::Put { bucket, key, value } => json!({
+                                "op":"put",
+                                "bucket": bucket_name_of(*bucket),
+                                "key": b64(key),
+                                "value": b64(value),
+                            }),
+                            GroupOp::Delete { bucket, key } => json!({
+                                "op":"delete",
+                                "bucket": bucket_name_of(*bucket),
+                                "key": b64(key),
+                            }),
+                            GroupOp::DeleteRange { bucket, start, end } => json!({
+                                "op":"delete_range",
+                                "bucket": bucket_name_of(*bucket),
+                                "start": b64(start),
+                                "end": b64(end),
+                            }),
+                        })
+                        .collect()
+                })
+                .collect();
+
+            // Stage each batch on redb. We collect into a Vec rather
+            // than a streaming iterator because Backend::commit_group
+            // takes ownership.
+            let mut redb_batches = Vec::with_capacity(batches.len());
+            let mut staging_err: Option<BackendError> = None;
+            'staging: for inner in batches {
+                let mut b = match case.redb().begin_batch() {
+                    Ok(b) => b,
+                    Err(e) => {
+                        staging_err = Some(e);
+                        break 'staging;
+                    }
+                };
+                for op in inner {
+                    let bucket_id = match op {
+                        GroupOp::Put { bucket, .. }
+                        | GroupOp::Delete { bucket, .. }
+                        | GroupOp::DeleteRange { bucket, .. } => bucket_id_of(*bucket),
+                    };
+                    let res = match op {
+                        GroupOp::Put { key, value, .. } => b.put(bucket_id, key, value),
+                        GroupOp::Delete { key, .. } => b.delete(bucket_id, key),
+                        GroupOp::DeleteRange { start, end, .. } => {
+                            b.delete_range(bucket_id, start, end)
+                        }
+                    };
+                    if let Err(e) = res {
+                        staging_err = Some(e);
+                        break 'staging;
+                    }
+                }
+                redb_batches.push(b);
+            }
+
+            let redb_res = if let Some(e) = staging_err {
+                Err(e)
+            } else {
+                rt.block_on(case.redb().commit_group(redb_batches))
+                    .map(|_| ())
+            };
+            let resp = case
+                .oracle_mut()
+                .call(&json!({
+                    "op":"commit_group",
+                    "fsync": *fsync,
+                    "batches": json_batches,
+                }))
+                .map_err(|e| format!("oracle commit_group: {e}"))?;
+            let oracle_err = oracle_error(&resp);
+            match (redb_res, oracle_err) {
+                (Ok(()), None) => {}
+                (Err(e), Some(oe)) => {
+                    let redb_norm = normalize_err(&e.to_string());
+                    let oracle_norm = normalize_err(&oe);
+                    if redb_norm != oracle_norm {
+                        return Err(format!(
+                            "symmetric commit_group error but normalized strings diverge: \
+                             redb={redb_norm:?} (raw={e}), oracle={oracle_norm:?} (raw={oe})"
+                        ));
+                    }
+                }
+                (Ok(()), Some(oe)) => {
+                    return Err(format!(
+                        "divergence on commit_group: redb ok, oracle err={oe}"
+                    ));
+                }
+                (Err(e), None) => {
+                    return Err(format!(
+                        "divergence on commit_group: redb err={e}, oracle ok"
+                    ));
+                }
+            }
+            let (redb, oracle) = case.split_redb_and_oracle();
+            snapshot_and_diff(redb, oracle)?;
+            Ok(())
+        }
         DiffOp::Defragment => {
             // Both engines reject defrag/compact under an active txn.
             // Roll the pending batch back symmetrically before the
@@ -1073,21 +1237,53 @@ fn defragment_strat() -> Just<DiffOp> {
     Just(DiffOp::Defragment)
 }
 
-/// Per-op strategy. Weights derived from plan §3 by zeroing the op
-/// classes that don't yet exist (`CommitGroup`) and renormalizing.
+/// One inner op inside a [`DiffOp::CommitGroup`] batch. Reuses the
+/// same key/value/bucket alphabets as the top-level Put/Delete/
+/// `DeleteRange` strategies, so the multi-batch path exercises the
+/// same byte distributions as the single-batch path.
+fn group_op_strat() -> impl Strategy<Value = GroupOp> {
+    prop_oneof![
+        70 => (bucket_idx(), key_bytes(), value_bytes())
+            .prop_map(|(bucket, key, value)| GroupOp::Put { bucket, key, value }),
+        20 => (bucket_idx(), key_bytes())
+            .prop_map(|(bucket, key)| GroupOp::Delete { bucket, key }),
+        10 => (bucket_idx(), key_bytes(), key_bytes())
+            .prop_map(|(bucket, a, b)| {
+                let (start, end) = if a <= b { (a, b) } else { (b, a) };
+                GroupOp::DeleteRange { bucket, start, end }
+            }),
+    ]
+}
+
+/// Generates a `CommitGroup` op. Outer Vec length `0..=3` covers
+/// the empty-group edge case and small groupings; inner Vec length
+/// `0..=4` covers the empty-batch case (a legal no-op on both
+/// engines per the bbolt source) and small batches. Per-case op
+/// budget capped well below redb/bbolt's group-size limits to keep
+/// runtime predictable.
+fn commit_group_strat() -> impl Strategy<Value = DiffOp> {
+    (
+        proptest::collection::vec(proptest::collection::vec(group_op_strat(), 0..=4), 0..=3),
+        any::<bool>(),
+    )
+        .prop_map(|(batches, fsync)| DiffOp::CommitGroup { batches, fsync })
+}
+
+/// Per-op strategy. All advanced ops (`CommitGroup`, `Defragment`,
+/// `CloseReopen`, `PutNilKey`) now wired in.
 ///
-/// Put 46 / Delete 19 / `DeleteRange` 5 / Commit 20 / Rollback 5 /
-/// `CloseReopen` 2 / `PutNilKey` 2 / `Defragment` 1 = total 100.
-/// `Defragment` is the most expensive op (bbolt copies the entire
-/// file, then atomic-renames; redb runs in-place compaction holding
-/// the write lock) so it's pinned to 1 % — ~0.4 fires per case on
-/// average across length-1..=40 sequences. The 256-case sweep
-/// therefore exercises ≈100 defrag cycles, enough to detect a
-/// post-defrag divergence reliably without blowing past the 60 s
-/// budget.
+/// Put 44 / Delete 19 / `DeleteRange` 5 / Commit 20 / Rollback 5 /
+/// `CloseReopen` 2 / `PutNilKey` 2 / `Defragment` 1 / `CommitGroup`
+/// 2 = total 100. `CommitGroup` weight kept small (2 %) because each
+/// fire stages multiple inner ops at once — its bug-finding power
+/// per *fire* is high but per *inner op* is comparable to the single-
+/// batch `Commit` path. Two percent over a length-1..=40 sequence
+/// yields ~0.8 fires per case on average — enough to exercise the
+/// multi-batch atomicity path frequently across the 256-case sweep
+/// without dominating runtime.
 fn op_strat() -> impl Strategy<Value = DiffOp> {
     prop_oneof![
-        46 => put_strat(),
+        44 => put_strat(),
         19 => delete_strat(),
         5  => delete_range_strat(),
         20 => commit_strat(),
@@ -1095,6 +1291,7 @@ fn op_strat() -> impl Strategy<Value = DiffOp> {
         2  => close_reopen_strat(),
         2  => put_nil_key_strat(),
         1  => defragment_strat(),
+        2  => commit_group_strat(),
     ]
 }
 
