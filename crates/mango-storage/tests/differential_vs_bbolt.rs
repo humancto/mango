@@ -74,6 +74,7 @@ use mango_storage::{
 };
 use proptest::prelude::*;
 use proptest::test_runner::{Config as ProptestConfig, TestCaseError, TestRunner};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
@@ -295,6 +296,27 @@ fn b64(bytes: &[u8]) -> String {
     BASE64.encode(bytes)
 }
 
+/// Serde adapter for serializing `Vec<u8>` fields as base64 strings
+/// instead of `serde_json`'s default JSON-array-of-bytes shape. Used
+/// by `#[serde(with = "base64_helper")]` on the byte-vector fields of
+/// [`DiffOp`] and [`GroupOp`] so seed files in
+/// `tests/differential_vs_bbolt/seeds/*.json` stay grep-friendly and
+/// ~4× smaller than the default encoding (plan §9 commit 9 step 6).
+mod base64_helper {
+    use base64::engine::general_purpose::STANDARD as BASE64;
+    use base64::Engine as _;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub(super) fn serialize<S: Serializer>(bytes: &[u8], ser: S) -> Result<S::Ok, S::Error> {
+        ser.serialize_str(&BASE64.encode(bytes))
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<Vec<u8>, D::Error> {
+        let s = String::deserialize(de)?;
+        BASE64.decode(s).map_err(serde::de::Error::custom)
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Differential harness — plan §9 commit 7.
 // -----------------------------------------------------------------------------
@@ -335,23 +357,34 @@ fn bucket_name_of(idx: u8) -> &'static str {
 ///
 /// `#[derive(Debug, Clone)]` — cheap to clone for proptest
 /// shrinking; the harness does not hold ops across threads, so
-/// `Send`-ness is not required.
-#[derive(Debug, Clone)]
+/// `Send`-ness is not required. `Serialize` / `Deserialize` round-trip
+/// to/from `tests/differential_vs_bbolt/seeds/*.json` via the seed-
+/// replay driver (plan §9 commit 9 step 6); byte-vector fields are
+/// adapted through `base64_helper` so seed files stay grep-friendly.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 enum DiffOp {
     /// Insert-or-overwrite a non-empty (key, value) in `bucket`.
     Put {
         bucket: u8,
+        #[serde(with = "base64_helper")]
         key: Vec<u8>,
+        #[serde(with = "base64_helper")]
         value: Vec<u8>,
     },
     /// Delete a single key. No-op on both engines when absent.
-    Delete { bucket: u8, key: Vec<u8> },
+    Delete {
+        bucket: u8,
+        #[serde(with = "base64_helper")]
+        key: Vec<u8>,
+    },
     /// Delete every key in `[start, end)`. Strategies generate
     /// `start <= end` — the `start > end` axis is an error-triggering
     /// op and lands in commit 8.
     DeleteRange {
         bucket: u8,
+        #[serde(with = "base64_helper")]
         start: Vec<u8>,
+        #[serde(with = "base64_helper")]
         end: Vec<u8>,
     },
     /// Commit the pending batch. If no writes have been staged since
@@ -378,7 +411,11 @@ enum DiffOp {
     /// bbolt) which `normalize_err` collapses to the shared
     /// `"empty key"`. No batch state changes on either side — the
     /// staging-time rejection means the pending txn is unaffected.
-    PutNilKey { bucket: u8, value: Vec<u8> },
+    PutNilKey {
+        bucket: u8,
+        #[serde(with = "base64_helper")]
+        value: Vec<u8>,
+    },
     /// Defragment / compact both engines. redb runs its in-place
     /// compaction; bbolt opens a fresh DB, copies via `bolt.Compact`,
     /// and atomic-renames over the original. Both reject if a txn is
@@ -412,21 +449,27 @@ enum DiffOp {
 /// `benches/oracles/bbolt/main.go::groupOp`). Reads are intentionally
 /// excluded — a read inside a write group would need its own txn
 /// (forbidden by the single-writer invariant) and is never emitted
-/// by the harness.
-#[derive(Debug, Clone)]
+/// by the harness. Serde derives match [`DiffOp`] for the seed-
+/// replay driver; byte fields use `base64_helper` for compactness.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 enum GroupOp {
     Put {
         bucket: u8,
+        #[serde(with = "base64_helper")]
         key: Vec<u8>,
+        #[serde(with = "base64_helper")]
         value: Vec<u8>,
     },
     Delete {
         bucket: u8,
+        #[serde(with = "base64_helper")]
         key: Vec<u8>,
     },
     DeleteRange {
         bucket: u8,
+        #[serde(with = "base64_helper")]
         start: Vec<u8>,
+        #[serde(with = "base64_helper")]
         end: Vec<u8>,
     },
 }
@@ -1312,6 +1355,74 @@ fn proptest_cases() -> u32 {
     match std::env::var("MANGO_DIFFERENTIAL_THOROUGH").as_deref() {
         Ok("1") => 10_000,
         _ => 256,
+    }
+}
+
+/// Round-trip every [`DiffOp`] variant through `serde_json` and back.
+/// Locks in the seed-file wire format (plan §9 commit 9 step 6) — a
+/// future structural change to `DiffOp` that breaks deserialization
+/// of older seed files would silently turn `replay_committed_seeds`
+/// into a no-op; this test fails loud first.
+///
+/// Bytes are explicitly chosen to exercise the base64 path: NUL,
+/// newline, and high-bit bytes that JSON would otherwise mangle in
+/// the default `Vec<u8>` encoding.
+#[test]
+fn diff_op_serde_round_trip_every_variant() {
+    let cases: Vec<DiffOp> = vec![
+        DiffOp::Put {
+            bucket: 0,
+            key: b"\x00\nk".to_vec(),
+            value: b"\xffv".to_vec(),
+        },
+        DiffOp::Delete {
+            bucket: 1,
+            key: b"k".to_vec(),
+        },
+        DiffOp::DeleteRange {
+            bucket: 2,
+            start: Vec::new(),
+            end: vec![0xff],
+        },
+        DiffOp::Commit { fsync: true },
+        DiffOp::Rollback,
+        DiffOp::CloseReopen,
+        DiffOp::PutNilKey {
+            bucket: 0,
+            value: b"v".to_vec(),
+        },
+        DiffOp::Defragment,
+        DiffOp::CommitGroup {
+            batches: vec![
+                vec![
+                    GroupOp::Put {
+                        bucket: 0,
+                        key: b"g".to_vec(),
+                        value: b"v".to_vec(),
+                    },
+                    GroupOp::Delete {
+                        bucket: 1,
+                        key: b"d".to_vec(),
+                    },
+                ],
+                vec![GroupOp::DeleteRange {
+                    bucket: 2,
+                    start: b"a".to_vec(),
+                    end: Vec::new(),
+                }],
+            ],
+            fsync: false,
+        },
+    ];
+    for op in &cases {
+        let s = serde_json::to_string(op).expect("serialize");
+        let back: DiffOp = serde_json::from_str(&s).expect("deserialize");
+        // Re-serialize and compare strings: structural equality without
+        // adding a `PartialEq` derive on `DiffOp` (which would require
+        // the same on `GroupOp` and start a chain of implementation
+        // burdens for a test-only convenience).
+        let s2 = serde_json::to_string(&back).expect("re-serialize");
+        assert_eq!(s, s2, "round-trip diverged for {op:?}");
     }
 }
 
