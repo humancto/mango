@@ -627,6 +627,18 @@ struct Case {
     /// `Case::new` time so the close-reopen cycle is durability-
     /// neutral against the original spawn.
     fsync: bool,
+    /// Set to `true` from `run_case` immediately before returning a
+    /// divergence error. Read by `Drop` to short-circuit the
+    /// `TempDir` cleanup via `into_path()`, leaving the raw on-disk
+    /// state behind as a belt-and-suspenders fallback to the
+    /// `target/differential-failures/` artifact dump (plan §9 commit
+    /// 9 step 1). `Cell` instead of plain `bool` because mark-failed
+    /// fires from contexts that hold only `&Case` (the divergence
+    /// branch in `run_case` borrows `case` mutably for the dump
+    /// path; flipping `failed` after that borrow ends would still
+    /// require interior mutability if any caller ever flipped it
+    /// while another `&Case` was live).
+    failed: std::cell::Cell<bool>,
 }
 
 impl Case {
@@ -662,7 +674,18 @@ impl Case {
             redb_dir: Some(redb_dir),
             oracle_binary_path: binary.to_path_buf(),
             fsync,
+            failed: std::cell::Cell::new(false),
         })
+    }
+
+    /// Mark this case as failed so `Drop` preserves the raw tempdirs
+    /// via `TempDir::into_path()` instead of cleaning them up. Idem-
+    /// potent — calling twice is a no-op. Set from `run_case` before
+    /// returning a divergence error (and from any future test path
+    /// that wants the raw on-disk state preserved alongside the
+    /// `target/differential-failures/` dump).
+    fn mark_failed(&self) {
+        self.failed.set(true);
     }
 
     /// Mutable accessor for the Go oracle subprocess handle. Panics
@@ -765,6 +788,59 @@ impl Case {
         self.oracle = Some(oracle);
         self.redb = Some(redb);
         Ok(())
+    }
+}
+
+/// Panic-preserving / failure-preserving cleanup (plan §9 commit 9
+/// step 1).
+///
+/// On `failed.get() == true` we leak both `TempDir`s via
+/// `TempDir::keep()` so the raw on-disk state remains available for
+/// the developer alongside the `target/differential-failures/` dump.
+/// `keep()` (was `into_path()`, deprecated in tempfile 3.27) is the
+/// documented idiom — it consumes the handle and skips the cleanup
+/// destructor, leaving the directory behind without leaking anything
+/// else (`mem::forget` would leak the whole `Case`, including the
+/// live `RedbBackend` that still holds redb's single-writer file
+/// lock).
+///
+/// We must drop `oracle` and `redb` first inside this body — they
+/// own file locks (bbolt's flock and redb's single-writer guard)
+/// against the directories. Releasing those handles before the
+/// `into_path()` calls means a developer poking at the artifacts
+/// later does not race a still-live process. `oracle.take()` runs
+/// the `GoOracle::drop` impl which kills the child (releasing the
+/// flock); `redb.take()` runs `RedbBackend::drop` which closes the
+/// redb database (releasing the writer guard).
+///
+/// Drop order matters even on the success path: the field-decl
+/// order is `oracle, redb, bbolt_dir, redb_dir`, and Rust drops
+/// fields in declaration order. So even with no manual Drop, the
+/// implicit order is correct. The explicit `take()`s here just
+/// hoist that ordering ahead of the `failed`-flag branch so the
+/// `into_path()` happens *after* lock release on the failed path.
+impl Drop for Case {
+    fn drop(&mut self) {
+        // Release engine locks first, regardless of pass/fail.
+        drop(self.oracle.take());
+        drop(self.redb.take());
+
+        if self.failed.get() {
+            // Leak both tempdirs onto the user's disk. `keep`
+            // returns the path; we discard it because `run_case`
+            // already surfaced the canonical artifact dir under
+            // `target/differential-failures/`. The leaked tempdir
+            // is a fallback for the rare case where `dump_to`
+            // missed a file.
+            if let Some(d) = self.bbolt_dir.take() {
+                let _ = d.keep();
+            }
+            if let Some(d) = self.redb_dir.take() {
+                let _ = d.keep();
+            }
+        }
+        // On the success path the remaining `Some(TempDir)`s drop
+        // normally after this body returns and clean themselves up.
     }
 }
 
@@ -1557,6 +1633,11 @@ fn run_case(binary: &Path, ops: &[DiffOp]) -> Result<(), String> {
                 let bbolt_path = case.bbolt_db_path();
                 let redb_path = case.redb_dir_path();
                 let stderr = case.oracle_mut().stderr_snapshot();
+                // Mark failed BEFORE the dump so a panic mid-`dump_to`
+                // (disk full, permission denied) still preserves the
+                // raw tempdirs as a fallback. `Drop` reads this flag
+                // when `Case` goes out of scope at function return.
+                case.mark_failed();
                 let dump =
                     divergence.dump_to(&failure_artifacts_root(), &bbolt_path, &redb_path, &stderr);
                 let suffix = match dump {
@@ -2258,4 +2339,73 @@ fn divergence_dump_to_writes_all_artifacts() {
     // bbolt copy preserves source bytes.
     let bbolt_copy = std::fs::read(dir.join("oracle.db")).unwrap();
     assert_eq!(bbolt_copy, b"BBOLT_FAKE_DB");
+}
+
+/// Pin the `Case` failed-flag → `Drop` → `keep()` chain (plan §9
+/// commit 9 step 1). On `mark_failed()`, both tempdirs must survive
+/// the `Case` going out of scope so the developer has the raw
+/// on-disk state as a fallback to the `target/differential-failures/`
+/// dump. Cleans up the leaked dirs at the end so the test does not
+/// accumulate disk garbage on every run.
+#[test]
+fn case_drop_preserves_tempdirs_when_failed() {
+    let Some(binary) = skip_without_oracle("case_drop_preserves_tempdirs_when_failed") else {
+        return;
+    };
+    let case = Case::new(&binary, false).expect("Case::new");
+    // Capture paths *before* drop — `bbolt_db_path` joins
+    // "oracle.db" onto the bbolt tempdir, so its parent is what we
+    // want to check for survival.
+    let bbolt_dir = case
+        .bbolt_db_path()
+        .parent()
+        .expect("bbolt path has parent")
+        .to_path_buf();
+    let redb_dir = case.redb_dir_path();
+    case.mark_failed();
+    drop(case);
+    assert!(
+        bbolt_dir.exists(),
+        "bbolt_dir cleaned up despite failed=true: {}",
+        bbolt_dir.display()
+    );
+    assert!(
+        redb_dir.exists(),
+        "redb_dir cleaned up despite failed=true: {}",
+        redb_dir.display()
+    );
+    // Manual cleanup of leaked dirs — the test asserts the leak
+    // happened, then removes the evidence so CI does not accumulate
+    // gigabytes over time.
+    let _ = std::fs::remove_dir_all(&bbolt_dir);
+    let _ = std::fs::remove_dir_all(&redb_dir);
+}
+
+/// Counterpart to the failed-preservation test: on the success
+/// path the tempdirs MUST be cleaned up. Catches a regression where
+/// someone flips the polarity of the `failed` flag or accidentally
+/// calls `keep()` unconditionally.
+#[test]
+fn case_drop_cleans_tempdirs_on_success() {
+    let Some(binary) = skip_without_oracle("case_drop_cleans_tempdirs_on_success") else {
+        return;
+    };
+    let case = Case::new(&binary, false).expect("Case::new");
+    let bbolt_dir = case
+        .bbolt_db_path()
+        .parent()
+        .expect("bbolt path has parent")
+        .to_path_buf();
+    let redb_dir = case.redb_dir_path();
+    drop(case);
+    assert!(
+        !bbolt_dir.exists(),
+        "bbolt_dir leaked despite success: {}",
+        bbolt_dir.display()
+    );
+    assert!(
+        !redb_dir.exists(),
+        "redb_dir leaked despite success: {}",
+        redb_dir.display()
+    );
 }
