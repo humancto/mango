@@ -262,3 +262,108 @@ jobs:
         # Belt-and-suspenders: no test above should mutate the committed
         # pin file. If one does, this diff catches it before merge.
         run: git diff --exit-code benches/oracles/etcd/VERSIONS
+
+  differential:
+    # Differential test harness: drive identical op sequences against
+    # mango's `RedbBackend` and a bbolt oracle subprocess; assert
+    # post-state parity. ROADMAP:819. The harness is in
+    # `crates/mango-storage/tests/differential_vs_bbolt.rs`; the oracle
+    # is `benches/oracles/bbolt/main.go`.
+    #
+    # Why a dedicated job (instead of folding into `test`): the oracle
+    # build needs the Go toolchain, and the harness binary path lives
+    # in `MANGO_BBOLT_ORACLE`. Bundling into `test` would either pull
+    # `setup-go` into the hot-path job (slowdown for every run) or
+    # require every contributor to have Go locally (regression on the
+    # zero-friction PR-author experience). The skip-path inside the
+    # harness (`skip_without_oracle` — see differential_vs_bbolt.rs)
+    # makes the absence of the binary a no-op for the `test` job, so
+    # this job is the only one that actually exercises the harness.
+    #
+    # Note: hosted-runner fsync can be 10–50× slower than local SSD.
+    # If timeouts surface here, halve the case count via the
+    # `MANGO_DIFFERENTIAL_THOROUGH=0` default (already in effect on
+    # PR runs — the 10k thorough sweep is cron-only). The 20-minute
+    # job timeout is sized for the 256-case default sweep with
+    # generous headroom.
+    name: differential
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - name: durability guard (MANGO_DIFFERENTIAL_FSYNC must be unset on CI)
+        # Local devs may set MANGO_DIFFERENTIAL_FSYNC=0 to skip
+        # fsyncs for fast iteration. CI MUST exercise the durability
+        # path — a silently-disabled fsync would let a divergence
+        # slip through. Fail loud if the var is set in the runner
+        # env (e.g., someone added it to a shared CI secret).
+        run: |
+          if [ -n "${MANGO_DIFFERENTIAL_FSYNC:-}" ]; then
+            echo "::error::MANGO_DIFFERENTIAL_FSYNC is set on CI ('$MANGO_DIFFERENTIAL_FSYNC') — refusing to run differential tests with weakened durability."
+            exit 1
+          fi
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5  # v5.5.0
+        with:
+          # Track the oracle's own go.mod so a Go bump in
+          # benches/oracles/bbolt/go.mod auto-propagates here.
+          go-version-file: benches/oracles/bbolt/go.mod
+          # `setup-go`'s built-in module cache is keyed on
+          # `**/go.sum` by default and conflicts with our explicit
+          # cache step below, so we disable it here and own the
+          # cache scope ourselves.
+          cache: false
+      - name: cache Go module download
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684  # v4
+        with:
+          path: ~/go/pkg/mod
+          key: v0-go-mod-${{ runner.os }}-${{ hashFiles('benches/oracles/bbolt/go.sum') }}
+          restore-keys: |
+            v0-go-mod-${{ runner.os }}-
+      - name: build bbolt oracle
+        # build.sh emits `bbolt-oracle` next to itself with
+        # CGO_ENABLED=0 and -trimpath. The harness reads
+        # MANGO_BBOLT_ORACLE; an unset var falls back to a default
+        # path that doesn't exist on CI, so we set it explicitly.
+        run: bash benches/oracles/bbolt/build.sh
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          # Distinct cache scope — the differential test build
+          # links a different test target than the workspace
+          # `test` job, so sharing the cache would invalidate
+          # both on every alternation.
+          prefix-key: v0-differential
+          shared-key: ""
+      - name: install protoc
+        # Same rationale as the other jobs — mango-proto's build
+        # script needs protoc.
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: install cargo-nextest
+        uses: taiki-e/install-action@5f57d6cb7cd20b14a8a27f522884c4bc8a187458  # v2
+        with:
+          tool: cargo-nextest
+      - name: cargo fetch
+        run: cargo fetch --locked
+      - name: cargo nextest run (differential)
+        # `--profile ci` inherits the per-class watchdog from
+        # .config/nextest.toml. The proptest sweep runs at the
+        # default 256-case count; `MANGO_DIFFERENTIAL_THOROUGH=1`
+        # is reserved for the cron job (ROADMAP:819 commit 11).
+        env:
+          MANGO_BBOLT_ORACLE: ${{ github.workspace }}/benches/oracles/bbolt/bbolt-oracle
+        run: cargo nextest run -p mango-storage --test differential_vs_bbolt --profile ci --locked
+      - name: upload failure artifacts
+        # On divergence the harness writes ops.json / oracle.db /
+        # mango.redb / diff.txt / stderr.log under
+        # target/differential-failures/<utc>-<hash8>/. Preserving
+        # them as a workflow artifact lets a reviewer reproduce
+        # the divergence locally with the seed-replay driver.
+        # 7-day retention matches the PR cycle; the nightly cron
+        # uses 30 days (ROADMAP:819 commit 11).
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: differential-failures
+          path: target/differential-failures/
+          retention-days: 7
+          if-no-files-found: ignore
