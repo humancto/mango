@@ -393,11 +393,43 @@ struct RunState {
 /// declaration order; a `compile_fail` guard is deliberately NOT
 /// used here (the invariant is positional, not type-level), so the
 /// field-order comment above is load-bearing.
+///
+/// All four engine/dir slots are `Option<T>`. Rationale (rust-expert
+/// NIT-3 on the PR-B plan): `GoOracle::spawn` and `RedbBackend::open`
+/// both acquire engine-level file locks before returning — bbolt's
+/// flock via the inline `open` request, and redb's single-writer
+/// guard via `Database::create`. So `close_and_reopen` (commit 8
+/// step 5) cannot use `mem::replace`, which would construct the
+/// replacement *before* dropping the old handle and deadlock on the
+/// flock or panic on `Database::create`. The `Option<T>` shape lets
+/// `close_and_reopen` `take()` the old handle, drop it, and *then*
+/// install the new one. The slots are empty only for those few
+/// lines; every other site sees them via `Some`-asserting accessors
+/// and is none the wiser. `Option::drop` invokes `T::drop` on
+/// `Some`, so the field-order drop invariant is preserved.
 struct Case {
-    oracle: GoOracle,
-    redb: RedbBackend,
-    _bbolt_dir: TempDir,
-    _redb_dir: TempDir,
+    oracle: Option<GoOracle>,
+    redb: Option<RedbBackend>,
+    _bbolt_dir: Option<TempDir>,
+    _redb_dir: Option<TempDir>,
+    /// Path to the prebuilt Go oracle binary, kept so
+    /// `close_and_reopen` can respawn the subprocess. The binary is
+    /// resolved once per test via `skip_without_oracle` and
+    /// thread-safe to share by path.
+    #[expect(
+        dead_code,
+        reason = "consumed by close_and_reopen in the next commit on this branch"
+    )]
+    oracle_binary_path: PathBuf,
+    /// fsync bit threaded into every commit and into the new
+    /// `GoOracle` constructed by `close_and_reopen`. Captured at
+    /// `Case::new` time so the close-reopen cycle is durability-
+    /// neutral against the original spawn.
+    #[expect(
+        dead_code,
+        reason = "consumed by close_and_reopen in the next commit on this branch"
+    )]
+    fsync: bool,
 }
 
 impl Case {
@@ -427,11 +459,38 @@ impl Case {
         }
 
         Ok(Self {
-            oracle,
-            redb,
-            _bbolt_dir: bbolt_dir,
-            _redb_dir: redb_dir,
+            oracle: Some(oracle),
+            redb: Some(redb),
+            _bbolt_dir: Some(bbolt_dir),
+            _redb_dir: Some(redb_dir),
+            oracle_binary_path: binary.to_path_buf(),
+            fsync,
         })
+    }
+
+    /// Mutable accessor for the Go oracle subprocess handle. Panics
+    /// (with a message naming the slot) if called between the
+    /// `take()` and the reassignment inside `close_and_reopen` —
+    /// which is by design: that interval is invariant-violating.
+    fn oracle_mut(&mut self) -> &mut GoOracle {
+        self.oracle.as_mut().expect("oracle slot non-empty")
+    }
+
+    /// Shared accessor for the redb backend.
+    fn redb(&self) -> &RedbBackend {
+        self.redb.as_ref().expect("redb slot non-empty")
+    }
+
+    /// Borrow `redb` (shared) and `oracle` (exclusive) at once.
+    /// Required by the snapshot-and-diff and commit paths where
+    /// both halves of the harness must be in scope simultaneously.
+    /// Sound because the two `Option`s live in disjoint struct
+    /// fields, so the resulting references do not alias.
+    fn split_redb_and_oracle(&mut self) -> (&RedbBackend, &mut GoOracle) {
+        (
+            self.redb.as_ref().expect("redb slot non-empty"),
+            self.oracle.as_mut().expect("oracle slot non-empty"),
+        )
     }
 }
 
@@ -443,11 +502,11 @@ fn ensure_txn(case: &mut Case, state: &mut RunState) -> Result<(), String> {
         return Ok(());
     }
     let batch = case
-        .redb
+        .redb()
         .begin_batch()
         .map_err(|e| format!("redb begin_batch: {e}"))?;
     let resp = case
-        .oracle
+        .oracle_mut()
         .call(&json!({"op":"begin"}))
         .map_err(|e| format!("oracle begin: {e}"))?;
     require_ok(&resp, "begin").map_err(|e| e.to_string())?;
@@ -530,7 +589,7 @@ fn apply_op(
                 .put(bucket_id, key, value)
                 .map_err(|e| format!("redb put: {e}"))?;
             let resp = case
-                .oracle
+                .oracle_mut()
                 .call(&json!({
                     "op":"put","bucket":bucket_name,
                     "key":b64(key),"value":b64(value),
@@ -550,7 +609,7 @@ fn apply_op(
                 .delete(bucket_id, key)
                 .map_err(|e| format!("redb delete: {e}"))?;
             let resp = case
-                .oracle
+                .oracle_mut()
                 .call(&json!({
                     "op":"delete","bucket":bucket_name,"key":b64(key),
                 }))
@@ -569,7 +628,7 @@ fn apply_op(
                 .delete_range(bucket_id, start, end)
                 .map_err(|e| format!("redb delete_range: {e}"))?;
             let resp = case
-                .oracle
+                .oracle_mut()
                 .call(&json!({
                     "op":"delete_range","bucket":bucket_name,
                     "start":b64(start),"end":b64(end),
@@ -583,12 +642,13 @@ fn apply_op(
                 // No active txn on either side. Still diff — a drift
                 // here would mean something committed without our
                 // harness emitting a commit, which is a real bug.
-                snapshot_and_diff(&case.redb, &mut case.oracle)?;
+                let (redb, oracle) = case.split_redb_and_oracle();
+                snapshot_and_diff(redb, oracle)?;
                 return Ok(());
             };
-            let redb_res = rt.block_on(case.redb.commit_batch(batch, *fsync));
+            let redb_res = rt.block_on(case.redb().commit_batch(batch, *fsync));
             let resp = case
-                .oracle
+                .oracle_mut()
                 .call(&json!({"op":"commit","fsync":*fsync}))
                 .map_err(|e| format!("oracle commit: {e}"))?;
             let oracle_err = oracle_error(&resp);
@@ -615,7 +675,8 @@ fn apply_op(
                     return Err(format!("divergence on commit: redb err={e}, oracle ok"));
                 }
             }
-            snapshot_and_diff(&case.redb, &mut case.oracle)?;
+            let (redb, oracle) = case.split_redb_and_oracle();
+            snapshot_and_diff(redb, oracle)?;
             Ok(())
         }
         DiffOp::Rollback => {
@@ -626,11 +687,12 @@ fn apply_op(
             // fsync path, cannot fail.
             state.pending = None;
             let resp = case
-                .oracle
+                .oracle_mut()
                 .call(&json!({"op":"rollback"}))
                 .map_err(|e| format!("oracle rollback: {e}"))?;
             require_ok(&resp, "rollback").map_err(|e| e.to_string())?;
-            snapshot_and_diff(&case.redb, &mut case.oracle)?;
+            let (redb, oracle) = case.split_redb_and_oracle();
+            snapshot_and_diff(redb, oracle)?;
             Ok(())
         }
     }
