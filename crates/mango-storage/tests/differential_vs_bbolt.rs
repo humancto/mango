@@ -327,9 +327,10 @@ fn bucket_name_of(idx: u8) -> &'static str {
     BUCKET_NAMES[idx as usize]
 }
 
-/// An op in the differential language. Subset per plan §9 commit 7:
-/// `CommitGroup` / `Defragment` / `CloseReopen` / error-triggering
-/// ops land in commit 8.
+/// An op in the differential language. Commit 7 shipped Put / Delete /
+/// `DeleteRange` / Commit / Rollback. Commit 8 adds `CloseReopen`
+/// (process-restart durability axis); `CommitGroup` / `Defragment` /
+/// error-triggering ops land in subsequent commits.
 ///
 /// `#[derive(Debug, Clone)]` — cheap to clone for proptest
 /// shrinking; the harness does not hold ops across threads, so
@@ -362,6 +363,14 @@ enum DiffOp {
     /// an active txn is a no-op. Like `Commit`, followed by a
     /// snapshot diff for drift-detection.
     Rollback,
+    /// Drop both engine handles and reopen against the same on-disk
+    /// state. Tests durability across a "process restart". Any pending
+    /// batch is discarded on the Rust side (no fsync, no commit) and
+    /// the oracle's pending txn is dropped by closing its child
+    /// process — symmetrical and lossy by design. Followed by a
+    /// snapshot diff: post-reopen state must be byte-identical
+    /// between engines.
+    CloseReopen,
 }
 
 /// Mutable per-case state threaded through [`apply_op`]. Tracks the
@@ -384,8 +393,8 @@ struct RunState {
 ///
 /// 1. `oracle` — close the pipe, reap the Go child.
 /// 2. `redb` — close the redb Database handle.
-/// 3. `_bbolt_dir` — remove the bbolt db file.
-/// 4. `_redb_dir` — remove the redb db file.
+/// 3. `bbolt_dir` — remove the bbolt db file.
+/// 4. `redb_dir` — remove the redb db file.
 ///
 /// If the `TempDir`s dropped before the engines, `db.Close()` on the
 /// Go side would run on a deleted directory → EIO on fsync → panic
@@ -410,25 +419,17 @@ struct RunState {
 struct Case {
     oracle: Option<GoOracle>,
     redb: Option<RedbBackend>,
-    _bbolt_dir: Option<TempDir>,
-    _redb_dir: Option<TempDir>,
+    bbolt_dir: Option<TempDir>,
+    redb_dir: Option<TempDir>,
     /// Path to the prebuilt Go oracle binary, kept so
     /// `close_and_reopen` can respawn the subprocess. The binary is
     /// resolved once per test via `skip_without_oracle` and
     /// thread-safe to share by path.
-    #[expect(
-        dead_code,
-        reason = "consumed by close_and_reopen in the next commit on this branch"
-    )]
     oracle_binary_path: PathBuf,
     /// fsync bit threaded into every commit and into the new
     /// `GoOracle` constructed by `close_and_reopen`. Captured at
     /// `Case::new` time so the close-reopen cycle is durability-
     /// neutral against the original spawn.
-    #[expect(
-        dead_code,
-        reason = "consumed by close_and_reopen in the next commit on this branch"
-    )]
     fsync: bool,
 }
 
@@ -461,8 +462,8 @@ impl Case {
         Ok(Self {
             oracle: Some(oracle),
             redb: Some(redb),
-            _bbolt_dir: Some(bbolt_dir),
-            _redb_dir: Some(redb_dir),
+            bbolt_dir: Some(bbolt_dir),
+            redb_dir: Some(redb_dir),
             oracle_binary_path: binary.to_path_buf(),
             fsync,
         })
@@ -491,6 +492,62 @@ impl Case {
             self.redb.as_ref().expect("redb slot non-empty"),
             self.oracle.as_mut().expect("oracle slot non-empty"),
         )
+    }
+
+    /// Drop both engine handles, then respawn against the same on-disk
+    /// state. Tests that durable writes survive a "process restart"
+    /// (plan §3 axis B6 / §9 commit 8 step 5).
+    ///
+    /// Drop-then-reopen sequencing is load-bearing: `GoOracle::spawn`
+    /// acquires bbolt's flock and `RedbBackend::open` calls
+    /// `Database::create` (single-writer guard); both fail or hang if
+    /// the previous owner is still alive. `Option::take()` drops the
+    /// old handle *before* constructing the new one, eliminating the
+    /// overlap that `mem::replace` would create.
+    ///
+    /// The `TempDir`s in `bbolt_dir` / `redb_dir` are intentionally
+    /// not touched — the on-disk files must persist across the cycle
+    /// for the durability assertion to mean anything. Buckets are
+    /// re-registered on both sides because bbolt's `CreateBucket` and
+    /// redb's `register_bucket` are idempotent ("already registered"
+    /// is a no-op success), so this is cheap and keeps the post-reopen
+    /// state byte-identical to a fresh `Case::new`.
+    fn close_and_reopen(&mut self) -> Result<(), String> {
+        // Drop oracle first, then redb — same order as struct-field
+        // drop order, so no flock/lock-overlap is possible.
+        drop(self.oracle.take());
+        drop(self.redb.take());
+
+        let bbolt_dir = self
+            .bbolt_dir
+            .as_ref()
+            .expect("bbolt_dir slot non-empty")
+            .path();
+        let redb_dir = self
+            .redb_dir
+            .as_ref()
+            .expect("redb_dir slot non-empty")
+            .path();
+        let db_path = bbolt_dir.join("oracle.db");
+
+        let mut oracle = GoOracle::spawn(&self.oracle_binary_path, &db_path, self.fsync)
+            .map_err(|e| format!("oracle respawn: {e}"))?;
+        let redb = RedbBackend::open(BackendConfig::new(redb_dir.to_path_buf(), false))
+            .map_err(|e| format!("redb reopen: {e}"))?;
+
+        for (idx, name) in BUCKET_NAMES.iter().enumerate() {
+            let id = BucketId::new((idx + 1) as u16);
+            let resp = oracle
+                .call(&json!({"op":"bucket","name":name}))
+                .map_err(|e| format!("oracle bucket {name} (reopen): {e}"))?;
+            require_ok(&resp, &format!("bucket {name} (reopen)")).map_err(|e| e.to_string())?;
+            redb.register_bucket(name, id)
+                .map_err(|e| format!("redb register_bucket {name} (reopen): {e}"))?;
+        }
+
+        self.oracle = Some(oracle);
+        self.redb = Some(redb);
+        Ok(())
     }
 }
 
@@ -695,6 +752,18 @@ fn apply_op(
             snapshot_and_diff(redb, oracle)?;
             Ok(())
         }
+        DiffOp::CloseReopen => {
+            // Discard the pending batch on the Rust side — close
+            // throws away any uncommitted state on the oracle child
+            // (its in-memory bbolt txn dies with the process), so
+            // mirroring on the Rust side keeps the two state machines
+            // in lockstep. No fsync path, cannot fail.
+            state.pending = None;
+            case.close_and_reopen()?;
+            let (redb, oracle) = case.split_redb_and_oracle();
+            snapshot_and_diff(redb, oracle)?;
+            Ok(())
+        }
     }
 }
 
@@ -890,20 +959,30 @@ fn rollback_strat() -> Just<DiffOp> {
     Just(DiffOp::Rollback)
 }
 
-/// Per-op strategy. Weights derived from plan §3 by zeroing the
-/// op classes that don't exist in commit 7 (`CommitGroup`,
-/// `CloseReopen`, `Defragment`, error-triggering) and renormalizing.
+fn close_reopen_strat() -> Just<DiffOp> {
+    Just(DiffOp::CloseReopen)
+}
+
+/// Per-op strategy. Weights derived from plan §3 by zeroing the op
+/// classes that don't yet exist (`CommitGroup`, `Defragment`,
+/// error-triggering) and renormalizing.
 ///
-/// Put 50 / Delete 20 / `DeleteRange` 5 / Commit 20 / Rollback 5 =
-/// total 100. Put-heavy to build up state; Commit at 20 % keeps
-/// the snapshot-diff cadence frequent.
+/// Put 49 / Delete 19 / `DeleteRange` 5 / Commit 20 / Rollback 5 /
+/// `CloseReopen` 2 = total 100. `CloseReopen` weight is small on
+/// purpose: each fires drops both engine handles and respawns a Go
+/// subprocess (~50 ms), so heavy oversampling would dominate runtime
+/// without proportional bug-finding power. Two percent over a
+/// length-1..=40 sequence yields ~0.8 close-reopen events per case
+/// on average — enough to exercise the path frequently across the
+/// 256-case sweep without blowing past the 60 s budget.
 fn op_strat() -> impl Strategy<Value = DiffOp> {
     prop_oneof![
-        50 => put_strat(),
-        20 => delete_strat(),
+        49 => put_strat(),
+        19 => delete_strat(),
         5  => delete_range_strat(),
         20 => commit_strat(),
         5  => rollback_strat(),
+        2  => close_reopen_strat(),
     ]
 }
 
