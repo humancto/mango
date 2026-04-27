@@ -378,6 +378,14 @@ enum DiffOp {
     /// `"empty key"`. No batch state changes on either side — the
     /// staging-time rejection means the pending txn is unaffected.
     PutNilKey { bucket: u8, value: Vec<u8> },
+    /// Defragment / compact both engines. redb runs its in-place
+    /// compaction; bbolt opens a fresh DB, copies via `bolt.Compact`,
+    /// and atomic-renames over the original. Both reject if a txn is
+    /// active — the harness rolls back the pending batch first to
+    /// avoid that error path (it would mask real divergences).
+    /// Followed by a snapshot diff: post-defrag state must remain
+    /// byte-identical between engines.
+    Defragment,
 }
 
 /// Mutable per-case state threaded through [`apply_op`]. Tracks the
@@ -811,6 +819,50 @@ fn apply_op(
             snapshot_and_diff(redb, oracle)?;
             Ok(())
         }
+        DiffOp::Defragment => {
+            // Both engines reject defrag/compact under an active txn.
+            // Roll the pending batch back symmetrically before the
+            // call so the operation under test is the actual
+            // defragmentation, not the txn-active error path. Drop
+            // the redb staged ops (no fsync, infallible) and tell
+            // the oracle to rollback (no-op on the oracle if its
+            // child has no active txn).
+            if state.pending.take().is_some() {
+                let resp = case
+                    .oracle_mut()
+                    .call(&json!({"op":"rollback"}))
+                    .map_err(|e| format!("oracle pre-defrag rollback: {e}"))?;
+                require_ok(&resp, "pre-defrag rollback").map_err(|e| e.to_string())?;
+            }
+            let redb_res = rt.block_on(case.redb().defragment());
+            let resp = case
+                .oracle_mut()
+                .call(&json!({"op":"compact"}))
+                .map_err(|e| format!("oracle compact: {e}"))?;
+            let oracle_err = oracle_error(&resp);
+            match (redb_res, oracle_err) {
+                (Ok(()), None) => {}
+                (Err(e), Some(oe)) => {
+                    let redb_norm = normalize_err(&e.to_string());
+                    let oracle_norm = normalize_err(&oe);
+                    if redb_norm != oracle_norm {
+                        return Err(format!(
+                            "symmetric defrag error but normalized strings diverge: \
+                             redb={redb_norm:?} (raw={e}), oracle={oracle_norm:?} (raw={oe})"
+                        ));
+                    }
+                }
+                (Ok(()), Some(oe)) => {
+                    return Err(format!("divergence on defrag: redb ok, oracle err={oe}"));
+                }
+                (Err(e), None) => {
+                    return Err(format!("divergence on defrag: redb err={e}, oracle ok"));
+                }
+            }
+            let (redb, oracle) = case.split_redb_and_oracle();
+            snapshot_and_diff(redb, oracle)?;
+            Ok(())
+        }
     }
 }
 
@@ -1017,27 +1069,32 @@ fn put_nil_key_strat() -> impl Strategy<Value = DiffOp> {
     (bucket_idx(), value_bytes()).prop_map(|(bucket, value)| DiffOp::PutNilKey { bucket, value })
 }
 
+fn defragment_strat() -> Just<DiffOp> {
+    Just(DiffOp::Defragment)
+}
+
 /// Per-op strategy. Weights derived from plan §3 by zeroing the op
-/// classes that don't yet exist (`CommitGroup`, `Defragment`) and
-/// renormalizing.
+/// classes that don't yet exist (`CommitGroup`) and renormalizing.
 ///
-/// Put 47 / Delete 19 / `DeleteRange` 5 / Commit 20 / Rollback 5 /
-/// `CloseReopen` 2 / `PutNilKey` 2 = total 100. `CloseReopen` weight
-/// is small on purpose (~50 ms per fire on subprocess respawn);
-/// `PutNilKey` is small because every fire is a guaranteed
-/// rejection-path test — diminishing returns past one or two per
-/// case. Two percent over a length-1..=40 sequence yields ~0.8
-/// fires per case on average — enough to exercise both error and
-/// durability axes frequently without blowing past the 60 s budget.
+/// Put 46 / Delete 19 / `DeleteRange` 5 / Commit 20 / Rollback 5 /
+/// `CloseReopen` 2 / `PutNilKey` 2 / `Defragment` 1 = total 100.
+/// `Defragment` is the most expensive op (bbolt copies the entire
+/// file, then atomic-renames; redb runs in-place compaction holding
+/// the write lock) so it's pinned to 1 % — ~0.4 fires per case on
+/// average across length-1..=40 sequences. The 256-case sweep
+/// therefore exercises ≈100 defrag cycles, enough to detect a
+/// post-defrag divergence reliably without blowing past the 60 s
+/// budget.
 fn op_strat() -> impl Strategy<Value = DiffOp> {
     prop_oneof![
-        47 => put_strat(),
+        46 => put_strat(),
         19 => delete_strat(),
         5  => delete_range_strat(),
         20 => commit_strat(),
         5  => rollback_strat(),
         2  => close_reopen_strat(),
         2  => put_nil_key_strat(),
+        1  => defragment_strat(),
     ]
 }
 
