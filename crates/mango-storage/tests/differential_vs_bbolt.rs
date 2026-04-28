@@ -2248,16 +2248,26 @@ fn replay_committed_seeds() {
         .join("tests")
         .join("differential_vs_bbolt")
         .join("seeds");
-    if !seeds_dir.exists() {
-        // Directory was removed in a hand edit — not a test failure
-        // by itself, but worth surfacing in the log so a contributor
-        // notices before the next divergence has nowhere to land.
-        eprintln!(
-            "replay_committed_seeds: seeds dir missing at {}; skipping",
-            seeds_dir.display()
-        );
-        return;
-    }
+    // The seeds directory is committed (with `seeds/README.md` as
+    // an anchor file). A missing directory is not "no seeds yet" —
+    // it is a structural integrity failure: a contributor's edit or
+    // a bad rebase has removed the regression-gate file. Hard-fail
+    // so the regression gate cannot silently disappear, per the
+    // seed-file retirement policy in BBOLT_QUIRKS.md.
+    assert!(
+        seeds_dir.is_dir(),
+        "seeds dir missing or not a directory at {}; refusing to silently pass — \
+         the directory is committed and must always exist (see seeds/README.md and \
+         benches/oracles/bbolt/BBOLT_QUIRKS.md § 'Seed-file retirement policy')",
+        seeds_dir.display()
+    );
+    let readme = seeds_dir.join("README.md");
+    assert!(
+        readme.is_file(),
+        "{} missing — the README is the structural anchor that keeps the directory \
+         alive in git and documents the seed lifecycle",
+        readme.display()
+    );
     let mut seeds: Vec<PathBuf> = std::fs::read_dir(&seeds_dir)
         .unwrap_or_else(|e| panic!("read_dir {}: {e}", seeds_dir.display()))
         .filter_map(Result::ok)
