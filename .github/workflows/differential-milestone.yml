@@ -1,0 +1,95 @@
+# Mango — milestone differential sweep
+#
+# Runs the same 10 000-case thorough sweep as `differential-
+# nightly.yml`, but triggered on every `v*` tag push instead of
+# the daily cron. The point is to make every release tag carry a
+# fresh thorough-sweep result that gates the artifacts produced
+# by the release pipeline.
+#
+# Why a separate workflow rather than adding tag-trigger to
+# `differential-nightly.yml`: the cron job's failure semantics
+# (file an issue, assign the latest harness committer) don't
+# match what we want at release time. A red milestone sweep is
+# a release blocker, not a tracked ticket — release tooling reads
+# the workflow's success state directly.
+#
+# This workflow always uploads the failure artifact directory,
+# even on success, so a "looks fine" run still ships its repro
+# bundle next to the tag for after-the-fact inspection.
+#
+# Security note: same env-only pattern as `differential-
+# nightly.yml`; no template substitution inside `run:` script
+# bodies.
+
+name: differential-milestone
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
+jobs:
+  thorough:
+    name: differential (10k cases, milestone)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - name: durability guard (MANGO_DIFFERENTIAL_FSYNC must be unset)
+        run: |
+          if [ -n "${MANGO_DIFFERENTIAL_FSYNC:-}" ]; then
+            echo "::error::MANGO_DIFFERENTIAL_FSYNC is set ('$MANGO_DIFFERENTIAL_FSYNC') — refusing weakened durability."
+            exit 1
+          fi
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5  # v5.5.0
+        with:
+          go-version-file: benches/oracles/bbolt/go.mod
+          cache: false
+      - name: cache Go module download
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684  # v4
+        with:
+          path: ~/go/pkg/mod
+          key: v0-go-mod-${{ runner.os }}-${{ hashFiles('benches/oracles/bbolt/go.sum') }}
+          restore-keys: |
+            v0-go-mod-${{ runner.os }}-
+      - name: build bbolt oracle
+        run: bash benches/oracles/bbolt/build.sh
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          prefix-key: v0-differential-milestone
+          shared-key: ""
+      - name: install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: install cargo-nextest
+        uses: taiki-e/install-action@5f57d6cb7cd20b14a8a27f522884c4bc8a187458  # v2
+        with:
+          tool: cargo-nextest
+      - name: cargo fetch
+        run: cargo fetch --locked
+      - name: harness meta-test (verify_harness_catches.sh)
+        env:
+          MANGO_BBOLT_ORACLE: ${{ github.workspace }}/benches/oracles/bbolt/bbolt-oracle
+        run: bash benches/oracles/bbolt/verify_harness_catches.sh
+      - name: cargo nextest run (10k cases)
+        env:
+          MANGO_BBOLT_ORACLE: ${{ github.workspace }}/benches/oracles/bbolt/bbolt-oracle
+          MANGO_DIFFERENTIAL_THOROUGH: "1"
+        run: cargo nextest run -p mango-storage --test differential_vs_bbolt --profile ci --locked
+      - name: upload artifacts (always)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: differential-failures-milestone
+          path: target/differential-failures/
+          retention-days: 90
+          if-no-files-found: ignore
