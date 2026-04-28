@@ -43,7 +43,22 @@ parking_lot.workspace = true
 # the deterministic simulator. See docs/madsim.md.
 tokio = { workspace = true, features = ["rt"] }
 
+[features]
+# ROADMAP:821 engine-swap dry-run. Gates the in-memory reference
+# `Backend` impl (`crate::inmem`) so it is invisible in default
+# builds. Tests opt in via the self-referential dev-dependency
+# below; downstream crates that want the in-mem impl for their own
+# tests do `mango-storage = { path = "...", features = ["test-utils"] }`
+# in their own dev-dependencies.
+test-utils = []
+
 [dev-dependencies]
+# ROADMAP:821: enable the `test-utils` feature when this crate is
+# built as a dev-dep of itself, so integration tests in
+# `crates/mango-storage/tests/` see `mango_storage::InMemBackend`
+# without any per-test-target gymnastics. Self-referential dev-deps
+# are a recognized Cargo idiom (rust-bitcoin, serde, others).
+mango-storage = { path = ".", features = ["test-utils"] }
 # ROADMAP:817 integration tests open a real redb on disk in a
 # tempdir; tempfile is the workspace-standard primitive. Exemption
 # already present in supply-chain/config.toml (tempfile@3.27.0).

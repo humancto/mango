@@ -24,10 +24,19 @@ mod redb;
 // private; only the named types below are public API.
 mod raft_engine;
 
+// ROADMAP:821 in-memory reference Backend impl. Gated behind the
+// `test-utils` Cargo feature so it does NOT appear in the default
+// public surface (`cargo public-api` sees no addition). Tests opt
+// in via the self-referential dev-dependency in `Cargo.toml`.
+#[cfg(feature = "test-utils")]
+pub mod inmem;
+
 pub use backend::{
     Backend, BackendConfig, BackendError, BucketId, CommitStamp, HardState, RaftEntry,
     RaftEntryType, RaftLogStore, RaftSnapshotMetadata, RangeIter, ReadSnapshot, WriteBatch,
 };
+#[cfg(feature = "test-utils")]
+pub use inmem::{batch::InMemBatch, snapshot::InMemSnapshot, InMemBackend};
 pub use raft_engine::{RaftEngineConfig, RaftEngineLogStore, ReadableSize, RecoveryMode};
 pub use redb::{batch::RedbBatch, snapshot::RedbSnapshot, RedbBackend};
 
