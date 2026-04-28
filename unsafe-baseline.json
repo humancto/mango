@@ -1,6 +1,6 @@
 {
   "generated_by": "scripts/geiger-update-baseline.sh",
-  "generated_at": "2026-04-24T00:00:00Z",
+  "generated_at": "2026-04-28T00:00:00Z",
   "cargo_geiger_version": "0.13.0",
   "crates": {
     "mango": {
@@ -39,5 +39,41 @@
     "item_traits": 0,
     "methods": 0
   },
-  "storage_deps_required": false
+  "storage_deps_required": true,
+  "storage_deps": {
+    "redb": {
+      "source": {
+        "Registry": {
+          "name": "crates.io",
+          "url": "https://github.com/rust-lang/crates.io-index"
+        }
+      },
+      "version": "4.1.0",
+      "totals": {
+        "functions": 9,
+        "exprs": 207,
+        "item_impls": 0,
+        "item_traits": 0,
+        "methods": 0
+      },
+      "forbids_unsafe": false
+    },
+    "raft-engine": {
+      "source": {
+        "Git": {
+          "url": "https://github.com/humancto/raft-engine",
+          "rev": "e1d738d9ad1c1fc4f5b21c8c73bf605b5696f535"
+        }
+      },
+      "version": "0.4.2",
+      "totals": {
+        "functions": 0,
+        "exprs": 91,
+        "item_impls": 1,
+        "item_traits": 0,
+        "methods": 0
+      },
+      "forbids_unsafe": false
+    }
+  }
 }

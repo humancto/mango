@@ -262,7 +262,30 @@ fi
 # checker.
 (
     merged="$tmp/synthetic-merged.json"
-    jq -n '{
+    # Synthetic merged scan must include the baseline-pinned storage
+    # deps (redb + raft-engine) at the SAME source the real baseline
+    # carries — otherwise the updater iterates storage_deps, can't
+    # find them in the scan, and exits 5. Source / version values
+    # here are read from the real baseline so this stays in sync if
+    # the storage-dep pin is bumped via MANGO_GEIGER_REPIN.
+    real_redb_source="$(
+        jq -c '.storage_deps.redb.source' "$repo_root/unsafe-baseline.json"
+    )"
+    real_redb_version="$(
+        jq -r '.storage_deps.redb.version' "$repo_root/unsafe-baseline.json"
+    )"
+    real_re_source="$(
+        jq -c '.storage_deps."raft-engine".source' "$repo_root/unsafe-baseline.json"
+    )"
+    real_re_version="$(
+        jq -r '.storage_deps."raft-engine".version' "$repo_root/unsafe-baseline.json"
+    )"
+    jq -n \
+       --argjson redb_src "$real_redb_source" \
+       --arg     redb_ver "$real_redb_version" \
+       --argjson re_src   "$real_re_source" \
+       --arg     re_ver   "$real_re_version" \
+       '{
         packages: [
             {
               package: {
@@ -275,6 +298,52 @@ fi
                   functions:   { safe: 0, unsafe_: 0 },
                   exprs:       { safe: 0, unsafe_: 4 },
                   item_impls:  { safe: 0, unsafe_: 2 },
+                  item_traits: { safe: 0, unsafe_: 0 },
+                  methods:     { safe: 0, unsafe_: 0 }
+                },
+                unused: {
+                  functions:   { safe: 0, unsafe_: 0 },
+                  exprs:       { safe: 0, unsafe_: 0 },
+                  item_impls:  { safe: 0, unsafe_: 0 },
+                  item_traits: { safe: 0, unsafe_: 0 },
+                  methods:     { safe: 0, unsafe_: 0 }
+                },
+                forbids_unsafe: false
+              }
+            },
+            {
+              package: {
+                id: { name: "redb", version: $redb_ver, source: $redb_src },
+                dependencies: []
+              },
+              unsafety: {
+                used: {
+                  functions:   { safe: 0, unsafe_: 9 },
+                  exprs:       { safe: 0, unsafe_: 207 },
+                  item_impls:  { safe: 0, unsafe_: 0 },
+                  item_traits: { safe: 0, unsafe_: 0 },
+                  methods:     { safe: 0, unsafe_: 0 }
+                },
+                unused: {
+                  functions:   { safe: 0, unsafe_: 0 },
+                  exprs:       { safe: 0, unsafe_: 0 },
+                  item_impls:  { safe: 0, unsafe_: 0 },
+                  item_traits: { safe: 0, unsafe_: 0 },
+                  methods:     { safe: 0, unsafe_: 0 }
+                },
+                forbids_unsafe: false
+              }
+            },
+            {
+              package: {
+                id: { name: "raft-engine", version: $re_ver, source: $re_src },
+                dependencies: []
+              },
+              unsafety: {
+                used: {
+                  functions:   { safe: 0, unsafe_: 0 },
+                  exprs:       { safe: 0, unsafe_: 91 },
+                  item_impls:  { safe: 0, unsafe_: 1 },
                   item_traits: { safe: 0, unsafe_: 0 },
                   methods:     { safe: 0, unsafe_: 0 }
                 },

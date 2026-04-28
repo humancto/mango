@@ -32,9 +32,13 @@ Reviewer's Contract:
 - [ ] **Unsafe** (#5) — paths: <...>.
       `// SAFETY:` on every block: yes
       Miri: `MIRIFLAGS=-Zmiri-strict-provenance cargo +nightly miri
-  test -p <crate>` — <output / FFI-no-Miri justification>
+test -p <crate>` — <output / FFI-no-Miri justification>
       Workspace `unsafe` count delta: <+N / 0>;
       `unsafe`-growth PR label applied if +N > 0
+      Storage-dep `unsafe` count delta (redb / raft-engine, per
+      ROADMAP:823 + ADR 0002 §5 trigger #8): <+N / 0>; if any
+      category exceeds baseline + 10, ADR 0002 §5 trigger #8 has
+      been refreshed in this same PR: yes / not applicable
 - [ ] **Security** (#6) — axis #N / bar `<name>`.
       Threat: <auth / crypto / DoS / supply-chain / side-channel / memory>
       Named test: <path>
