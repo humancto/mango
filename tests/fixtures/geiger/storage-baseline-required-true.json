@@ -3,38 +3,17 @@
   "generated_at": "2026-04-28T00:00:00Z",
   "cargo_geiger_version": "0.13.0",
   "crates": {
-    "mango": {
-      "functions": 0,
-      "exprs": 0,
-      "item_impls": 0,
-      "item_traits": 0,
-      "methods": 0
-    },
     "mango-loom-demo": {
       "functions": 0,
-      "exprs": 10,
+      "exprs": 4,
       "item_impls": 2,
-      "item_traits": 0,
-      "methods": 0
-    },
-    "mango-proto": {
-      "functions": 0,
-      "exprs": 0,
-      "item_impls": 0,
-      "item_traits": 0,
-      "methods": 0
-    },
-    "mango-storage": {
-      "functions": 0,
-      "exprs": 0,
-      "item_impls": 0,
       "item_traits": 0,
       "methods": 0
     }
   },
   "totals": {
     "functions": 0,
-    "exprs": 10,
+    "exprs": 4,
     "item_impls": 2,
     "item_traits": 0,
     "methods": 0
@@ -44,14 +23,14 @@
     "redb": {
       "source": {
         "Registry": {
-          "name": "crates.io",
+          "name": "crates-io",
           "url": "https://github.com/rust-lang/crates.io-index"
         }
       },
       "version": "4.1.0",
       "totals": {
-        "functions": 9,
-        "exprs": 207,
+        "functions": 0,
+        "exprs": 30,
         "item_impls": 0,
         "item_traits": 0,
         "methods": 0
@@ -68,8 +47,8 @@
       "version": "0.4.2",
       "totals": {
         "functions": 0,
-        "exprs": 91,
-        "item_impls": 1,
+        "exprs": 40,
+        "item_impls": 0,
         "item_traits": 0,
         "methods": 0
       },

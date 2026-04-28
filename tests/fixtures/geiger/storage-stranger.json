@@ -1,0 +1,186 @@
+{
+  "packages": [
+    {
+      "package": {
+        "id": {
+          "name": "mango-loom-demo",
+          "version": "0.1.0",
+          "source": {
+            "Path": "file:///repo/crates/mango-loom-demo"
+          }
+        },
+        "dependencies": []
+      },
+      "unsafety": {
+        "used": {
+          "functions": {
+            "safe": 0,
+            "unsafe_": 0
+          },
+          "exprs": {
+            "safe": 0,
+            "unsafe_": 4
+          },
+          "item_impls": {
+            "safe": 0,
+            "unsafe_": 2
+          },
+          "item_traits": {
+            "safe": 0,
+            "unsafe_": 0
+          },
+          "methods": {
+            "safe": 0,
+            "unsafe_": 0
+          }
+        },
+        "unused": {
+          "functions": {
+            "safe": 0,
+            "unsafe_": 0
+          },
+          "exprs": {
+            "safe": 0,
+            "unsafe_": 0
+          },
+          "item_impls": {
+            "safe": 0,
+            "unsafe_": 0
+          },
+          "item_traits": {
+            "safe": 0,
+            "unsafe_": 0
+          },
+          "methods": {
+            "safe": 0,
+            "unsafe_": 0
+          }
+        },
+        "forbids_unsafe": false
+      }
+    },
+    {
+      "package": {
+        "id": {
+          "name": "redb",
+          "version": "4.1.0",
+          "source": {
+            "Path": "file:///vendor/redb"
+          }
+        },
+        "dependencies": []
+      },
+      "unsafety": {
+        "used": {
+          "functions": {
+            "safe": 0,
+            "unsafe_": 0
+          },
+          "exprs": {
+            "safe": 0,
+            "unsafe_": 30
+          },
+          "item_impls": {
+            "safe": 0,
+            "unsafe_": 0
+          },
+          "item_traits": {
+            "safe": 0,
+            "unsafe_": 0
+          },
+          "methods": {
+            "safe": 0,
+            "unsafe_": 0
+          }
+        },
+        "unused": {
+          "functions": {
+            "safe": 0,
+            "unsafe_": 0
+          },
+          "exprs": {
+            "safe": 0,
+            "unsafe_": 0
+          },
+          "item_impls": {
+            "safe": 0,
+            "unsafe_": 0
+          },
+          "item_traits": {
+            "safe": 0,
+            "unsafe_": 0
+          },
+          "methods": {
+            "safe": 0,
+            "unsafe_": 0
+          }
+        },
+        "forbids_unsafe": false
+      }
+    },
+    {
+      "package": {
+        "id": {
+          "name": "raft-engine",
+          "version": "0.4.2",
+          "source": {
+            "Git": {
+              "url": "https://github.com/humancto/raft-engine",
+              "rev": "e1d738d9ad1c1fc4f5b21c8c73bf605b5696f535"
+            }
+          }
+        },
+        "dependencies": []
+      },
+      "unsafety": {
+        "used": {
+          "functions": {
+            "safe": 0,
+            "unsafe_": 0
+          },
+          "exprs": {
+            "safe": 0,
+            "unsafe_": 40
+          },
+          "item_impls": {
+            "safe": 0,
+            "unsafe_": 0
+          },
+          "item_traits": {
+            "safe": 0,
+            "unsafe_": 0
+          },
+          "methods": {
+            "safe": 0,
+            "unsafe_": 0
+          }
+        },
+        "unused": {
+          "functions": {
+            "safe": 0,
+            "unsafe_": 0
+          },
+          "exprs": {
+            "safe": 0,
+            "unsafe_": 0
+          },
+          "item_impls": {
+            "safe": 0,
+            "unsafe_": 0
+          },
+          "item_traits": {
+            "safe": 0,
+            "unsafe_": 0
+          },
+          "methods": {
+            "safe": 0,
+            "unsafe_": 0
+          }
+        },
+        "forbids_unsafe": false
+      }
+    }
+  ],
+  "packages_without_metrics": [],
+  "used_but_not_scanned_files": []
+}

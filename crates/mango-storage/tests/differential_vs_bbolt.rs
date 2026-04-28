@@ -1400,8 +1400,7 @@ impl Divergence {
     ) -> io::Result<PathBuf> {
         let utc_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_secs());
         let hash8 = format!("{:016x}", self.case_hash);
         let dirname = format!("{utc_secs}-{}", &hash8[..8]);
         let dir = root.join(dirname);

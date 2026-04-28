@@ -125,13 +125,109 @@ time really is a regression.
 `geiger-check.sh` uses distinct exit codes so a reviewer can
 tell at a glance which failure hit:
 
-| Exit | Meaning                                            | Remediation                                                                  |
-| ---: | -------------------------------------------------- | ---------------------------------------------------------------------------- |
-|    0 | PASS                                               | —                                                                            |
-|    1 | Growth without `unsafe-growth-approved` label      | Justify the growth; ask maintainer to apply the label; re-run.               |
-|    2 | Growth with label but baseline not updated / stale | Run `scripts/geiger-update-baseline.sh`, commit the diff, push.              |
-|    3 | Scan-result validation error (unparseable JSON)    | Tooling broke. Check geiger version; retry. Not an unsafe-growth event.      |
-|    4 | Baseline `cargo_geiger_version` ≠ installed        | Bump cargo-geiger pin in workflow + baseline (see "Version-bump procedure"). |
+| Exit | Meaning                                                                         | Remediation                                                                                                                                                                    |
+| ---: | ------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+|    0 | PASS                                                                            | —                                                                                                                                                                              |
+|    1 | Growth without `unsafe-growth-approved` label                                   | Justify the growth; ask maintainer to apply the label; re-run.                                                                                                                 |
+|    2 | Growth with label but baseline not updated / stale                              | Run `scripts/geiger-update-baseline.sh`, commit the diff, push.                                                                                                                |
+|    3 | Scan-result validation error (unparseable JSON / schema)                        | Tooling broke. Check geiger version; retry. Not an unsafe-growth event. Schema variant: required storage dep absent or `tolerance` field present — fix `unsafe-baseline.json`. |
+|    4 | Baseline `cargo_geiger_version` ≠ installed                                     | Bump cargo-geiger pin in workflow + baseline (see "Version-bump procedure").                                                                                                   |
+|    6 | Storage-dep growth (redb / raft-engine) — per-category +10 budget exceeded      | ADR 0002 §5 trigger #8 refresh required. See "Storage-dep coverage" below.                                                                                                     |
+|    7 | Storage-dep re-pin needed: source/version drift, dep absent, or stranger source | See "Storage-dep coverage" below.                                                                                                                                              |
+
+## Storage-dep coverage (ROADMAP:823, ADR 0002 §5 trigger #8)
+
+The default workspace gate (above) only counts unsafe sites in
+mango's own crates. ADR 0002 §5 advisory trigger #8 requires us
+to also watch the unsafe surface of the two storage deps the
+storage layer depends on most directly: `redb` and `raft-engine`.
+Either +10 over baseline (per cargo-geiger category) trips CI and
+requires an ADR 0002 §5 refresh before the bump merges.
+
+### Schema
+
+`unsafe-baseline.json` carries a `storage_deps_required` flag
+and a `storage_deps` map keyed by crate name:
+
+```json
+{
+  "storage_deps_required": true,
+  "storage_deps": {
+    "redb": {
+      "source": { "Registry": { "name": "...", "url": "..." } },
+      "version": "<x.y.z>",
+      "totals": { "functions": N, "exprs": N, "item_impls": N, "item_traits": N, "methods": N },
+      "forbids_unsafe": false
+    },
+    "raft-engine": {
+      "source": { "Git": { "url": "...", "rev": "<sha>" } },
+      "version": "<x.y.z>",
+      "totals": { ... },
+      "forbids_unsafe": false
+    }
+  }
+}
+```
+
+The `source` object mirrors cargo-geiger 0.13.0's externally-tagged
+`Source` enum verbatim: `Path` / `Git{url,rev}` / `Registry{name,url}`.
+The checker matches by `(name, source, version)` — version is part of
+the key because the `Source` enum doesn't carry it, so a Registry
+version bump from the same index produces an identical source object.
+
+### Policy
+
+| Condition                                                                          | Verdict                                            |
+| ---------------------------------------------------------------------------------- | -------------------------------------------------- |
+| `storage_deps_required: false` or absent                                           | Block dormant; workspace gate continues normally   |
+| `storage_deps_required: true`, `redb` or `raft-engine` missing from `storage_deps` | FAIL — exit 3 (schema bypass-prevention)           |
+| `tolerance` field present on any per-dep entry                                     | FAIL — exit 3 (B3 — tolerance is hardcoded +10)    |
+| Per-category `current ≤ baseline + 10`, all match                                  | PASS                                               |
+| Any single category: `current > baseline + 10`                                     | FAIL — exit 6, ADR 0002 §5 refresh required        |
+| Stranger detector: scan contains required dep at unexpected source                 | FAIL — exit 7, re-pin baseline + review intent     |
+| Per-dep match misses on `(name, source, version)`, same source different version   | FAIL — exit 7 (version drift)                      |
+| Required dep absent from scan AND still in `Cargo.toml`                            | FAIL — exit 7 (cargo-geiger / feature unification) |
+| Required dep absent from scan AND from `Cargo.toml`                                | FAIL — exit 7 (dep removed; bump baseline + ADR)   |
+
+There is no `storage-growth-approved` label or any equivalent
+label-only bypass: storage-dep growth requires a written ADR
+refresh — a process that a single label cannot encode. The
+reviewer looks for an ADR diff alongside the baseline diff in
+the same PR.
+
+### Bumping the storage-dep pin (intentional growth path)
+
+When redb or raft-engine legitimately picks up new unsafe (a
+release that reorganizes internals; a fork rebase that adds an
+FFI shim; etc.):
+
+1. Refresh ADR 0002 §5 trigger #8 with the new numbers and a
+   sentence on what new unsafe surface appeared.
+2. Run `MANGO_GEIGER_REPIN=1 bash scripts/geiger-update-baseline.sh`.
+   The `MANGO_GEIGER_REPIN=1` env var is required to rewrite
+   `storage_deps.*.source` and `.version`; default mode preserves
+   them and would refuse to silently accept the drift (exit 5).
+3. Commit ADR + baseline in the same PR.
+
+### Flake remediation (M7)
+
+cargo-geiger has small per-run nondeterminism on a multi-thousand-
+token surface. If the gate fires within the +10 tolerance window
+(e.g. a CI run reports `redb.exprs = baseline + 3` after a
+runner-image refresh), the remediation is to re-anchor the
+baseline only — no ADR refresh required, because no real growth
+happened. Procedure:
+
+1. Re-run the geiger workflow. If the numbers persist:
+2. Run `bash scripts/geiger-update-baseline.sh` (default mode —
+   source/version stay pinned, only `.totals` updates).
+3. Commit with message `chore(geiger): re-anchor storage-dep
+baseline (cargo-geiger flake)`.
+
+ADR 0002 §5 trigger #8 only requires refresh on real growth
+(category > baseline + 10). In-tolerance re-anchors are noise;
+treating them as ADR events would punish reproducibility, not
+reward it.
 
 ## Transitive `unsafe` as supply-chain signal
 
