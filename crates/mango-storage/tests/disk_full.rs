@@ -271,7 +271,7 @@ fn assert_equals(
              this is a silent-data-loss bug",
         ),
         Err(BackendError::UnknownBucket(b)) => {
-            panic!("{ctx}: registry lost across ENOSPC+reopen (bucket {b:?} missing)",)
+            panic!("{ctx}: registry lost across ENOSPC+reopen (bucket {b:?} missing)")
         }
         Err(e) => panic!("{ctx}: snapshot probe failed: {e}"),
     }
