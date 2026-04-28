@@ -193,7 +193,7 @@ jobs:
                       | if $p == null then
                           "| \($d) | (not found) | | | | | | | |"
                         else
-                          "| \($d) | \($p.package.id.source | tostring) | \($p.package.id.version) | \($p.unsafety.used.functions.unsafe_ // 0) | \($p.unsafety.used.exprs.unsafe_ // 0) | \($p.unsafety.used.item_impls.unsafe_ // 0) | \($p.unsafety.used.item_traits.unsafe_ // 0) | \($p.unsafety.used.methods.unsafe_ // 0) | \($p.unsafety.forbids // false) |"
+                          "| \($d) | \($p.package.id.source | tostring) | \($p.package.id.version) | \($p.unsafety.used.functions.unsafe_ // 0) | \($p.unsafety.used.exprs.unsafe_ // 0) | \($p.unsafety.used.item_impls.unsafe_ // 0) | \($p.unsafety.used.item_traits.unsafe_ // 0) | \($p.unsafety.used.methods.unsafe_ // 0) | \($p.unsafety.forbids_unsafe // false) |"
                         end
                   ' geiger.json
               done

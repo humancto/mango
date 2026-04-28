@@ -148,9 +148,12 @@ if [ "$storage_deps_required" = "true" ]; then
 
     # S2: schema check — every required dep must be in storage_deps.
     # The bootstrap PR populates them; a future PR that deletes an
-    # entry hits this branch and fails.
+    # entry hits this branch and fails. The `(.storage_deps // {})`
+    # default mirrors the tolerance check above and turns a malformed
+    # baseline (storage_deps absent or null while required:true) into
+    # a clean exit-3 schema error rather than a jq runtime fault.
     for dep in "${STORAGE_REQUIRED_DEPS[@]}"; do
-        present="$(jq -r --arg d "$dep" '.storage_deps | has($d)' "$baseline")"
+        present="$(jq -r --arg d "$dep" '(.storage_deps // {}) | has($d)' "$baseline")"
         if [ "$present" != "true" ]; then
             printf 'error: schema: storage_deps.%s required when storage_deps_required: true\n' \
                 "$dep" >&2
