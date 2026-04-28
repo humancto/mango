@@ -11,6 +11,37 @@
 #   bash scripts/geiger-update-baseline.sh            # write baseline
 #   bash scripts/geiger-update-baseline.sh --dry-run  # print diff only
 #
+# Modes (storage-dep handling — ROADMAP:823, ADR 0002 §5 trigger #8):
+#
+#   default                       Refresh storage_deps.*.totals and
+#                                 .forbids_unsafe by matching each
+#                                 baseline entry against the scan by
+#                                 (name, source). NEVER rewrites
+#                                 .source or .version. If the scan
+#                                 lacks a matching (name, source) for
+#                                 any pinned dep, exits 5 — preserves
+#                                 the round-trip oracle (checker
+#                                 accepts updater output ⟺ no source
+#                                 drift).
+#
+#   MANGO_GEIGER_REPIN=1          Above, PLUS rewrites .source and
+#                                 .version from the scan. Use after
+#                                 an ADR 0002 §5 refresh, when the
+#                                 maintainer has consciously decided
+#                                 to accept new source/version pins.
+#
+#   GEIGER_FROM_MERGED_JSON=…     Test escape hatch: skip cargo-geiger
+#                                 invocation, read merged JSON from
+#                                 the env var (paired with
+#                                 GEIGER_VERSION_OVERRIDE).
+#
+# Exit codes:
+#   0  PASS, baseline written (or --dry-run shown)
+#   2  prerequisite missing (jq, cargo-geiger)
+#   3  workspace metadata error
+#   4  baseline cargo_geiger_version pin != installed
+#   5  storage-dep source/version drift in default mode (re-pin needed)
+#
 # Requires: bash, cargo, cargo-geiger, jq, date.
 set -euo pipefail
 
@@ -167,20 +198,143 @@ totals="$(
 
 timestamp="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
 
+# ---------------------------------------------------------------------
+# storage-dep section — preserve storage_deps_required, refresh
+# storage_deps.*.totals (and source/version under MANGO_GEIGER_REPIN).
+# ROADMAP:823, ADR 0002 §5 advisory trigger #8.
+# ---------------------------------------------------------------------
+storage_deps_required="false"
+existing_storage_deps='{}'
+if [ -f "$baseline_path" ]; then
+    storage_deps_required="$(
+        jq -r '.storage_deps_required // false | tostring' "$baseline_path"
+    )"
+    existing_storage_deps="$(jq -c '.storage_deps // {}' "$baseline_path")"
+fi
+
+repin_mode=0
+if [ "${MANGO_GEIGER_REPIN:-}" = "1" ]; then
+    repin_mode=1
+fi
+
+new_storage_deps='{}'
+if [ "$(jq 'length' <<<"$existing_storage_deps")" -gt 0 ]; then
+    # Iterate baseline-pinned deps in deterministic key order.
+    for dep in $(jq -r 'keys[]' <<<"$existing_storage_deps"); do
+        pinned_source="$(
+            jq -c --arg d "$dep" '.[$d].source' <<<"$existing_storage_deps"
+        )"
+        pinned_version="$(
+            jq -r --arg d "$dep" '.[$d].version' <<<"$existing_storage_deps"
+        )"
+
+        if [ "$repin_mode" = "1" ]; then
+            # Match by name only; collapse identical (version, source)
+            # tuples (cargo unifies on (name, version) so duplicates
+            # are expected) and pick the first remaining.
+            match="$(
+                jq -c --arg d "$dep" '
+                  .packages
+                  | map(select(.package.id.name == $d))
+                  | unique_by([.package.id.version, .package.id.source])
+                  | .[0] // null
+                ' "$scratch/merged.json"
+            )"
+        else
+            # Default mode: must match (name, source) exactly.
+            match="$(
+                jq -c --arg d "$dep" --argjson src "$pinned_source" '
+                  .packages
+                  | map(select(.package.id.name == $d
+                               and .package.id.source == $src))
+                  | .[0] // null
+                ' "$scratch/merged.json"
+            )"
+        fi
+
+        if [ "$match" = "null" ]; then
+            if [ "$repin_mode" = "1" ]; then
+                printf 'error: storage-dep %s absent from scan (REPIN mode)\n' \
+                    "$dep" >&2
+                printf 'hint: dep may have been removed from Cargo.toml; delete the entry from unsafe-baseline.json explicitly.\n' >&2
+                exit 5
+            fi
+            printf 'error: storage-dep %s missing from scan at pinned source\n' \
+                "$dep" >&2
+            printf '  pinned source: %s\n' "$pinned_source" >&2
+            printf 'Remediation:\n' >&2
+            printf '  1. Refresh ADR 0002 §5 trigger #8 documenting the source/version change.\n' >&2
+            printf '  2. Re-run with MANGO_GEIGER_REPIN=1 to accept the new pin.\n' >&2
+            exit 5
+        fi
+
+        new_totals_entry="$(
+            jq -c '
+              .unsafety.used
+              | {
+                  functions:   (.functions.unsafe_   // 0),
+                  exprs:       (.exprs.unsafe_       // 0),
+                  item_impls:  (.item_impls.unsafe_  // 0),
+                  item_traits: (.item_traits.unsafe_ // 0),
+                  methods:     (.methods.unsafe_     // 0)
+                }
+            ' <<<"$match"
+        )"
+        new_forbids="$(
+            jq -c '.unsafety.forbids_unsafe // false' <<<"$match"
+        )"
+
+        if [ "$repin_mode" = "1" ]; then
+            # REPIN: take source + version from the scan match.
+            scan_source="$(jq -c '.package.id.source' <<<"$match")"
+            scan_version="$(jq -r '.package.id.version' <<<"$match")"
+            entry="$(
+                jq -n \
+                    --argjson src "$scan_source" \
+                    --arg ver "$scan_version" \
+                    --argjson tot "$new_totals_entry" \
+                    --argjson fb "$new_forbids" '
+                  {source: $src, version: $ver, totals: $tot, forbids_unsafe: $fb}
+                '
+            )"
+        else
+            # Default: preserve baseline source + version verbatim.
+            entry="$(
+                jq -n \
+                    --argjson src "$pinned_source" \
+                    --arg ver "$pinned_version" \
+                    --argjson tot "$new_totals_entry" \
+                    --argjson fb "$new_forbids" '
+                  {source: $src, version: $ver, totals: $tot, forbids_unsafe: $fb}
+                '
+            )"
+        fi
+
+        new_storage_deps="$(
+            jq -c --arg d "$dep" --argjson entry "$entry" \
+                '. + {($d): $entry}' <<<"$new_storage_deps"
+        )"
+    done
+fi
+
 new_baseline="$(
     jq -n \
         --arg gen_by "scripts/geiger-update-baseline.sh" \
         --arg gen_at "$timestamp" \
         --arg ver "$installed_version" \
         --argjson crates "$per_crate" \
-        --argjson totals "$totals" '
-      {
+        --argjson totals "$totals" \
+        --argjson sdr "$storage_deps_required" \
+        --argjson sd "$new_storage_deps" '
+      ({
         generated_by: $gen_by,
         generated_at: $gen_at,
         cargo_geiger_version: $ver,
         crates: $crates,
-        totals: $totals
-      }
+        totals: $totals,
+        storage_deps_required: $sdr
+      })
+      + (if ($sd | length) > 0 then {storage_deps: $sd} else {} end)
     '
 )"
 

@@ -38,5 +38,6 @@
     "item_impls": 2,
     "item_traits": 0,
     "methods": 0
-  }
+  },
+  "storage_deps_required": false
 }
