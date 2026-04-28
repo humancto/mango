@@ -507,10 +507,15 @@ impl Backend for RedbBackend {
 }
 
 /// Test-only fault-injection constructor. Gated on the
-/// `_eio_test_internal` feature (leading underscore: cargo
-/// convention for "private"). Used exclusively by ROADMAP:826's
-/// fsync-EIO crash-recovery harness.
-#[cfg(any(test, feature = "_eio_test_internal"))]
+/// `_fault_test_internal` feature (leading underscore: cargo
+/// convention for "private"). Used by integration tests under
+/// `crates/mango-storage/tests/` that wrap a real
+/// `redb::backends::FileBackend` in an arm-gated fault-injection
+/// shim — ROADMAP:826's `crash_recovery_eio.rs` (EIO from
+/// `sync_data`) and ROADMAP:827's `disk_full.rs` (ENOSPC from
+/// `set_len`/`write`) at the time of writing, plus future fault
+/// axes.
+#[cfg(any(test, feature = "_fault_test_internal"))]
 impl RedbBackend {
     /// Wrap a caller-supplied `redb::StorageBackend` in
     /// `RedbBackend` so integration tests can drive the production
@@ -520,11 +525,20 @@ impl RedbBackend {
     /// MUST be the on-disk path of the file the supplied `backend`
     /// reads from / writes to.
     ///
+    /// # MIRROR-WITH `Backend::open`
+    ///
+    /// This constructor's `Builder` setup MUST stay in lock-step
+    /// with `Backend::open` above. Any new `redb::Builder` knob
+    /// added there (cache size, repair callback, etc.) MUST be
+    /// replicated here or the test exercises a differently-
+    /// configured engine than production — silently. (Filed as
+    /// issue #64 during PR #62 rust-expert review; addressed here.)
+    ///
     /// # Drop-time fsync caveat
     ///
     /// `redb::Database::Drop` calls `sync_data` up to four times via
     /// its trim-and-close path. If your wrapper is armed to fail at
-    /// drop time it will silently swallow EIOs from those calls.
+    /// drop time it will silently swallow errors from those calls.
     /// Disarm before dropping.
     #[doc(hidden)]
     pub fn with_backend(
