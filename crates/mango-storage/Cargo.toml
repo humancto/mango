@@ -51,6 +51,17 @@ tokio = { workspace = true, features = ["rt"] }
 # tests do `mango-storage = { path = "...", features = ["test-utils"] }`
 # in their own dev-dependencies.
 test-utils = []
+# ROADMAP:826 fault-injection harness. Gates the
+# `RedbBackend::with_backend` test-only constructor in
+# `crate::redb`. Underscore prefix is cargo convention for
+# "private; do not depend on this from outside this crate". The
+# constructor is also `#[doc(hidden)]`; this feature is only
+# enabled by the self-referential dev-dependency below so the
+# integration test at `tests/crash_recovery_eio.rs` can construct
+# a `RedbBackend` over a custom `redb::StorageBackend` wrapper.
+# Downstream consumers that opt into `test-utils` for
+# `InMemBackend` MUST NOT also opt into this feature.
+_eio_test_internal = []
 
 [dev-dependencies]
 # ROADMAP:821: enable the `test-utils` feature when this crate is
@@ -65,7 +76,10 @@ test-utils = []
 # string MUST track the package's own `version.workspace = true`
 # (currently 0.1.0 in the workspace root); on the next workspace
 # version bump this also bumps.
-mango-storage = { path = ".", version = "0.1.0", features = ["test-utils"] }
+mango-storage = { path = ".", version = "0.1.0", features = [
+    "test-utils",
+    "_eio_test_internal",
+] }
 # ROADMAP:817 integration tests open a real redb on disk in a
 # tempdir; tempfile is the workspace-standard primitive. Exemption
 # already present in supply-chain/config.toml (tempfile@3.27.0).
