@@ -4,7 +4,7 @@
 #
 # A differential harness is only as good as its ability to catch
 # divergences. This script proves that — given a bbolt oracle that
-# secretly drops `delete` operations — the harness in
+# secretly drops `Put` operations — the harness in
 # `crates/mango-storage/tests/differential_vs_bbolt.rs` correctly
 # fails.
 #
