@@ -506,6 +506,48 @@ impl Backend for RedbBackend {
     }
 }
 
+/// Test-only fault-injection constructor. Gated on the
+/// `_eio_test_internal` feature (leading underscore: cargo
+/// convention for "private"). Used exclusively by ROADMAP:826's
+/// fsync-EIO crash-recovery harness.
+#[cfg(any(test, feature = "_eio_test_internal"))]
+impl RedbBackend {
+    /// Wrap a caller-supplied `redb::StorageBackend` in
+    /// `RedbBackend` so integration tests can drive the production
+    /// commit path against a fault-injected backend.
+    ///
+    /// `db_path` is used **only** for `size_on_disk` reporting and
+    /// MUST be the on-disk path of the file the supplied `backend`
+    /// reads from / writes to.
+    ///
+    /// # Drop-time fsync caveat
+    ///
+    /// `redb::Database::Drop` calls `sync_data` up to four times via
+    /// its trim-and-close path. If your wrapper is armed to fail at
+    /// drop time it will silently swallow EIOs from those calls.
+    /// Disarm before dropping.
+    #[doc(hidden)]
+    pub fn with_backend(
+        backend: impl ::redb::StorageBackend,
+        db_path: PathBuf,
+    ) -> Result<Self, BackendError> {
+        let db = ::redb::Builder::new()
+            .create_with_backend(backend)
+            .map_err(map_database_error)?;
+        let mut registry = Registry::default();
+        hydrate_registry(&db, &mut registry)?;
+        Ok(Self {
+            inner: Arc::new(Inner {
+                db: RwLock::new(Some(db)),
+                registry: RwLock::new(registry),
+                closed: AtomicBool::new(false),
+                commit_seq: AtomicU64::new(0),
+                db_path,
+            }),
+        })
+    }
+}
+
 /// The work performed inside `spawn_blocking` for both
 /// `commit_batch` and `commit_group`. Opens a write transaction,
 /// replays staged ops, sets `Immediate` durability, commits, and
