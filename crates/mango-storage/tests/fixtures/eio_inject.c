@@ -52,11 +52,28 @@ int fsync(int fd) {
         errno = EIO;
         return -1;
     }
+    /*
+     * Defensive: if dlsym(RTLD_NEXT, "fsync") returned NULL at
+     * constructor time (some other interceptor consumed the
+     * symbol resolution, or RTLD_NEXT had nothing further to
+     * resolve), refuse rather than NULL-deref. Today every parent
+     * caller pairs LD_PRELOAD with MANGO_TEST_INJECT_FSYNC_EIO=1,
+     * so this branch is unreachable; the guard exists so a future
+     * caller that loads the shim "inactive" doesn't crash.
+     */
+    if (real_fsync == NULL) {
+        errno = EIO;
+        return -1;
+    }
     return real_fsync(fd);
 }
 
 int fdatasync(int fd) {
     if (inject) {
+        errno = EIO;
+        return -1;
+    }
+    if (real_fdatasync == NULL) {
         errno = EIO;
         return -1;
     }

@@ -121,8 +121,11 @@ const ENV_LD_PRELOAD: &str = "LD_PRELOAD";
 const CHILD_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Linux EIO. Hard-coded because the test is `#[cfg(target_os =
-/// "linux")]`-gated and Linux EIO is `5` per `<errno.h>`. We do
-/// not pull in `libc` just for this constant.
+/// "linux")]`-gated. EIO=5 is correct on every Linux ABI mango
+/// targets (asm-generic errno table: x86_64, aarch64, riscv64,
+/// arm). The only Linux ABIs with a different number are alpha
+/// and mips/sparc, which mango does not ship on. We do not pull
+/// in `libc` just for this constant.
 const LINUX_EIO: i32 = 5;
 
 /// Canary line the LD_PRELOAD shim's constructor emits to stderr
@@ -209,21 +212,37 @@ fn spawn_child(
 /// is absent in stderr when injection was meant to be armed, the
 /// failure message names that explicitly so the engineer doesn't
 /// chase a bug that's actually a sandbox-stripped LD_PRELOAD.
-fn assert_clean_exit(out: &std::process::Output, ctx: &str, expect_armed_canary: bool) {
+///
+/// Pass `Some(&shim_path)` when the child was supposed to load the
+/// shim with injection armed — the diagnostic surfaces the path so
+/// "shim path was wrong" can be told apart from "sandbox stripped
+/// LD_PRELOAD." Pass `None` for setup/baseline children that ran
+/// without injection.
+fn assert_clean_exit(out: &std::process::Output, ctx: &str, expected_shim: Option<&Path>) {
     let code = out.status.code();
     let signal = out.status.signal();
     let stderr = String::from_utf8_lossy(&out.stderr);
     let stdout = String::from_utf8_lossy(&out.stdout);
     let canary_seen = stderr.contains(SHIM_ARMED_CANARY);
+    let expect_armed_canary = expected_shim.is_some();
+
+    let canary_diag = if expect_armed_canary && !canary_seen {
+        let shim_path = expected_shim.expect("checked above");
+        format!(
+            "\nDIAGNOSTIC: 'eio_inject: armed' canary MISSING from stderr — \
+             the LD_PRELOAD shim did not load. \
+             expected LD_PRELOAD={} (file exists on parent FS={}). \
+             Likely causes: sandbox-stripped LD_PRELOAD, wrong shim path, \
+             or compiler/ABI mismatch. The child's commit therefore did \
+             NOT see injected EIO.",
+            shim_path.display(),
+            shim_path.exists(),
+        )
+    } else {
+        String::new()
+    };
 
     if code != Some(0) {
-        let canary_diag = if expect_armed_canary && !canary_seen {
-            "\nDIAGNOSTIC: 'eio_inject: armed' canary MISSING from stderr — \
-             the LD_PRELOAD shim did not load (sandbox-stripped? wrong path?). \
-             The child's commit therefore did NOT see injected EIO."
-        } else {
-            ""
-        };
         panic!(
             "child '{ctx}' exited non-zero: code={:?} signal={:?}{canary_diag}\n\
              ---- child stderr ----\n{stderr}\n\
@@ -234,9 +253,9 @@ fn assert_clean_exit(out: &std::process::Output, ctx: &str, expect_armed_canary:
 
     if expect_armed_canary && !canary_seen {
         panic!(
-            "child '{ctx}' exited 0 but canary 'eio_inject: armed' is MISSING from stderr. \
+            "child '{ctx}' exited 0 but canary is MISSING from stderr. \
              The shim did not load with injection active — the test result is therefore \
-             not attributable to the EIO contract.\n\
+             not attributable to the EIO contract.{canary_diag}\n\
              ---- child stderr ----\n{stderr}\n\
              ---- child stdout ----\n{stdout}\n",
         );
@@ -287,42 +306,86 @@ fn flush_stderr() {
 
 // --- T1 -------------------------------------------------------------
 
+// T1 splits into two children:
+//   1. `t1-setup` — no injection: creates DB and registers `kv`
+//      cleanly. This sidesteps redb's fresh-init flush in
+//      `Database::create()` and the `register_bucket` commit, both
+//      of which would otherwise fail under injection before the
+//      test reached the `commit_batch` it wants to assert on.
+//   2. `t1-eio-first` — injection armed: opens the existing DB
+//      (no fresh-init flush; valid magic on disk) and submits one
+//      `commit_batch`. That commit is the only fdatasync site in
+//      this child, so EIO must surface as `BackendError::Io(EIO)`.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "spawns child process; requires cc + Linux. Gated behind --ignored. See module doc."]
 async fn commit_under_eio_reports_failure_and_leaves_no_torn_state() {
     if let Some((scenario, path)) = child_role() {
         let fut = async move {
-            assert_eq!(scenario, "t1-eio-first");
-            let backend =
-                RedbBackend::open(BackendConfig::new(path.clone(), false)).expect("child open");
-            backend.register_bucket("kv", KV).expect("register kv");
-            let mut batch = backend.begin_batch().expect("begin_batch");
-            batch.put(KV, b"k_eio", b"v_eio").expect("put");
-            let result = backend.commit_batch(batch, true).await;
-            assert_commit_failed_with_eio(&result);
-            flush_stderr();
-            std::process::exit(0);
+            match scenario.as_str() {
+                "t1-setup" => {
+                    let backend = RedbBackend::open(BackendConfig::new(path.clone(), false))
+                        .expect("setup open");
+                    backend
+                        .register_bucket("kv", KV)
+                        .expect("setup register kv");
+                    flush_stderr();
+                    std::process::exit(0);
+                }
+                "t1-eio-first" => {
+                    // Open existing DB. The `kv` bucket is already
+                    // registered on disk (hydrated by `open`), so
+                    // we DO NOT re-register here — calling
+                    // `register_bucket` on an existing binding
+                    // would short-circuit via `AlreadyRegistered`
+                    // without committing, but skipping the call
+                    // keeps the only fdatasync site in this child
+                    // the `commit_batch` below.
+                    let backend = RedbBackend::open(BackendConfig::new(path.clone(), false))
+                        .expect("injection child open");
+                    let mut batch = backend.begin_batch().expect("begin_batch");
+                    batch.put(KV, b"k_eio", b"v_eio").expect("put");
+                    let result = backend.commit_batch(batch, true).await;
+                    assert_commit_failed_with_eio(&result);
+                    flush_stderr();
+                    std::process::exit(0);
+                }
+                other => panic!("unknown scenario: {other}"),
+            }
         };
         tokio::time::timeout(CHILD_TIMEOUT, fut)
             .await
             .expect("child timed out before exit — re-exec wedge?");
+        // Unreachable: `tokio::time::timeout` returns `Ok(())`
+        // only if the inner future returns, but the inner future
+        // ends in `process::exit(0)` which terminates the process
+        // before the await resolves. The other arm (`Err(Elapsed)`)
+        // is unwrapped above and panics on timeout.
         unreachable!("child fut must exit(0) or time out");
     }
 
     // Parent role.
     let dir = TempDir::new().expect("tempdir");
     let shim = build_shim();
+
+    // Setup child — no injection.
+    let out_setup = spawn_child(
+        "commit_under_eio_reports_failure_and_leaves_no_torn_state",
+        "t1-setup",
+        dir.path(),
+        &[],
+    );
+    assert_clean_exit(&out_setup, "t1-setup", None);
+
+    // Injection child — opens the existing DB.
     let shim_os = shim.as_os_str();
     let one = OsStr::new("1");
-    let extra_env: &[(&str, &OsStr)] = &[(ENV_LD_PRELOAD, shim_os), (ENV_INJECT, one)];
-
     let out = spawn_child(
         "commit_under_eio_reports_failure_and_leaves_no_torn_state",
         "t1-eio-first",
         dir.path(),
-        extra_env,
+        &[(ENV_LD_PRELOAD, shim_os), (ENV_INJECT, one)],
     );
-    assert_clean_exit(&out, "t1-eio-first", true);
+    assert_clean_exit(&out, "t1-eio-first", Some(&shim));
 
     // Reopen WITHOUT injection. `read_only=false`: a "child silently
     // failed to create the DB" failure surfaces as redb's open
@@ -341,10 +404,12 @@ async fn commit_under_eio_reports_failure_and_leaves_no_torn_state() {
             panic!("k_eio is present after EIO-failed commit — torn state on disk: {v:?}",)
         }
         Err(BackendError::UnknownBucket(_)) => {
-            // Acceptable in principle (bucket creation rolled back
-            // alongside the failed commit), but worth surfacing
-            // explicitly so a future redb behavior-change is loud.
-            // Fall through — no k_eio means contract met.
+            // After the setup-child split, `kv` IS registered on
+            // disk and the registry hydrates on reopen, so this
+            // arm should not fire. Kept as belt-and-braces against
+            // a future redb-side regression where post-EIO reopen
+            // loses the registry; "no k_eio means contract met"
+            // still holds.
         }
         Err(e) => panic!("snapshot probe failed: {e}"),
     }
@@ -378,14 +443,13 @@ async fn eio_after_successful_commits_preserves_them() {
                     std::process::exit(0);
                 }
                 "t2-eio-after" => {
+                    // Open existing DB — bucket is already on disk
+                    // (registered by child A). DO NOT re-register
+                    // here: the only fdatasync site in this child
+                    // must be the `commit_batch` below, so the EIO
+                    // is unambiguously attributable to it.
                     let backend = RedbBackend::open(BackendConfig::new(path.clone(), false))
                         .expect("child B open");
-                    // Bucket already registered by child A on this
-                    // path — re-registering is idempotent in
-                    // RedbBackend, but we don't need to.
-                    backend
-                        .register_bucket("kv", KV)
-                        .expect("register kv (idempotent)");
                     let mut batch = backend.begin_batch().expect("begin_batch");
                     batch.put(KV, b"k_eio", b"v_eio").expect("put");
                     let result = backend.commit_batch(batch, true).await;
@@ -399,6 +463,7 @@ async fn eio_after_successful_commits_preserves_them() {
         tokio::time::timeout(CHILD_TIMEOUT, fut)
             .await
             .expect("child timed out before exit — re-exec wedge?");
+        // See T1 for why this is unreachable.
         unreachable!("child fut must exit(0) or time out");
     }
 
@@ -413,7 +478,7 @@ async fn eio_after_successful_commits_preserves_them() {
         dir.path(),
         &[],
     );
-    assert_clean_exit(&out_a, "t2-baseline", false);
+    assert_clean_exit(&out_a, "t2-baseline", None);
 
     // Child B: attempt 1 commit under EIO injection.
     let shim_os = shim.as_os_str();
@@ -424,7 +489,7 @@ async fn eio_after_successful_commits_preserves_them() {
         dir.path(),
         &[(ENV_LD_PRELOAD, shim_os), (ENV_INJECT, one)],
     );
-    assert_clean_exit(&out_b, "t2-eio-after", true);
+    assert_clean_exit(&out_b, "t2-eio-after", Some(&shim));
 
     // Reopen without injection.
     let backend = RedbBackend::open(BackendConfig::new(dir.path().to_path_buf(), false))
@@ -457,47 +522,78 @@ async fn eio_after_successful_commits_preserves_them() {
 // the impl ever changes to multi-stage commit, this test will
 // need to grow.
 
+// Like T1, T3 splits into a setup child (no injection) and an
+// injection child. The setup child creates the DB and registers
+// `kv`; the injection child opens the existing DB (no fresh-init
+// flush) and submits a 3-batch group, which is the only fdatasync
+// site under injection.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "spawns child process; requires cc + Linux. Gated behind --ignored. See module doc."]
 async fn eio_during_commit_group_is_atomic() {
     if let Some((scenario, path)) = child_role() {
         let fut = async move {
-            assert_eq!(scenario, "t3-eio-group");
-            let backend =
-                RedbBackend::open(BackendConfig::new(path.clone(), false)).expect("child open");
-            backend.register_bucket("kv", KV).expect("register kv");
+            match scenario.as_str() {
+                "t3-setup" => {
+                    let backend = RedbBackend::open(BackendConfig::new(path.clone(), false))
+                        .expect("setup open");
+                    backend
+                        .register_bucket("kv", KV)
+                        .expect("setup register kv");
+                    flush_stderr();
+                    std::process::exit(0);
+                }
+                "t3-eio-group" => {
+                    // Open existing DB; bucket already on disk.
+                    // Skip re-register so the only fdatasync site
+                    // is the `commit_group` below.
+                    let backend = RedbBackend::open(BackendConfig::new(path.clone(), false))
+                        .expect("injection child open");
 
-            let mut b1 = backend.begin_batch().expect("begin_batch b1");
-            b1.put(KV, b"k1", b"v1").expect("put k1");
-            let mut b2 = backend.begin_batch().expect("begin_batch b2");
-            b2.put(KV, b"k2", b"v2").expect("put k2");
-            let mut b3 = backend.begin_batch().expect("begin_batch b3");
-            b3.put(KV, b"k3", b"v3").expect("put k3");
+                    let mut b1 = backend.begin_batch().expect("begin_batch b1");
+                    b1.put(KV, b"k1", b"v1").expect("put k1");
+                    let mut b2 = backend.begin_batch().expect("begin_batch b2");
+                    b2.put(KV, b"k2", b"v2").expect("put k2");
+                    let mut b3 = backend.begin_batch().expect("begin_batch b3");
+                    b3.put(KV, b"k3", b"v3").expect("put k3");
 
-            let result = backend.commit_group(vec![b1, b2, b3]).await;
-            assert_commit_failed_with_eio(&result);
-            flush_stderr();
-            std::process::exit(0);
+                    let result = backend.commit_group(vec![b1, b2, b3]).await;
+                    assert_commit_failed_with_eio(&result);
+                    flush_stderr();
+                    std::process::exit(0);
+                }
+                other => panic!("unknown scenario: {other}"),
+            }
         };
         tokio::time::timeout(CHILD_TIMEOUT, fut)
             .await
             .expect("child timed out before exit — re-exec wedge?");
+        // See T1 for why this is unreachable.
         unreachable!("child fut must exit(0) or time out");
     }
 
     // Parent role.
     let dir = TempDir::new().expect("tempdir");
     let shim = build_shim();
+
+    // Setup child — no injection.
+    let out_setup = spawn_child(
+        "eio_during_commit_group_is_atomic",
+        "t3-setup",
+        dir.path(),
+        &[],
+    );
+    assert_clean_exit(&out_setup, "t3-setup", None);
+
+    // Injection child — opens the existing DB.
     let shim_os = shim.as_os_str();
     let one = OsStr::new("1");
-
     let out = spawn_child(
         "eio_during_commit_group_is_atomic",
         "t3-eio-group",
         dir.path(),
         &[(ENV_LD_PRELOAD, shim_os), (ENV_INJECT, one)],
     );
-    assert_clean_exit(&out, "t3-eio-group", true);
+    assert_clean_exit(&out, "t3-eio-group", Some(&shim));
 
     let backend = RedbBackend::open(BackendConfig::new(dir.path().to_path_buf(), false))
         .expect("BUG: reopen after EIO commit_group failed");
@@ -508,7 +604,13 @@ async fn eio_during_commit_group_is_atomic() {
         match snap.get(KV, k) {
             Ok(None) => {}
             Ok(Some(v)) => panic!("commit_group atomicity violated: {k:?} is visible: {v:?}",),
-            Err(BackendError::UnknownBucket(_)) => {} // bucket-creation rolled back; acceptable
+            Err(BackendError::UnknownBucket(_)) => {
+                // After the setup-child split, `kv` IS registered
+                // on disk; this arm should not fire. Kept for
+                // belt-and-braces against a registry-loss
+                // regression, with the same "no key means
+                // contract met" rationale as T1.
+            }
             Err(e) => panic!("snapshot probe failed: {e}"),
         }
     }
