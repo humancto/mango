@@ -12,14 +12,29 @@
 //! [`crate::redb::snapshot::RedbSnapshot`] (concrete iterator type
 //! is `'static` w.r.t. the dyn-trait `'a`; the borrow ties the
 //! iterator to `&self` via the `BTreeMap` iterator's own `'a`).
+//!
+//! # Registry semantics
+//!
+//! The bucket-id registry is read **live** from the backend's
+//! shared state on every `get`/`range`, mirroring
+//! `RedbSnapshot::get`/`range` which call
+//! `self.inner.registry.read().contains_id(bucket)` per call. The
+//! registry only ever *grows* (bucket ids are never unregistered),
+//! so a read that observes a post-snapshot bucket id against a
+//! pre-snapshot data state correctly returns `Ok(None)` — the key
+//! does not exist in the snapshot's cut. See the trait-doc on
+//! [`crate::backend::ReadSnapshot::get`] /
+//! [`crate::backend::ReadSnapshot::range`] for the pinned contract.
 
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Bound;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use parking_lot::RwLock;
 
 use crate::backend::{BackendError, BucketId, RangeIter, ReadSnapshot};
+use crate::inmem::InMemState;
 
 /// Cloned snapshot of every bucket's `BTreeMap`. Held behind
 /// `Arc` so multiple snapshots share the same clone if produced
@@ -30,39 +45,45 @@ pub(super) type SnapshotBuckets = Arc<HashMap<BucketId, BTreeMap<Vec<u8>, Bytes>
 
 /// Point-in-time read snapshot of an [`crate::InMemBackend`].
 ///
-/// Construction (`InMemBackend::snapshot`) clones the bucket
+/// Construction (`InMemBackend::snapshot`) clones the bucket data
 /// forest under a read lock; subsequent commits cannot mutate
-/// what this snapshot sees.
+/// what this snapshot sees. The bucket-id registry is read **live**
+/// from the backend on each `get`/`range` call (matches
+/// `RedbSnapshot`); see the module-level "Registry semantics" note.
 #[derive(Debug)]
 pub struct InMemSnapshot {
     pub(super) buckets: SnapshotBuckets,
-    /// Snapshot of the registered bucket-id set. Required so
-    /// `get` / `range` against an unregistered bucket return
-    /// `UnknownBucket` even if no commits ever touched the
-    /// `buckets` map for that id.
-    pub(super) registered_ids: Arc<std::collections::HashSet<BucketId>>,
+    /// Shared handle back to the backend's state, used to read the
+    /// live registry on each `get`/`range`. Mirrors
+    /// `RedbSnapshot.inner` (which carries `Arc<Inner>` for the
+    /// same purpose). The lock is held only briefly for a
+    /// `contains_key` check; no long-held read locks here.
+    pub(super) state: Arc<RwLock<InMemState>>,
 }
 
 impl InMemSnapshot {
-    pub(super) fn new(
-        buckets: SnapshotBuckets,
-        registered_ids: Arc<std::collections::HashSet<BucketId>>,
-    ) -> Self {
-        Self {
-            buckets,
-            registered_ids,
-        }
+    pub(super) fn new(buckets: SnapshotBuckets, state: Arc<RwLock<InMemState>>) -> Self {
+        Self { buckets, state }
+    }
+
+    /// Live registry membership check. Acquires `state.read()` for
+    /// the duration of a single `HashMap::contains_key` call —
+    /// brief, never re-entered.
+    fn registered(&self, bucket: BucketId) -> bool {
+        self.state.read().buckets_by_id.contains_key(&bucket)
     }
 }
 
 impl ReadSnapshot for InMemSnapshot {
     fn get(&self, bucket: BucketId, key: &[u8]) -> Result<Option<Bytes>, BackendError> {
-        if !self.registered_ids.contains(&bucket) {
+        if !self.registered(bucket) {
             return Err(BackendError::UnknownBucket(bucket));
         }
         // A registered bucket with no writes yet has no entry in
         // `buckets`; treat that as "no data" (matches RedbSnapshot's
-        // TableDoesNotExist → None mapping).
+        // TableDoesNotExist → None mapping). Buckets registered
+        // *after* the snapshot was taken also land here — see the
+        // module-level "Registry semantics" note.
         let Some(map) = self.buckets.get(&bucket) else {
             return Ok(None);
         };
@@ -85,7 +106,7 @@ impl ReadSnapshot for InMemSnapshot {
         if start > end {
             return Err(BackendError::InvalidRange("start > end"));
         }
-        if !self.registered_ids.contains(&bucket) {
+        if !self.registered(bucket) {
             return Err(BackendError::UnknownBucket(bucket));
         }
         let Some(map) = self.buckets.get(&bucket) else {

@@ -40,7 +40,7 @@
 pub(crate) mod batch;
 pub(crate) mod snapshot;
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::ops::Bound;
 use std::sync::Arc;
 
@@ -53,10 +53,14 @@ use snapshot::{InMemSnapshot, SnapshotBuckets};
 
 /// Shared state. Held behind `Arc<RwLock<…>>` so the public
 /// `InMemBackend` handle can be cheaply cloned and `close()` can
-/// take `&self`.
+/// take `&self`. The `snapshot` submodule reads the live registry
+/// through this state (mirrors `RedbSnapshot`'s live
+/// `inner.registry` access — see `inmem::snapshot` module docs).
+/// Child modules can see this private struct through Rust's
+/// "descendants can see private items of their ancestors" rule.
 #[derive(Debug)]
-struct InMemState {
-    buckets_by_id: HashMap<BucketId, BucketEntry>,
+pub(crate) struct InMemState {
+    pub(super) buckets_by_id: HashMap<BucketId, BucketEntry>,
     buckets_by_name: HashMap<String, BucketId>,
     closed: bool,
     /// Strictly-monotonic commit cursor. Always returned from
@@ -67,7 +71,7 @@ struct InMemState {
 }
 
 #[derive(Debug, Clone)]
-struct BucketEntry {
+pub(super) struct BucketEntry {
     name: String,
     data: BTreeMap<Vec<u8>, Bytes>,
 }
@@ -79,15 +83,11 @@ pub struct InMemBackend {
 }
 
 impl InMemBackend {
-    /// Snapshot the registered bucket-id set under a read lock.
-    /// Used by `snapshot()` to give `InMemSnapshot::range`/`get`
-    /// faithful `UnknownBucket` errors even for buckets registered
-    /// after the snapshot's clone of `buckets_by_id`.
-    fn registered_ids_locked(state: &InMemState) -> Arc<HashSet<BucketId>> {
-        Arc::new(state.buckets_by_id.keys().copied().collect())
-    }
-
-    /// Snapshot the bucket data forest under a read lock.
+    /// Snapshot the bucket data forest under a read lock. The
+    /// registered-id set is NOT cloned: snapshots read the registry
+    /// **live** through their `Arc<RwLock<InMemState>>` handle, so
+    /// post-snapshot `register_bucket` is observable as `Ok(None)`
+    /// (matches `RedbSnapshot`).
     fn buckets_locked(state: &InMemState) -> SnapshotBuckets {
         let map: HashMap<BucketId, BTreeMap<Vec<u8>, Bytes>> = state
             .buckets_by_id
@@ -175,8 +175,8 @@ impl Backend for InMemBackend {
             return Err(BackendError::Closed);
         }
         let buckets = Self::buckets_locked(&s);
-        let registered_ids = Self::registered_ids_locked(&s);
-        Ok(InMemSnapshot::new(buckets, registered_ids))
+        drop(s);
+        Ok(InMemSnapshot::new(buckets, Arc::clone(&self.state)))
     }
 
     fn begin_batch(&self) -> Result<Self::Batch, BackendError> {

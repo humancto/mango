@@ -279,10 +279,17 @@ async fn swap_exercises_force_fsync_path() {
 /// the `&'static str` carried by `InvalidRange`) don't cause spurious
 /// mismatches. The taxonomy itself is what we're enforcing.
 ///
-/// `BackendError` is `#[non_exhaustive]`, so the catch-all arm yields
-/// `Future` — a freshly-added variant landing without a corresponding
-/// taxonomy update will surface as `Future != Future` mismatches with
-/// the named variants and the test fails closed.
+/// `BackendError` is `#[non_exhaustive]`, so this cross-crate match
+/// MUST carry a `_` arm — that arm collapses any future variant to
+/// `ErrTag::Future`. On its own, that wildcard would let a freshly-
+/// added variant returned by *both* backends silently tag the same
+/// way and pass T3 (fail-open). The structural backstop is the
+/// intra-crate `_backend_error_taxonomy_is_exhaustive` guard inside
+/// `mango-storage` (`src/backend.rs`), which lacks the `_` arm and
+/// fails to compile when a variant is added without an explicit
+/// pattern. Adding a variant therefore breaks the storage crate
+/// build before any cross-crate consumer can hide it — see the
+/// guard's doc comment for details.
 #[derive(Debug, PartialEq, Eq)]
 enum ErrTag {
     Io,
@@ -387,6 +394,54 @@ async fn swap_preserves_error_taxonomy() {
     if let (BackendError::Other(rm), BackendError::Other(im)) = (&r, &i) {
         assert_eq!(rm, im, "empty-value error messages must match");
     }
+
+    // (9) Read against a bucket REGISTERED AFTER the snapshot.
+    //
+    // The trait contract (`ReadSnapshot` "Registry semantics" in
+    // `src/backend.rs`) is: snapshot data is frozen at
+    // `Backend::snapshot()`, but the registry is read live. A
+    // bucket id registered AFTER a snapshot was taken must be
+    // observable through that snapshot's `get`/`range` as
+    // `Ok(None)` / empty-iterator (the snapshot's data cut
+    // pre-dates the registration, so it has no entries).
+    //
+    // This case actually exercises the divergence rust-expert
+    // flagged in the original review: an inmem snapshot that
+    // froze the registry at construction would return
+    // `UnknownBucket` here, while redb (live registry) would
+    // return `Ok(None)`. The taxonomy assertion below
+    // mechanically catches that drift.
+    //
+    // Construct fresh backends so prior steps don't pollute the
+    // post-snapshot registration cut.
+    let tmp_post = TempDir::new().unwrap();
+    let redb_post = open_redb(&tmp_post);
+    let inmem_post = open_inmem();
+    let r_snap_post = redb_post.snapshot().unwrap();
+    let i_snap_post = inmem_post.snapshot().unwrap();
+    redb_post.register_bucket("kv", KV).unwrap();
+    inmem_post.register_bucket("kv", KV).unwrap();
+    let r_get = r_snap_post.get(KV, b"k");
+    let i_get = i_snap_post.get(KV, b"k");
+    assert!(
+        matches!(&r_get, Ok(None)),
+        "redb post-snapshot-registered bucket must read as Ok(None), got {r_get:?}"
+    );
+    assert!(
+        matches!(&i_get, Ok(None)),
+        "inmem post-snapshot-registered bucket must read as Ok(None), got {i_get:?}"
+    );
+    // Range case: empty iterator on both.
+    let r_range = r_snap_post.range(KV, b"\x00", FULL_RANGE_END);
+    let i_range = i_snap_post.range(KV, b"\x00", FULL_RANGE_END);
+    let r_count = r_range
+        .expect("redb empty-iterator on post-snapshot bucket")
+        .count();
+    let i_count = i_range
+        .expect("inmem empty-iterator on post-snapshot bucket")
+        .count();
+    assert_eq!(r_count, 0);
+    assert_eq!(i_count, 0);
 }
 
 // =====================================================================
