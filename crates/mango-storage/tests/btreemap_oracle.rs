@@ -1,18 +1,19 @@
-//! BTreeMap proptest oracle for `RedbBackend` (ROADMAP:824).
+//! `BTreeMap` proptest oracle for `RedbBackend` (ROADMAP:824).
 //!
 //! Complements the bbolt subprocess harness in
-//! `differential_vs_bbolt.rs`. The BTreeMap oracle is in-process
+//! `differential_vs_bbolt.rs`. The `BTreeMap` oracle is in-process
 //! (no subprocess, no JSON IPC), ~200× cheaper per case than the
 //! bbolt harness, and catches **wrapper bugs** at high case rates:
 //! key-range conversion errors, batch-state machine off-by-ones,
-//! snapshot-iterator bugs that observe uncommitted state.
+//! snapshot-iterator bugs that observe uncommitted state, and
+//! intra-batch op-ordering bugs.
 //!
 //! It does NOT model engine-level semantics — fsync, copy-on-write,
 //! page layout, freelist, on-disk size — those are the bbolt
 //! harness's job. The two harnesses are complementary, not
 //! redundant: a wrapper bug that survives 256 bbolt cases will be
-//! flushed by 10 000 BTreeMap cases; an engine quirk the BTreeMap
-//! doesn't model is invisible to it.
+//! flushed by 10 000 `BTreeMap` cases; an engine quirk the
+//! `BTreeMap` doesn't model is invisible to it.
 //!
 //! ## Default vs thorough run
 //!
@@ -20,31 +21,38 @@
 //! builds, gates every PR via the `test` job in
 //! `.github/workflows/ci.yml`. Each case opens a fresh `RedbBackend`
 //! against a `tempfile::TempDir`, which dominates wall-clock; the
-//! per-op cost is negligible.
+//! per-op cost is negligible. Reusing a backend across cases is
+//! deliberately **not** done — a divergence in case N must not be
+//! able to pollute case N+1 and shrink to a misleading minimum.
 //!
-//! Thorough (`MANGO_BTREEMAP_THOROUGH=1`): **10 000 cases** — runs in
-//! ~12 min on debug, intended for nightly / on-demand. Same shape as
-//! the bbolt harness's `MANGO_DIFFERENTIAL_THOROUGH=1` so contributors
-//! only have to learn one knob.
+//! Thorough (`MANGO_BTREEMAP_THOROUGH=1`): **10 000 cases** — runs
+//! in ~12 min on debug, intended for nightly / on-demand. Same
+//! shape as the bbolt harness's `MANGO_DIFFERENTIAL_THOROUGH=1` so
+//! contributors only have to learn one knob.
 //!
 //! ## Op surface
 //!
 //! `Op::Put / Get / Delete / DeleteRange / RangeScan / Snapshot /
-//! Commit`. The single staging buffer (`staged_puts`, `staged_dels`,
-//! `staged_range_dels`) mirrors `WriteBatch`'s sequential semantics
-//! and flushes on every `Op::Commit`. Empty commits are intentional
-//! — they exercise the no-op commit path that
-//! `redb_backend.rs::commit_group_empty_still_increments_stamp`
+//! Commit`. A single `Vec<Staged>` staging buffer mirrors the
+//! `WriteBatch`'s sequential semantics in **generation order** —
+//! both the batch playback and the oracle update walk the same
+//! ordered list. This is load-bearing: the wrapper's `apply_staged`
+//! preserves insertion order, so any sequence-affecting wrapper
+//! bug (e.g. delete-then-put silently reordered to put-then-delete)
+//! will diverge from the oracle and trip the assertion. Empty
+//! commits are intentional — they exercise the no-op commit path
+//! that `redb_backend.rs::commit_group_empty_still_increments_stamp`
 //! gates.
 //!
 //! ## Out of scope (vs the bbolt harness)
 //!
-//! - `CommitGroup` — engine-internal Raft fsync batching primitive;
-//!   BTreeMap has no group concept.
+//! - `CommitGroup` — engine-internal Raft fsync batching primitive.
+//!   `commit_batch(b, true)` exercises the same `commit_staged`
+//!   path as `commit_group(vec![b])`; the multi-batch flatten is
+//!   covered by the bbolt harness's `CommitGroup` op.
 //! - `Defragment` — engine-specific.
-//! - `CloseReopen` — engine-specific durability check; BTreeMap has
-//!   no reopen semantics.
-//! - Concurrency — BTreeMap is `!Sync`; concurrency lives in
+//! - `CloseReopen` — engine-specific durability check.
+//! - Concurrency — `BTreeMap` is `!Sync`; concurrency lives in
 //!   `redb_backend.rs::concurrent_committers_get_distinct_stamps`.
 //!
 //! ## Excluded by design
@@ -56,6 +64,17 @@
 //! - Inverted range (`start > end`) — covered by
 //!   `redb_backend.rs::snapshot_range_invalid_range_errors`. Range
 //!   strategy sorts the two keys so `start <= end` always.
+//!
+//! ## Wrapper-API asymmetry exercised here
+//!
+//! `delete_range`'s `end.is_empty()` means "unbounded upper" (per
+//! the engine-neutral contract bbolt established and the wrapper
+//! adopted in `db5c76d`). `snapshot.range`'s `end.is_empty()` does
+//! **not** carry that meaning — `start..b""` is just an empty range
+//! when `start == b""` and an inverted error when `start > b""`. So
+//! `Op::DeleteRange` may emit `end = b""`, but `Op::RangeScan`
+//! never does. This asymmetry is documented because if the wrapper
+//! ever harmonizes the two, this harness must follow.
 
 #![cfg(not(madsim))]
 #![allow(
@@ -65,7 +84,6 @@
     clippy::indexing_slicing,
     clippy::arithmetic_side_effects,
     clippy::cast_possible_truncation,
-    clippy::doc_markdown,
     clippy::too_many_lines
 )]
 
@@ -81,18 +99,36 @@ use tokio::runtime::Runtime;
 
 const KV: BucketId = BucketId::new(1);
 
-// 16-symbol alphabet (matches the bbolt harness for cross-comparable
-// key-shape coverage; seeds are NOT cross-replayable because the
-// `Op` enums and weights differ — see plan §M2).
+/// 16-symbol alphabet (matches the bbolt harness for cross-comparable
+/// key-shape coverage; seeds are NOT cross-replayable because the
+/// `Op` enums and weights differ — see plan §M2).
+///
+/// **Invariant.** All bytes < `0xff`. The "snapshot everything"
+/// upper bound on lines `Op::Snapshot` and the final implicit
+/// snapshot is `b"\xff"`, which is sound only because every key
+/// the strategy can produce sorts strictly below that. If the
+/// alphabet ever widens to include `0xff`, switch the upper bound
+/// to `Bound::Unbounded` (which `snapshot.range` does not currently
+/// support — see the Wrapper-API asymmetry note in the module
+/// doc).
 const ALPHABET: &[u8] = b"0123456789abcdef";
+
+const _ALPHABET_MAX_LT_FF: () = {
+    let mut i = 0;
+    while i < ALPHABET.len() {
+        assert!(ALPHABET[i] < 0xff, "ALPHABET invariant: all bytes < 0xff");
+        i += 1;
+    }
+};
 
 /// Process-global, single-threaded tokio runtime reused across
 /// proptest cases.
 ///
 /// **Why `current_thread`:** `commit_batch` calls
-/// `tokio::task::spawn_blocking` for the redb fsync, which works on
-/// either flavor. We don't need worker threads (proptest serializes
-/// cases anyway), so the cheaper flavor wins.
+/// `tokio::task::spawn_blocking` for the redb fsync, which lands on
+/// the runtime's blocking-pool thread regardless of flavor. We
+/// don't need worker threads; the proptest macro runs cases
+/// sequentially on the test thread, so the cheaper flavor wins.
 ///
 /// **Why a leak-on-process-exit `OnceLock` instead of `Lazy<Runtime>`
 /// with `Drop`:** dropping a runtime synchronously waits for tasks
@@ -139,8 +175,13 @@ enum Op {
 /// virtually guaranteed collisions inside a length-50 op sequence
 /// without sacrificing the long-key coverage that range ops need.
 ///
-/// Validated by DoD M4: replacing `table.remove(...)` with a no-op
-/// in `apply_staged` is now caught by the proptest within seconds.
+/// **MUTATION TEST INVARIANT.** Validated by `DoD M4`: replacing
+/// `table.remove(...)` with a no-op in `apply_staged` is caught by
+/// the proptest within seconds and shrinks to a 3-op
+/// `[Put, Delete, Commit]` minimum. Do not flatten this distribution
+/// without re-running the same mutation experiment — flattening
+/// silently regresses the harness's bug-finding power even though
+/// every case still passes.
 fn key_strat() -> impl Strategy<Value = Vec<u8>> {
     let alpha = (0u8..ALPHABET.len() as u8).prop_map(|i| ALPHABET[i as usize]);
     prop_oneof![
@@ -154,31 +195,53 @@ fn val_strat() -> impl Strategy<Value = Vec<u8>> {
     proptest::collection::vec(any::<u8>(), 1..=16)
 }
 
-/// Two keys, sorted so `start <= end`. The inverted-range path is
-/// covered by `redb_backend.rs::snapshot_range_invalid_range_errors`;
-/// we exercise the well-formed range here.
+/// Two non-empty keys, sorted so `start <= end`.
+///
+/// Used by `Op::RangeScan`. The inverted-range path is covered by
+/// `redb_backend.rs::snapshot_range_invalid_range_errors`; we
+/// exercise the well-formed range here.
 fn range_pair_strat() -> impl Strategy<Value = (Vec<u8>, Vec<u8>)> {
     (key_strat(), key_strat()).prop_map(|(a, b)| if a <= b { (a, b) } else { (b, a) })
 }
 
+/// Range pair for `Op::DeleteRange`, where `end` is empty 10 % of
+/// the time to exercise the wrapper's "empty end means unbounded
+/// upper" branch (`apply_staged` at `redb/mod.rs:302-305`,
+/// originally fixed in commit `db5c76d`).
+///
+/// When `end` is empty, no sorting is applied — the wrapper
+/// special-cases that branch entirely. When both are non-empty,
+/// they are sorted so `start <= end`.
+fn delete_range_pair_strat() -> impl Strategy<Value = (Vec<u8>, Vec<u8>)> {
+    prop_oneof![
+        90 => (key_strat(), key_strat())
+            .prop_map(|(a, b)| if a <= b { (a, b) } else { (b, a) }),
+        10 => key_strat().prop_map(|start| (start, Vec::new())),
+    ]
+}
+
 /// Strategy weights:
-/// - Put 35 — dominates writes; matches the wrapper's hot path.
-/// - Get 15 — point-lookup coverage of `snapshot.get`.
-/// - Delete 10 — single-key delete.
-/// - DeleteRange 10 — half-open interval delete, the most
-///   wrapper-heavy mutation (where empty-end / empty-start bugs hide
-///   — see `db5c76d`).
-/// - RangeScan 15 — exercises `snapshot.range` iterator.
-/// - Snapshot 5 — full state diff vs committed oracle (catches
+/// - `Put` 35 — dominates writes; matches the wrapper's hot path.
+/// - `Get` 15 — point-lookup coverage of `snapshot.get`.
+/// - `Delete` 10 — single-key delete.
+/// - `DeleteRange` 10 — half-open interval delete, the most
+///   wrapper-heavy mutation (where empty-end / empty-start bugs
+///   hide — see `db5c76d`).
+/// - `RangeScan` 15 — exercises `snapshot.range` iterator.
+/// - `Snapshot` 5 — full state diff vs committed oracle (catches
 ///   "snapshot accidentally observes uncommitted state" bugs).
-/// - Commit 10 — flushes the staging buffer, then advances the
-///   committed oracle. Empty commits intentional (no-op commit path).
+/// - `Commit` 10 — flushes the staging buffer, then advances the
+///   committed oracle. Empty commits intentional (no-op commit
+///   path).
+///
+/// Weights total to 100 by design — keeps the mental arithmetic
+/// trivial when tweaking ratios.
 fn op_strat() -> impl Strategy<Value = Op> {
     prop_oneof![
         35 => (key_strat(), val_strat()).prop_map(|(k, v)| Op::Put(k, v)),
         15 => key_strat().prop_map(Op::Get),
         10 => key_strat().prop_map(Op::Delete),
-        10 => range_pair_strat().prop_map(|(start, end)| Op::DeleteRange { start, end }),
+        10 => delete_range_pair_strat().prop_map(|(start, end)| Op::DeleteRange { start, end }),
         15 => range_pair_strat().prop_map(|(start, end)| Op::RangeScan { start, end }),
         5 => Just(Op::Snapshot),
         10 => Just(Op::Commit),
@@ -196,46 +259,64 @@ fn open_backend(dir: &TempDir) -> RedbBackend {
     backend
 }
 
+/// One staged op, tagged so the commit handler can replay them in
+/// **generation order** against both the batch and the oracle.
+///
+/// Three parallel by-type vecs would be wrong: the wrapper's
+/// `apply_staged` walks the batch in insertion order, so a sequence
+/// like `Op::Delete(k) ; Op::Put(k, v) ; Op::Commit` must commit as
+/// "delete-then-put" (final state: `{k: v}`). Bucketing by type
+/// would force "put-then-delete" (final state: `{}`) and would also
+/// make the oracle agree with that wrong ordering, hiding the bug.
+#[derive(Debug, Clone)]
+enum Staged {
+    Put(Vec<u8>, Vec<u8>),
+    Del(Vec<u8>),
+    DelRange { start: Vec<u8>, end: Vec<u8> },
+}
+
 /// Apply `Vec<Op>` against a fresh `RedbBackend` and a `BTreeMap`
 /// oracle in lockstep, asserting equality at every observation
 /// point.
 ///
 /// Returns `TestCaseResult` so the proptest body can use
-/// `prop_assert_eq!` for shrinker-friendly diagnostics. Reserved
-/// `String` errors are for `BackendError` round-trips that don't
-/// fit `prop_assert_eq!`'s value-pair shape.
+/// `prop_assert_eq!` for shrinker-friendly diagnostics.
 ///
 /// **Oracle semantics.** The `oracle: BTreeMap<Vec<u8>, Vec<u8>>`
-/// reflects the **committed** state only. `Op::Get`, `Op::RangeScan`,
-/// and `Op::Snapshot` go through `Backend::snapshot()`, which also
-/// returns committed state — so the comparison is apples-to-apples.
-/// Do NOT model staged writes in a "shadow" oracle: that would
-/// diverge from `snapshot()` and is exactly the wrapper bug we want
-/// to find. (The bbolt harness has a TLA+-shaped staged-buffer
-/// model for the same reason.)
+/// reflects the **committed** state only. `Op::Get`,
+/// `Op::RangeScan`, and `Op::Snapshot` go through
+/// `Backend::snapshot()`, which also returns committed state — so
+/// the comparison is apples-to-apples. Do NOT model staged writes
+/// in a "shadow" oracle: that would diverge from `snapshot()` and
+/// is exactly the wrapper bug we want to find. (The bbolt harness
+/// has a TLA+-shaped staged-buffer model for the same reason.)
 ///
 /// **Batch lifecycle.** `RedbBatch` is `!Send` (its internal
-/// `WriteTransaction` carries a `PhantomData<*const ()>`); we hold
-/// it across no `.await` boundaries here, so `block_on` is sound.
+/// `WriteTransaction` carries a `PhantomData<*const ()>`); the
+/// `commit_batch` prologue at `redb/mod.rs:434-440` consumes it via
+/// `into_staged()` synchronously, **before** the returned future is
+/// awaited, so the `!Send` batch never enters the future's capture
+/// set and `block_on` on a `current_thread` runtime is sound.
 fn run_case(ops: &[Op]) -> TestCaseResult {
     let tmp = TempDir::new().expect("tempdir");
     let backend = open_backend(&tmp);
     let mut oracle: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
 
-    let mut staged_puts: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-    let mut staged_dels: Vec<Vec<u8>> = Vec::new();
-    let mut staged_range_dels: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    let mut staged: Vec<Staged> = Vec::new();
 
     for (i, op) in ops.iter().enumerate() {
         match op {
             Op::Put(k, v) => {
-                staged_puts.push((k.clone(), v.clone()));
+                staged.push(Staged::Put(k.clone(), v.clone()));
             }
             Op::Delete(k) => {
-                staged_dels.push(k.clone());
+                staged.push(Staged::Del(k.clone()));
             }
             Op::DeleteRange { start, end } => {
-                staged_range_dels.push((start.clone(), end.clone()));
+                staged.push(Staged::DelRange {
+                    start: start.clone(),
+                    end: end.clone(),
+                });
             }
             Op::Get(k) => {
                 let snap = backend.snapshot().expect("snapshot");
@@ -302,40 +383,64 @@ fn run_case(ops: &[Op]) -> TestCaseResult {
             }
             Op::Commit => {
                 // Empty commits are intentional — they exercise the
-                // no-op commit path. Mirror's
-                // redb_backend.rs::commit_group_empty_still_increments_stamp.
+                // no-op commit path that
+                // redb_backend.rs::commit_group_empty_still_increments_stamp
+                // gates. The `force_fsync = true` argument is currently
+                // ignored by the wrapper (see the `let _ = force_fsync`
+                // at redb/mod.rs:442); when fsync policy is wired
+                // through, this oracle won't observe the change — TODO:
+                // add an `Op::CommitNoFsync` variant once the wrapper
+                // honors the parameter.
                 let mut batch = backend.begin_batch().expect("begin_batch");
-                for (k, v) in &staged_puts {
-                    batch.put(KV, k, v).expect("batch put");
-                }
-                for k in &staged_dels {
-                    batch.delete(KV, k).expect("batch delete");
-                }
-                for (start, end) in &staged_range_dels {
-                    batch
-                        .delete_range(KV, start, end)
-                        .expect("batch delete_range");
+                for s in &staged {
+                    match s {
+                        Staged::Put(k, v) => {
+                            batch.put(KV, k, v).expect("batch put");
+                        }
+                        Staged::Del(k) => {
+                            batch.delete(KV, k).expect("batch delete");
+                        }
+                        Staged::DelRange { start, end } => {
+                            batch
+                                .delete_range(KV, start, end)
+                                .expect("batch delete_range");
+                        }
+                    }
                 }
                 let _stamp = runtime()
                     .block_on(backend.commit_batch(batch, true))
                     .expect("commit_batch");
 
-                for (k, v) in staged_puts.drain(..) {
-                    oracle.insert(k, v);
-                }
-                for k in staged_dels.drain(..) {
-                    oracle.remove(&k);
-                }
-                for (start, end) in staged_range_dels.drain(..) {
-                    let to_remove: Vec<Vec<u8>> = oracle
-                        .range::<[u8], _>((
-                            Bound::Included(start.as_slice()),
-                            Bound::Excluded(end.as_slice()),
-                        ))
-                        .map(|(k, _)| k.clone())
-                        .collect();
-                    for k in to_remove {
-                        oracle.remove(&k);
+                // Replay the same staged ops against the oracle in the
+                // same order — must match the wrapper's insertion-order
+                // semantics or B1 (intra-batch reordering bugs) goes
+                // undetected.
+                for s in staged.drain(..) {
+                    match s {
+                        Staged::Put(k, v) => {
+                            oracle.insert(k, v);
+                        }
+                        Staged::Del(k) => {
+                            oracle.remove(&k);
+                        }
+                        Staged::DelRange { start, end } => {
+                            // Empty `end` means "unbounded upper" per
+                            // the wrapper contract (db5c76d). Mirror
+                            // that here so the oracle agrees with the
+                            // wrapper on this branch.
+                            let upper = if end.is_empty() {
+                                Bound::Unbounded
+                            } else {
+                                Bound::Excluded(end.as_slice())
+                            };
+                            let to_remove: Vec<Vec<u8>> = oracle
+                                .range::<[u8], _>((Bound::Included(start.as_slice()), upper))
+                                .map(|(k, _)| k.clone())
+                                .collect();
+                            for k in to_remove {
+                                oracle.remove(&k);
+                            }
+                        }
                     }
                 }
             }
@@ -399,6 +504,53 @@ fn smoke_btreemap_oracle_short_seq() {
     ];
     if let Err(e) = run_case(&ops) {
         panic!("smoke sequence diverged: {e:?}");
+    }
+}
+
+/// Reorder smoke — `Delete(k) ; Put(k, v) ; Commit` must end with
+/// `{k: v}`, not `{}`. Catches the B1-class bug where an oracle
+/// silently agrees with a wrapper that reorders intra-batch ops by
+/// type. If this fails, the staging-buffer ordering is broken.
+#[test]
+fn smoke_intra_batch_delete_then_put() {
+    let ops = vec![
+        Op::Put(b"a".to_vec(), b"1".to_vec()),
+        Op::Commit,
+        // Within one batch: delete, then put. End state must be
+        // `{a: 2}` — wrapper applies in order, oracle must too.
+        Op::Delete(b"a".to_vec()),
+        Op::Put(b"a".to_vec(), b"2".to_vec()),
+        Op::Commit,
+        Op::Get(b"a".to_vec()),
+        Op::Snapshot,
+    ];
+    if let Err(e) = run_case(&ops) {
+        panic!("intra-batch reorder smoke diverged: {e:?}");
+    }
+}
+
+/// Empty-end `DeleteRange` smoke — `[start, "")` must mean "from
+/// start onward" per the wrapper contract from `db5c76d`. Pinned
+/// here so the harness can never silently lose this coverage.
+#[test]
+fn smoke_delete_range_empty_end() {
+    let ops = vec![
+        Op::Put(b"a".to_vec(), b"1".to_vec()),
+        Op::Put(b"b".to_vec(), b"2".to_vec()),
+        Op::Put(b"c".to_vec(), b"3".to_vec()),
+        Op::Commit,
+        Op::DeleteRange {
+            start: b"b".to_vec(),
+            end: Vec::new(),
+        },
+        Op::Commit,
+        Op::Get(b"a".to_vec()),
+        Op::Get(b"b".to_vec()),
+        Op::Get(b"c".to_vec()),
+        Op::Snapshot,
+    ];
+    if let Err(e) = run_case(&ops) {
+        panic!("empty-end DeleteRange smoke diverged: {e:?}");
     }
 }
 
