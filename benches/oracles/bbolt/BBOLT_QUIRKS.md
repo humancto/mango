@@ -17,6 +17,28 @@ refined as the harness runs and surface area grows.
 
 ## Accepted
 
+### Error-wire normalization
+
+bbolt and redb surface semantically equivalent errors with different
+strings — bbolt returns `"key required"` / `"value cannot be nil"`,
+redb returns `"empty key"` / `"empty value"`. The harness strips
+`"backend: "` and `"app: <Method>: "` prefixes (added by the wrapper
+layers on each side) and applies a 2-entry alias table before
+comparing error text. This is **not** a quirk in either engine — it
+is a wire-format translation in the differential boundary, kept in
+the harness rather than the production wrapper so the production
+error types stay engine-native.
+
+### CommitGroup atomicity
+
+Both engines wrap a `CommitGroup` in **one atomic transaction with
+one terminal fsync**: bbolt via `db.Update(func(tx)...)`, redb via
+`RedbBackend::commit_group` (single `WriteTransaction` with
+`durability = Immediate`). The harness diffs post-state at group
+boundaries and does **not** observe per-batch transaction structure.
+Earlier drafts of this doc incorrectly stated that redb ran a fsync
+per batch; that was corrected in PR #53.
+
 ### On-disk size
 
 Both engines use 4 KiB pages with copy-on-write allocators, but
@@ -54,6 +76,61 @@ a concurrent writer in the same case. Concurrent-reader /
 concurrent-writer semantics are explicitly out of scope per ADR
 0002 §6 (single-writer model). If a future workload requires
 concurrent-mutation iterators, this is the item to revisit.
+
+### Failure-artifact GC policy
+
+`target/differential-failures/<utc-secs>-<hash8>/` directories are
+**not** auto-cleaned by the harness — accumulating dirs is the
+intended behaviour locally so a developer triaging a flake has the
+full forensic trail. CI artifact retention is **7 days** for the PR
+`differential` job and **30 days** for the nightly thorough sweep
+(longer to cover weekend triage). Local developers should
+periodically `rm -rf target/differential-failures/` if disk usage
+becomes an issue. Cross-referenced from
+`tests/differential_vs_bbolt/seeds/README.md`.
+
+### Seed-file retirement policy
+
+A file in `crates/mango-storage/tests/differential_vs_bbolt/seeds/`
+may be removed only when **both** of the following hold:
+
+1. The underlying bug fix has landed on `main` and the commit is
+   referenced in the seed's accompanying note in
+   `seeds/README.md`.
+2. A proptest strategy (in `differential_vs_bbolt.rs` or a sibling
+   harness) exercises the same op-shape such that a regression
+   would be caught without the pinned seed.
+
+Removal is a PR reviewed like any code change. This prevents
+`seeds/` from becoming an indefinite dumping ground while
+preserving the coverage gate the pinned case provides. New seeds
+are added under the divergence triage workflow in
+`seeds/README.md`.
+
+---
+
+## Now fixed (formerly divergent)
+
+### Empty-end `DeleteRange`
+
+Previously, redb's `apply_staged` treated a `DeleteRange` with
+`end.is_empty()` as a degenerate empty range (because the underlying
+`retain_in(start..end, ..)` call gets an inverted bound). bbolt
+interprets `len(end) == 0` as **unbounded** — delete from `start`
+onward. The original differential strategy (PR #53) drew keys of
+length 1..=16 and never sampled `end == b""`, so the asymmetry was
+invisible until the strategy was widened. Fix landed in commit
+`db5c76d` (`fix(storage): DeleteRange empty-end means unbounded
+upper`): `apply_staged` now branches on `end.is_empty()` and uses an
+unbounded upper range, and `validate_ops` skips the `start > end`
+check in that case. The fix lives in
+`crates/mango-storage/src/redb/mod.rs`, **not** in the harness — the
+`Backend::DeleteRange` contract is public, so band-aiding it inside
+the differential test would mask the bug from every other caller.
+
+Listed here as a closed item rather than under Accepted because the
+wrapper now matches bbolt's documented contract — no ongoing
+divergence to tolerate.
 
 ---
 
