@@ -489,7 +489,7 @@ async fn t4_register_bucket_under_eio_reports_failure_and_existing_survives() {
         match r {
             Ok(()) => panic!("T4: register_bucket succeeded under armed EIO"),
             Err(BackendError::Io(io)) => {
-                assert_eq!(io.raw_os_error(), Some(EIO), "T4: expected EIO, got {io:?}",);
+                assert_eq!(io.raw_os_error(), Some(EIO), "T4: expected EIO, got {io:?}");
             }
             Err(BackendError::Corruption(_)) => {} // PreviousIo
             Err(e) => panic!("T4: unexpected register_bucket error: {e}"),
