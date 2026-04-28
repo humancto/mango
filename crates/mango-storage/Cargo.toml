@@ -58,7 +58,14 @@ test-utils = []
 # `crates/mango-storage/tests/` see `mango_storage::InMemBackend`
 # without any per-test-target gymnastics. Self-referential dev-deps
 # are a recognized Cargo idiom (rust-bitcoin, serde, others).
-mango-storage = { path = ".", features = ["test-utils"] }
+#
+# `version = "0.1.0"` is required even for `path = "."`: cargo-deny's
+# `wildcard = "deny"` policy flags any dependency without a version
+# requirement, including self-referential path deps. The version
+# string MUST track the package's own `version.workspace = true`
+# (currently 0.1.0 in the workspace root); on the next workspace
+# version bump this also bumps.
+mango-storage = { path = ".", version = "0.1.0", features = ["test-utils"] }
 # ROADMAP:817 integration tests open a real redb on disk in a
 # tempdir; tempfile is the workspace-standard primitive. Exemption
 # already present in supply-chain/config.toml (tempfile@3.27.0).
