@@ -101,6 +101,24 @@ jobs:
         # apply here too. fail-fast is disabled in the profile — a
         # failing test does not short-circuit the run.
         run: cargo nextest run --workspace --all-targets --locked --profile ci
+      - name: cargo nextest run (crash-recovery panic, --run-ignored)
+        # ROADMAP:825: panic-mid-write tests in
+        # `crates/mango-storage/tests/crash_recovery_panic.rs` are
+        # `#[ignore]`-gated to keep `cargo test` fast (they spawn child
+        # processes and fork a real db file). The workspace nextest
+        # step above does NOT run them. CI runs them here via
+        # `--run-ignored all`. This step is *additive* to the workspace
+        # step — the (non-ignored) ROADMAP:826 EIO tests at
+        # `tests/crash_recovery_eio.rs` already run in the workspace
+        # step. Without this step the panic tests would ship un-gated
+        # by CI.
+        run: |
+          cargo nextest run \
+            -p mango-storage \
+            --test crash_recovery_panic \
+            --run-ignored all \
+            --locked \
+            --profile ci
       - name: cargo test --doc
         # nextest does NOT run doctests; this step covers them.
         # Placed after nextest so the workspace dep cache is warm and
