@@ -63,13 +63,23 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 # ROADMAP:819: differential-test harness vs bbolt. proptest drives the
 # op-sequence strategy; base64 encodes byte keys/values over the
 # JSON IPC to the Go oracle subprocess; serde_json frames the wire
-# protocol. All three are test-only (gated behind the integration
-# test at crates/mango-storage/tests/differential_vs_bbolt.rs), so
-# they live in dev-dependencies and never reach a release binary.
-# Supply-chain exemptions for the transitive trees are recorded in
-# supply-chain/config.toml with a review-by date.
+# protocol; serde derives are needed by the seed-replay driver
+# (plan §9 commit 9 step 6) for `DiffOp` / `GroupOp` round-trip
+# through `tests/differential_vs_bbolt/seeds/*.json`. All four are
+# test-only (gated behind the integration test at
+# crates/mango-storage/tests/differential_vs_bbolt.rs), so they
+# live in dev-dependencies and never reach a release binary. Supply-
+# chain exemptions for the transitive trees are recorded in
+# supply-chain/config.toml with a review-by date — `serde` /
+# `serde_derive` / `serde_core` are already exempted as transitives
+# via raft-engine and raft-rs, so this direct use adds no new audit
+# surface. The seed-replay driver hand-rolls FNV-1a-64 for case-id
+# hashing (see `case_hash` in differential_vs_bbolt.rs) rather than
+# pulling sha2 + 6 transitives — only 8 hex chars surface in the
+# failure-artifact dirname.
 proptest = "1.5"
 base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 [lints]

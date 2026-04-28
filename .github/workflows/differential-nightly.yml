@@ -1,0 +1,171 @@
+# Mango — nightly differential sweep
+#
+# Runs the full 10 000-case proptest sweep against the bbolt
+# oracle (`MANGO_DIFFERENTIAL_THOROUGH=1`), plus the harness
+# meta-test `verify_harness_catches.sh` as a gating step. The
+# meta-test mutates the oracle to silently drop Put ops and
+# confirms the harness fails — proves the harness still has
+# divergence-detection power even when nothing else has flagged a
+# regression.
+#
+# Why a separate workflow rather than another `ci.yml` job: the
+# 10k sweep budget is sized in hours, not minutes; folding into
+# `ci.yml` would either inflate every PR run or add a conditional
+# that drifts. Separation keeps the cron expression next to the
+# heavy job and lets `ci.yml` stay PR-cycle fast.
+#
+# Scheduling: `0 7 * * *` UTC = 02:00 ET / 03:00 EDT, well outside
+# US business hours so a red run can be triaged before the day
+# starts.
+#
+# On failure: workflow artifacts (30-day retention to give time
+# for triage across weekends) plus an auto-filed GitHub issue
+# tagged `differential-divergence`. The issue assigns to the
+# latest committer on the harness file so the divergence has an
+# owner immediately.
+#
+# Security note: every `run:` step takes its inputs from the
+# `env:` block rather than template-substituting `${{ ... }}` in
+# script bodies. None of the values consumed (server_url,
+# repository, run_id, github.event_name) come from a contributor-
+# controlled surface, but keeping the inputs/script split makes
+# this workflow auditable against the GitHub Actions injection
+# hardening guidance regardless.
+
+name: differential-nightly
+
+on:
+  schedule:
+    - cron: '0 7 * * *'
+  workflow_dispatch:
+
+permissions:
+  # `issues: write` needed for the auto-file step on failure.
+  contents: read
+  issues: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
+jobs:
+  thorough:
+    name: differential (10k cases)
+    runs-on: ubuntu-24.04
+    # 6 hours is the upper bound observed on hosted-runner fsync
+    # for the 10k sweep. The ROADMAP item 819 plan documents the
+    # halving fallback if hosted-runner fsync regresses further.
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - name: durability guard (MANGO_DIFFERENTIAL_FSYNC must be unset)
+        # Same guard as the PR `differential` job — a silently
+        # disabled fsync would let a thorough sweep paper over a
+        # real durability divergence.
+        run: |
+          if [ -n "${MANGO_DIFFERENTIAL_FSYNC:-}" ]; then
+            echo "::error::MANGO_DIFFERENTIAL_FSYNC is set ('$MANGO_DIFFERENTIAL_FSYNC') — refusing weakened durability."
+            exit 1
+          fi
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5  # v5.5.0
+        with:
+          go-version-file: benches/oracles/bbolt/go.mod
+          cache: false
+      - name: cache Go module download
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684  # v4
+        with:
+          path: ~/go/pkg/mod
+          key: v0-go-mod-${{ runner.os }}-${{ hashFiles('benches/oracles/bbolt/go.sum') }}
+          restore-keys: |
+            v0-go-mod-${{ runner.os }}-
+      - name: build bbolt oracle
+        run: bash benches/oracles/bbolt/build.sh
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          # Distinct prefix from the PR `differential` job so the
+          # 10k-build artifacts don't fight cache-key parity with
+          # the 256-case build.
+          prefix-key: v0-differential-nightly
+          shared-key: ""
+      - name: install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: install cargo-nextest
+        uses: taiki-e/install-action@5f57d6cb7cd20b14a8a27f522884c4bc8a187458  # v2
+        with:
+          tool: cargo-nextest
+      - name: cargo fetch
+        run: cargo fetch --locked
+      - name: harness meta-test (verify_harness_catches.sh)
+        # Gating, not advisory. The script mutates the oracle to
+        # silently drop Put ops and confirms the harness fails. If
+        # the harness ever loses the ability to catch this, the
+        # cron job goes red and the auto-issue step (below) files
+        # a tracked ticket.
+        env:
+          MANGO_BBOLT_ORACLE: ${{ github.workspace }}/benches/oracles/bbolt/bbolt-oracle
+        run: bash benches/oracles/bbolt/verify_harness_catches.sh
+      - name: cargo nextest run (10k cases)
+        env:
+          MANGO_BBOLT_ORACLE: ${{ github.workspace }}/benches/oracles/bbolt/bbolt-oracle
+          # Bumps proptest_cases() from 256 → 10 000 (see
+          # crates/mango-storage/tests/differential_vs_bbolt.rs).
+          MANGO_DIFFERENTIAL_THOROUGH: "1"
+        run: cargo nextest run -p mango-storage --test differential_vs_bbolt --profile ci --locked
+      - name: upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: differential-failures-nightly
+          path: target/differential-failures/
+          retention-days: 30
+          if-no-files-found: ignore
+      - name: file divergence issue on failure
+        # Only fires on the cron schedule (not on manual dispatch
+        # — a developer kicking off a thorough run already knows).
+        # The issue is the durable signal; the workflow log link
+        # in the body is enough for triage.
+        #
+        # Inputs are passed via env: so the gh CLI invocation is
+        # fully shell-expanded from controlled environment values
+        # rather than template-substituted into the script body
+        # (per the workflow_dispatch security note above).
+        if: failure() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          # Newest commit on the harness file. The auto-assignee
+          # is best-effort — `gh issue create --assignee` accepts
+          # a username, not an email, so we look up via the API.
+          AUTHOR_LOGIN=$(gh api \
+            "repos/${GH_REPO}/commits?path=crates/mango-storage/tests/differential_vs_bbolt.rs&per_page=1" \
+            --jq '.[0].author.login // empty' || true)
+          ASSIGNEE_FLAG=""
+          if [ -n "$AUTHOR_LOGIN" ]; then
+            ASSIGNEE_FLAG="--assignee $AUTHOR_LOGIN"
+          fi
+          TITLE="differential nightly red ($(date -u +%Y-%m-%d))"
+          BODY_FILE="$(mktemp)"
+          {
+            echo "Nightly thorough sweep failed."
+            echo ""
+            echo "Run: ${RUN_URL}"
+            echo ""
+            echo "Failure artifacts attached to the workflow run; download and replay"
+            echo "locally with the seed-replay driver. If the divergence is"
+            echo "reproducible, commit the seed under"
+            echo "\`crates/mango-storage/tests/differential_vs_bbolt/seeds/\` per"
+            echo "\`seeds/README.md\`."
+            echo ""
+            echo "Auto-filed by \`.github/workflows/differential-nightly.yml\`."
+          } > "$BODY_FILE"
+          # shellcheck disable=SC2086
+          gh issue create \
+            --label differential-divergence \
+            $ASSIGNEE_FLAG \
+            --title "$TITLE" \
+            --body-file "$BODY_FILE"

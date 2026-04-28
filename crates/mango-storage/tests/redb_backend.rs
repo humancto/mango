@@ -242,6 +242,74 @@ async fn delete_range_removes_half_open_interval() {
 }
 
 #[tokio::test]
+async fn delete_range_with_empty_end_deletes_to_max() {
+    // `end = []` means "unbounded upper" per the engine-neutral
+    // DeleteRange contract (mirrors bbolt's `len(end) == 0`
+    // semantics). Regression test for the wrapper fix: prior to this
+    // commit, `retain_in(b"b"..b"", _)` was the empty range on redb
+    // and deleted nothing, while bbolt deleted b..∞. That silent
+    // divergence surfaces the moment the differential harness's
+    // proptest strategy draws `end == b""`.
+    let tmp = TempDir::new().unwrap();
+    let b = open(&tmp);
+    b.register_bucket("kv", KV).unwrap();
+    for k in [b"a", b"b", b"c", b"d", b"e"] {
+        put(&b, KV, k, b"v").await;
+    }
+
+    let mut batch = b.begin_batch().unwrap();
+    batch.delete_range(KV, b"b", b"").unwrap();
+    let _ = b.commit_batch(batch, true).await.unwrap();
+
+    assert_eq!(get(&b, KV, b"a").as_deref(), Some(&b"v"[..]));
+    assert_eq!(get(&b, KV, b"b"), None);
+    assert_eq!(get(&b, KV, b"c"), None);
+    assert_eq!(get(&b, KV, b"d"), None);
+    assert_eq!(get(&b, KV, b"e"), None);
+}
+
+#[tokio::test]
+async fn delete_range_with_empty_start_and_empty_end_deletes_all() {
+    let tmp = TempDir::new().unwrap();
+    let b = open(&tmp);
+    b.register_bucket("kv", KV).unwrap();
+    for k in [b"a", b"b", b"c"] {
+        put(&b, KV, k, b"v").await;
+    }
+
+    let mut batch = b.begin_batch().unwrap();
+    batch.delete_range(KV, b"", b"").unwrap();
+    let _ = b.commit_batch(batch, true).await.unwrap();
+
+    assert_eq!(get(&b, KV, b"a"), None);
+    assert_eq!(get(&b, KV, b"b"), None);
+    assert_eq!(get(&b, KV, b"c"), None);
+}
+
+#[tokio::test]
+async fn delete_range_allows_empty_end_with_any_start() {
+    // `validate_ops` rejects `start > end` only when `end` is
+    // non-empty. This tests the skip-path: start = "z" (very high),
+    // end = "" (unbounded upper) must NOT be rejected as
+    // `InvalidRange("start > end")`.
+    let tmp = TempDir::new().unwrap();
+    let b = open(&tmp);
+    b.register_bucket("kv", KV).unwrap();
+    for k in [b"a", b"y", b"z"] {
+        put(&b, KV, k, b"v").await;
+    }
+
+    let mut batch = b.begin_batch().unwrap();
+    batch.delete_range(KV, b"z", b"").unwrap();
+    // Commit MUST succeed — must not error as InvalidRange.
+    let _ = b.commit_batch(batch, true).await.unwrap();
+
+    assert_eq!(get(&b, KV, b"a").as_deref(), Some(&b"v"[..]));
+    assert_eq!(get(&b, KV, b"y").as_deref(), Some(&b"v"[..]));
+    assert_eq!(get(&b, KV, b"z"), None);
+}
+
+#[tokio::test]
 async fn unknown_bucket_on_put_errors_from_commit() {
     let tmp = TempDir::new().unwrap();
     let b = open(&tmp);
