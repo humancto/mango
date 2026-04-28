@@ -821,7 +821,7 @@ phase 2.
 - [ ] **Engine-swap dry-run test** `tests/migration/engine_swap_dryrun.rs`: swap `Backend` trait impl from redb to an in-memory reference impl mid-test and confirm data survives and semantics match. Proves the trait boundary from ADR 0002 §6 is actually swappable; defends the 2-week migration budget in ADR 0002 §Migration.
 - [ ] **Recovery-time measurement** in the crash-recovery test harness: report wall-clock recovery time at 1 GiB, 4 GiB, 8 GiB of data after unclean shutdown. **Budget: ≤ 30 seconds at 8 GiB** per ADR 0002 §W8; exceeding this triggers engine swap per §5 Tier-1 trigger #4.
 - [ ] **cargo-geiger baseline pin** for storage deps: redb 4.1.0 = 37 `unsafe` tokens in src/; raft-engine master @ pinned SHA = 49 tokens. Either +10 over baseline trips CI and requires ADR 0002 refresh before the bump merges (per ADR 0002 §5 advisory trigger #8).
-- [ ] Property tests: random put/get/delete/range sequences match an in-memory `BTreeMap` oracle (proptest, 10k+ cases)
+- [x] Property tests: random put/get/delete/range sequences match an in-memory `BTreeMap` oracle (proptest, 10k+ cases)
 - [ ] Crash-recovery test: kill mid-write via a panic, reopen, assert no torn state and no committed data lost
 - [ ] Crash-recovery test under simulated fsync failure (return `EIO`) — backend either commits cleanly or reports failure; no silent data loss
 - [ ] **Disk-full reliability test** `tests/reliability/disk_full.rs`: fill the data dir to 100%, attempt a write; assert the server enters read-only mode, raises `NOSPACE`, never crashes, never corrupts; free space; assert the server recovers cleanly and accepts writes. Operationalizes Reliability bar #3.
