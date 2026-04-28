@@ -188,13 +188,34 @@ impl BackendConfig {
 /// against the same `Self` observe a consistent view even if
 /// commits land concurrently. `Send + Sync` so a snapshot can be
 /// moved across tasks and shared between reader threads.
+///
+/// # Registry semantics (data vs. registry)
+///
+/// Snapshot isolation applies to bucket **data** only. The
+/// bucket-id **registry** (the set of registered ids) is read
+/// **live** at call time, not frozen at `Backend::snapshot()`. The
+/// registry is monotonically growing — bucket ids are never
+/// unregistered — so this is well-defined: a bucket id registered
+/// AFTER the snapshot was taken is observable through this
+/// snapshot's [`Self::get`] / [`Self::range`] as `Ok(None)` /
+/// empty-iterator (the data side of the snapshot is the pre-
+/// registration cut, where the bucket has no entries yet). A
+/// bucket id never registered on the originating backend yields
+/// [`BackendError::UnknownBucket`].
+///
+/// Both shipped impls (`RedbSnapshot`, `InMemSnapshot`) implement
+/// this contract; the engine-swap dry-run test
+/// (`tests/engine_swap_dryrun.rs`) pins it.
 pub trait ReadSnapshot: Send + Sync {
     /// Point lookup. Returns `Ok(None)` if the key is absent from
-    /// the bucket at the snapshot's cut.
+    /// the bucket at the snapshot's cut, or if the bucket was
+    /// registered AFTER this snapshot was taken (see "Registry
+    /// semantics" on the trait).
     ///
     /// # Errors
-    /// Returns [`BackendError::UnknownBucket`] if `bucket` was never
-    /// registered; [`BackendError::Io`] on engine-level I/O error.
+    /// Returns [`BackendError::UnknownBucket`] if `bucket` is not
+    /// registered on the originating backend at the time of the
+    /// call; [`BackendError::Io`] on engine-level I/O error.
     fn get(&self, bucket: BucketId, key: &[u8]) -> Result<Option<Bytes>, BackendError>;
 
     /// Forward range iterator over the half-open interval
@@ -207,10 +228,16 @@ pub trait ReadSnapshot: Send + Sync {
     /// requiring a GAT on `ReadSnapshot` (which would block trait
     /// objects).
     ///
+    /// Returns an empty iterator if the bucket is registered but
+    /// holds no data at the snapshot's cut, INCLUDING the case
+    /// where the bucket was registered AFTER this snapshot was
+    /// taken (see "Registry semantics" on the trait).
+    ///
     /// # Errors
-    /// Returns [`BackendError::UnknownBucket`] or
-    /// [`BackendError::InvalidRange`] on caller errors; other
-    /// variants on engine-level faults.
+    /// Returns [`BackendError::UnknownBucket`] if `bucket` is not
+    /// registered on the originating backend at the time of the
+    /// call, or [`BackendError::InvalidRange`] when `start > end`;
+    /// other variants on engine-level faults.
     fn range<'a>(
         &'a self,
         bucket: BucketId,
@@ -313,6 +340,10 @@ pub trait Backend: Send + Sync + 'static {
     fn register_bucket(&self, name: &str, id: BucketId) -> Result<(), BackendError>;
 
     /// Acquire a read snapshot. Cheap — no I/O.
+    ///
+    /// The returned snapshot freezes bucket **data** at this call;
+    /// the bucket-id **registry** is read live on each access. See
+    /// [`ReadSnapshot`] "Registry semantics" for the precise rule.
     ///
     /// # Errors
     /// [`BackendError::Closed`] after [`Self::close`].
@@ -572,4 +603,45 @@ pub trait RaftLogStore: Send + Sync + 'static {
     /// [`BackendError::Io`] on engine-level I/O error;
     /// [`BackendError::Corruption`] on decode failure.
     fn hard_state(&self) -> Result<HardState, BackendError>;
+}
+
+/// Compile-time exhaustive [`BackendError`] taxonomy guard.
+///
+/// `BackendError` is `#[non_exhaustive]`, so cross-crate match
+/// expressions (the `tag()` helper in `tests/engine_swap_dryrun.rs`
+/// is one) MUST carry a wildcard arm. That wildcard would silently
+/// absorb a freshly-added variant, weakening the engine-swap
+/// taxonomy assertion (T3) to "fails open" — a new variant
+/// returned by both backends would tag as the same `Future`
+/// sentinel and pass.
+///
+/// This intra-crate function is the structural backstop: it lives
+/// inside `mango-storage`, so the wildcard rule does not apply, and
+/// the match arm list is the complete enumeration of variants.
+/// Adding a `BackendError` variant without updating this match
+/// fails the build inside the defining crate (`E0004`,
+/// `non_exhaustive_omitted_patterns` lint, or both depending on
+/// rustc version) — well before any downstream cross-crate
+/// matcher's `_` arm can hide it.
+///
+/// Compiled unconditionally (no `#[cfg(test)]`) so the guard fires
+/// on `cargo check` / `cargo build` / `cargo clippy`, not only on
+/// `cargo test` — strictly the earliest build to add a new variant
+/// is the one that should fail. `#[allow(dead_code)]` because the
+/// function is purely a build-time assertion; nothing calls it.
+///
+/// The body is intentionally trivial; the load-bearing piece is
+/// the explicit pattern list.
+#[allow(dead_code)]
+fn _backend_error_taxonomy_is_exhaustive(e: &BackendError) {
+    match e {
+        BackendError::Io(_)
+        | BackendError::Corruption(_)
+        | BackendError::UnknownBucket(_)
+        | BackendError::InvalidRange(_)
+        | BackendError::Closed
+        | BackendError::BucketConflict { .. }
+        | BackendError::BucketNameConflict { .. }
+        | BackendError::Other(_) => {}
+    }
 }

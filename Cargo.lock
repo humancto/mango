@@ -683,6 +683,7 @@ dependencies = [
  "bytes",
  "madsim",
  "madsim-tokio",
+ "mango-storage",
  "parking_lot",
  "proptest",
  "raft",
