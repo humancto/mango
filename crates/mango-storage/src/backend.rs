@@ -341,6 +341,10 @@ pub trait Backend: Send + Sync + 'static {
 
     /// Acquire a read snapshot. Cheap — no I/O.
     ///
+    /// The returned snapshot freezes bucket **data** at this call;
+    /// the bucket-id **registry** is read live on each access. See
+    /// [`ReadSnapshot`] "Registry semantics" for the precise rule.
+    ///
     /// # Errors
     /// [`BackendError::Closed`] after [`Self::close`].
     fn snapshot(&self) -> Result<Self::Snapshot, BackendError>;
@@ -620,9 +624,14 @@ pub trait RaftLogStore: Send + Sync + 'static {
 /// rustc version) — well before any downstream cross-crate
 /// matcher's `_` arm can hide it.
 ///
+/// Compiled unconditionally (no `#[cfg(test)]`) so the guard fires
+/// on `cargo check` / `cargo build` / `cargo clippy`, not only on
+/// `cargo test` — strictly the earliest build to add a new variant
+/// is the one that should fail. `#[allow(dead_code)]` because the
+/// function is purely a build-time assertion; nothing calls it.
+///
 /// The body is intentionally trivial; the load-bearing piece is
 /// the explicit pattern list.
-#[cfg(test)]
 #[allow(dead_code)]
 fn _backend_error_taxonomy_is_exhaustive(e: &BackendError) {
     match e {
