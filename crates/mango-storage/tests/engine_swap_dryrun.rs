@@ -388,3 +388,267 @@ async fn swap_preserves_error_taxonomy() {
         assert_eq!(rm, im, "empty-value error messages must match");
     }
 }
+
+// =====================================================================
+// T4 — swap_preserves_observable_semantics_under_proptest
+// =====================================================================
+//
+// Generates random op scripts (bounded length 30, 16-symbol ASCII
+// alphabet) against `RedbBackend`, then dumps + replays into a fresh
+// `InMemBackend`, then re-executes every read point op (`Get`,
+// `RangeScan`, `Snapshot`) against both backends and asserts they
+// agree byte-for-byte.
+//
+// The op surface and weighting mirror `btreemap_oracle.rs` so a
+// generic-wrapper bug surfaced by either harness has consistent
+// shrink behavior. Default 256 cases; `MANGO_ENGINE_SWAP_THOROUGH=1`
+// bumps to 10 000 (matches `MANGO_BTREEMAP_THOROUGH=1` /
+// `MANGO_DIFFERENTIAL_THOROUGH=1`).
+
+mod proptest_swap {
+    use super::{
+        drain_bucket, BTreeMap, Backend, BackendConfig, InMemBackend, ReadSnapshot, RedbBackend,
+        TempDir, WriteBatch, FULL_RANGE_END, FULL_RANGE_START, KV,
+    };
+    use std::ops::Bound;
+    use std::sync::OnceLock;
+
+    use proptest::prelude::*;
+    use proptest::test_runner::TestCaseResult;
+    use tokio::runtime::Runtime;
+
+    /// 16-symbol alphabet matching `btreemap_oracle.rs` for
+    /// cross-comparable key-shape coverage. All bytes < `0xff` so
+    /// `FULL_RANGE_END = [0xff, 0xff, 0xff, 0xff]` is sound as the
+    /// implicit "snapshot everything" upper bound.
+    const ALPHABET: &[u8] = b"0123456789abcdef";
+
+    /// Reused single-threaded tokio runtime; same rationale as
+    /// `btreemap_oracle.rs::runtime` — `commit_batch`'s
+    /// `spawn_blocking` lands on the blocking pool regardless of
+    /// flavor; leak on process exit is intentional, since sync-drop
+    /// from a worker thread is a known footgun.
+    fn runtime() -> &'static Runtime {
+        static RT: OnceLock<Runtime> = OnceLock::new();
+        RT.get_or_init(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build current-thread tokio runtime")
+        })
+    }
+
+    #[derive(Debug, Clone)]
+    enum Op {
+        Put(Vec<u8>, Vec<u8>),
+        Delete(Vec<u8>),
+        DeleteRange { start: Vec<u8>, end: Vec<u8> },
+        Commit,
+    }
+
+    /// One read replayed against both backends.
+    #[derive(Debug, Clone)]
+    enum Read {
+        Get(Vec<u8>),
+        RangeScan { start: Vec<u8>, end: Vec<u8> },
+    }
+
+    fn key_strat() -> impl Strategy<Value = Vec<u8>> {
+        let alpha = (0u8..ALPHABET.len() as u8).prop_map(|i| ALPHABET[i as usize]);
+        prop_oneof![
+            60 => proptest::collection::vec(alpha.clone(), 1..=1),
+            25 => proptest::collection::vec(alpha.clone(), 2..=2),
+            15 => proptest::collection::vec(alpha, 3..=8),
+        ]
+    }
+
+    fn val_strat() -> impl Strategy<Value = Vec<u8>> {
+        proptest::collection::vec(any::<u8>(), 1..=16)
+    }
+
+    fn delete_range_pair_strat() -> impl Strategy<Value = (Vec<u8>, Vec<u8>)> {
+        prop_oneof![
+            90 => (key_strat(), key_strat())
+                .prop_map(|(a, b)| if a <= b { (a, b) } else { (b, a) }),
+            10 => key_strat().prop_map(|start| (start, Vec::new())),
+        ]
+    }
+
+    fn op_strat() -> impl Strategy<Value = Op> {
+        prop_oneof![
+            45 => (key_strat(), val_strat()).prop_map(|(k, v)| Op::Put(k, v)),
+            15 => key_strat().prop_map(Op::Delete),
+            15 => delete_range_pair_strat().prop_map(|(start, end)| Op::DeleteRange { start, end }),
+            25 => Just(Op::Commit),
+        ]
+    }
+
+    fn ops_strat() -> impl Strategy<Value = Vec<Op>> {
+        proptest::collection::vec(op_strat(), 1..=30)
+    }
+
+    fn range_pair_strat() -> impl Strategy<Value = (Vec<u8>, Vec<u8>)> {
+        (key_strat(), key_strat()).prop_map(|(a, b)| if a <= b { (a, b) } else { (b, a) })
+    }
+
+    fn read_strat() -> impl Strategy<Value = Read> {
+        prop_oneof![
+            50 => key_strat().prop_map(Read::Get),
+            50 => range_pair_strat().prop_map(|(start, end)| Read::RangeScan { start, end }),
+        ]
+    }
+
+    fn reads_strat() -> impl Strategy<Value = Vec<Read>> {
+        proptest::collection::vec(read_strat(), 1..=20)
+    }
+
+    /// Apply a write op to a redb batch, swallowing
+    /// empty-key/empty-value rejections so the script generator
+    /// doesn't have to filter them — the same op run against
+    /// `InMemBackend` will be rejected with the same `Other(_)`
+    /// message (T3 pins this), so skipping in lockstep is sound.
+    fn try_apply<B: WriteBatch>(batch: &mut B, op: &Op) {
+        match op {
+            Op::Put(k, v) => {
+                let _ = batch.put(KV, k, v);
+            }
+            Op::Delete(k) => {
+                let _ = batch.delete(KV, k);
+            }
+            Op::DeleteRange { start, end } => {
+                let _ = batch.delete_range(KV, start, end);
+            }
+            Op::Commit => {}
+        }
+    }
+
+    async fn apply_script_redb(redb: &RedbBackend, ops: &[Op]) {
+        let mut batch = redb.begin_batch().expect("begin");
+        for op in ops {
+            if matches!(op, Op::Commit) {
+                let _ = redb.commit_batch(batch, false).await.expect("commit");
+                batch = redb.begin_batch().expect("begin");
+            } else {
+                try_apply(&mut batch, op);
+            }
+        }
+        // Final implicit commit so any tail ops materialize.
+        let _ = redb.commit_batch(batch, false).await.expect("final commit");
+    }
+
+    /// Dump every committed (k, v) pair from `redb_snap`'s `KV`
+    /// bucket and replay into a fresh `InMemBackend`.
+    async fn migrate(redb_snap: &mango_storage::RedbSnapshot, target: &InMemBackend) {
+        let mut batch = target.begin_batch().expect("begin migration");
+        for (k, v) in drain_bucket(redb_snap, KV) {
+            batch.put(KV, &k, &v).expect("migration put");
+        }
+        let _ = target
+            .commit_batch(batch, false)
+            .await
+            .expect("commit migration");
+    }
+
+    fn read_redb<S: ReadSnapshot>(snap: &S, r: &Read) -> ReadResult {
+        match r {
+            Read::Get(k) => {
+                let got = snap.get(KV, k).expect("redb get").map(|b| b.to_vec());
+                ReadResult::Point(got)
+            }
+            Read::RangeScan { start, end } => {
+                let mut out = Vec::new();
+                let iter = snap.range(KV, start, end).expect("redb range");
+                for entry in iter {
+                    let (k, v) = entry.expect("redb range item");
+                    out.push((k.to_vec(), v.to_vec()));
+                }
+                ReadResult::Range(out)
+            }
+        }
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum ReadResult {
+        Point(Option<Vec<u8>>),
+        Range(Vec<(Vec<u8>, Vec<u8>)>),
+    }
+
+    fn run_case(ops: &[Op], reads: &[Read]) -> TestCaseResult {
+        let rt = runtime();
+        let tmp = TempDir::new().expect("tempdir");
+        let redb = RedbBackend::open(BackendConfig::new(tmp.path().to_path_buf(), false))
+            .expect("open redb");
+        redb.register_bucket("kv", KV).expect("register kv");
+
+        rt.block_on(apply_script_redb(&redb, ops));
+
+        let redb_snap = redb.snapshot().expect("redb snapshot");
+
+        let inmem =
+            InMemBackend::open(BackendConfig::new("/unused".into(), false)).expect("open inmem");
+        inmem.register_bucket("kv", KV).expect("register kv inmem");
+        rt.block_on(migrate(&redb_snap, &inmem));
+        let inmem_snap = inmem.snapshot().expect("inmem snapshot");
+
+        // Full-state diff: identical sets of committed (k, v) pairs.
+        let r_full = drain_bucket(&redb_snap, KV);
+        let i_full = drain_bucket(&inmem_snap, KV);
+        prop_assert_eq!(
+            &r_full,
+            &i_full,
+            "full-state diff after migration: redb len={}, inmem len={}",
+            r_full.len(),
+            i_full.len()
+        );
+
+        // Replay reads on both snapshots and assert agreement.
+        for (i, r) in reads.iter().enumerate() {
+            let r_redb = read_redb(&redb_snap, r);
+            let r_inmem = read_redb(&inmem_snap, r);
+            prop_assert_eq!(&r_redb, &r_inmem, "read #{} {:?} disagreement", i, r);
+        }
+
+        // Finally cross-check the BTreeMap oracle for the inmem
+        // side — proves migration didn't silently drop or reorder
+        // anything.
+        let oracle: BTreeMap<Vec<u8>, Vec<u8>> = i_full.iter().cloned().collect();
+        let bounds = (
+            Bound::Included(FULL_RANGE_START),
+            Bound::Excluded(FULL_RANGE_END),
+        );
+        let oracle_pairs: Vec<(Vec<u8>, Vec<u8>)> = oracle
+            .range::<[u8], _>(bounds)
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        prop_assert_eq!(
+            &i_full,
+            &oracle_pairs,
+            "inmem disagrees with BTreeMap oracle"
+        );
+        Ok(())
+    }
+
+    fn proptest_cases() -> u32 {
+        if std::env::var("MANGO_ENGINE_SWAP_THOROUGH").is_ok() {
+            10_000
+        } else {
+            256
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: proptest_cases(),
+            max_shrink_iters: 4096,
+            ..ProptestConfig::default()
+        })]
+
+        #[test]
+        fn proptest_engine_swap_redb_to_inmem_observable_semantics(
+            ops in ops_strat(),
+            reads in reads_strat(),
+        ) {
+            run_case(&ops, &reads)?;
+        }
+    }
+}
