@@ -101,6 +101,22 @@ jobs:
         # apply here too. fail-fast is disabled in the profile — a
         # failing test does not short-circuit the run.
         run: cargo nextest run --workspace --all-targets --locked --profile ci
+      - name: cargo nextest run (crash-recovery, --run-ignored)
+        # ROADMAP:825 (crash_recovery_panic) and ROADMAP:826
+        # (crash_recovery_eio) are #[ignore]-gated by default — they
+        # spawn child processes and the EIO test compiles a C shim at
+        # test runtime. Without this step both ship dormant.
+        # Linux-only: crash_recovery_eio is #[cfg(target_os = "linux")];
+        # crash_recovery_panic is unix-portable but is wired here next
+        # to the EIO test to keep the crash-recovery family in one job.
+        run: |
+          cargo nextest run \
+            -p mango-storage \
+            --test crash_recovery_panic \
+            --test crash_recovery_eio \
+            --run-ignored all \
+            --locked \
+            --profile ci
       - name: cargo test --doc
         # nextest does NOT run doctests; this step covers them.
         # Placed after nextest so the workspace dep cache is warm and
