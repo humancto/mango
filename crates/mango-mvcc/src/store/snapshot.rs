@@ -91,10 +91,6 @@ impl Snapshot {
     /// snapshots directly — they observe them via
     /// [`crate::MvccStore::current_snapshot`].
     #[must_use]
-    #[allow(
-        dead_code,
-        reason = "wired into MvccStore::open in the next commit; kept here so the type is self-contained"
-    )]
     pub(crate) fn empty() -> Self {
         Self {
             rev: 0,

@@ -20,12 +20,13 @@
 //!   live-key set used by `Range`. **No `.await` is held under
 //!   this lock.** `BTreeMap` (not `BTreeSet`) so a future watch
 //!   cache can extend the value side without re-typing.
-//! - `current_main: AtomicI64` — highest fully-published revision.
-//!   Release-stored at end of every successful commit; Acquire-
-//!   loaded by `Range` and `current_revision`.
-//! - `compacted: AtomicI64` — compacted floor. Release-stored
-//!   after the on-disk delete commit in `Compact`; Acquire-loaded
-//!   by `Range`. Zero = none.
+//! - `snapshot: arc_swap::ArcSwap<Snapshot>` — atomically
+//!   published `(rev, compacted)` pair. Replaces the prior pair
+//!   of independent `AtomicI64`s (L846). Every successful writer
+//!   builds a new `Arc<Snapshot>` and swaps it in under the
+//!   `writer` mutex; readers take one `load_full()` and observe
+//!   a coherent pair. See [`crate::store::snapshot`] for the
+//!   `load_full()` vs `load()` discipline.
 //!
 //! # Lock ordering
 //!
@@ -53,8 +54,9 @@ pub use txn::{Compare, CompareOp, RequestOp, ResponseOp, TxnRequest, TxnResponse
 
 use std::collections::{BTreeMap, HashSet};
 use std::ops::Bound;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use bytes::Bytes;
 use mango_storage::{Backend, ReadSnapshot, WriteBatch};
 
@@ -172,21 +174,23 @@ pub struct MvccStore<B: Backend> {
     /// is held across `commit_batch().await` (`parking_lot` guards
     /// are `!Send`).
     writer: tokio::sync::Mutex<WriterState>,
-    /// Highest fully-published revision. Release-stored at end of
-    /// every successful commit; Acquire-loaded by `Range` /
-    /// [`Self::current_revision`].
-    current_main: AtomicI64,
-    /// Compacted floor. Release-stored after the on-disk delete
-    /// commit in [`Self::compact`]; Acquire-loaded by `Range`.
-    /// `0` = none.
-    compacted: AtomicI64,
+    /// Atomically-published `(rev, compacted)` pair (L846).
+    /// Replaces the prior `current_main` + `compacted` atomic
+    /// fields. Every successful writer (`put`, `delete_range`,
+    /// mutating `txn`, `compact`) builds a new `Arc<Snapshot>`
+    /// and `store`s it into this slot before returning, while
+    /// holding the `writer` mutex — so the
+    /// `load_full -> mutate -> store` pattern is a CAS in spirit
+    /// even though `ArcSwap::store` itself is not.
+    snapshot: ArcSwap<Snapshot>,
 }
 
 impl<B: Backend> std::fmt::Debug for MvccStore<B> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let snap = self.snapshot.load();
         f.debug_struct("MvccStore")
-            .field("current_main", &self.current_main.load(Ordering::Relaxed))
-            .field("compacted", &self.compacted.load(Ordering::Relaxed))
+            .field("rev", &snap.rev)
+            .field("compacted", &snap.compacted)
             .finish_non_exhaustive()
     }
 }
@@ -237,19 +241,41 @@ impl<B: Backend> MvccStore<B> {
             index: ShardedKeyIndex::new(),
             keys_in_order,
             writer: tokio::sync::Mutex::new(WriterState::new()),
-            current_main: AtomicI64::new(0),
-            compacted: AtomicI64::new(0),
+            snapshot: ArcSwap::from_pointee(Snapshot::empty()),
         })
     }
 
     /// Highest fully-published revision. Returns `0` on a fresh
     /// store.
     ///
-    /// Acquire-loaded; pairs with the writer's Release-store at
-    /// the end of every successful commit.
+    /// Reads through the published [`Snapshot`]; the `Acquire`
+    /// pair is provided by `arc_swap::ArcSwap::load`.
     #[must_use]
     pub fn current_revision(&self) -> i64 {
-        self.current_main.load(Ordering::Acquire)
+        // `load()` returns a Guard; we copy out `rev` (i64) and
+        // drop immediately. Long-lived reader paths use
+        // `current_snapshot()` instead.
+        self.snapshot.load().rev
+    }
+
+    /// Snapshot of the current `(rev, compacted)` pair, as one
+    /// `Arc<Snapshot>`.
+    ///
+    /// Use this when:
+    ///
+    /// - You need to read more than one field from the snapshot
+    ///   (so the pair stays coherent).
+    /// - You're holding the value across a long scan (>1000 keys)
+    ///   or across `.await` points.
+    ///
+    /// Use [`Self::current_revision`] for one-shot revision reads
+    /// — it goes through `ArcSwap::load` (a `Guard`), which
+    /// avoids the refcount-bump but expects a short scope.
+    ///
+    /// See [`crate::store::snapshot`] for the discipline.
+    #[must_use]
+    pub fn current_snapshot(&self) -> Arc<Snapshot> {
+        self.snapshot.load_full()
     }
 
     /// Borrow the underlying backend. Used by writer impls in
@@ -341,9 +367,16 @@ impl<B: Backend> MvccStore<B> {
         })?;
         state.next_main = next;
 
-        // Release-store: pairs with the Acquire-load in
-        // `current_revision` and (later) `Range`.
-        self.current_main.store(rev.main(), Ordering::Release);
+        // Publish the new snapshot under the writer mutex
+        // (L846): atomic `(rev, compacted)` pair, ArcSwap's
+        // `store` is the Release that pairs with readers'
+        // `load`/`load_full` Acquire. `compacted` carries
+        // forward unchanged — Put never advances the floor.
+        let prev = self.snapshot.load_full();
+        self.snapshot.store(Arc::new(Snapshot {
+            rev: rev.main(),
+            compacted: prev.compacted,
+        }));
 
         Ok(rev)
     }
@@ -409,9 +442,13 @@ impl<B: Backend> MvccStore<B> {
             count_only,
         } = req;
 
-        let current = self.current_main.load(Ordering::Acquire);
+        // L846: one snapshot load → coherent (rev, compacted)
+        // pair. Held across the whole Range so the floor check
+        // and the index walk see the same publish point.
+        let snap = self.snapshot.load_full();
+        let current = snap.rev;
         let rev = req_revision.unwrap_or(current);
-        let floor = self.compacted.load(Ordering::Acquire);
+        let floor = snap.compacted;
 
         if rev < floor {
             return Err(MvccError::Compacted {
@@ -557,7 +594,10 @@ impl<B: Backend> MvccStore<B> {
     ///   invariant says it must accept.
     pub async fn delete_range(&self, key: &[u8], end: &[u8]) -> Result<(u64, Revision), MvccError> {
         let mut state = self.writer.lock().await;
-        let current = self.current_main.load(Ordering::Acquire);
+        // L846: take one snapshot for the rev side. The compacted
+        // floor stays unchanged across this op (DeleteRange does
+        // not advance compaction); we re-read it at publish time.
+        let current = self.snapshot.load().rev;
 
         // Step 3: candidate match set under the read lock; drop
         // the guard before any further work.
@@ -648,9 +688,14 @@ impl<B: Backend> MvccStore<B> {
         })?;
         state.next_main = next;
 
-        // Release-store: pairs with the Acquire-load in `Range` /
-        // `current_revision`.
-        self.current_main.store(rev.main(), Ordering::Release);
+        // L846: publish the new snapshot under the writer mutex.
+        // `compacted` carries forward unchanged — DeleteRange
+        // does not advance the floor.
+        let prev = self.snapshot.load_full();
+        self.snapshot.store(Arc::new(Snapshot {
+            rev: rev.main(),
+            compacted: prev.compacted,
+        }));
 
         Ok((deleted, rev))
     }
@@ -719,7 +764,10 @@ impl<B: Backend> MvccStore<B> {
         // different primitive and the cost of the async lock
         // acquisition is dwarfed by the work the txn does.
         let mut state = self.writer.lock().await;
-        let current = self.current_main.load(Ordering::Acquire);
+        // L846: one rev read for the whole txn — compares,
+        // branch evaluation, and any nested Range ops all see
+        // this. Republished at the end if any writes happened.
+        let current = self.snapshot.load().rev;
 
         let outcomes = self.evaluate_compares(&req.compare)?;
         let succeeded = outcomes.iter().all(|&b| b);
@@ -748,10 +796,14 @@ impl<B: Backend> MvccStore<B> {
             context: "next_main overflow",
         })?;
         state.next_main = next;
-        // Release-store: pairs with the Acquire-load in `Range` /
-        // `current_revision`. Range ops below now see the post-
-        // commit state.
-        self.current_main.store(head_rev.main(), Ordering::Release);
+        // L846: publish the new snapshot under the writer mutex.
+        // Range ops queued after this txn see the post-commit
+        // rev. `compacted` carries forward unchanged.
+        let prev = self.snapshot.load_full();
+        self.snapshot.store(Arc::new(Snapshot {
+            rev: head_rev.main(),
+            compacted: prev.compacted,
+        }));
 
         let responses = self.build_txn_responses_mutating(branch, &plan)?;
 
@@ -1026,8 +1078,10 @@ impl<B: Backend> MvccStore<B> {
     ///   fails to decode (indicates backend corruption).
     pub async fn compact(&self, rev: i64) -> Result<(), MvccError> {
         let _state = self.writer.lock().await;
-        let current = self.current_main.load(Ordering::Acquire);
-        let floor = self.compacted.load(Ordering::Acquire);
+        // L846: coherent (rev, compacted) read.
+        let snap = self.snapshot.load_full();
+        let current = snap.rev;
+        let floor = snap.compacted;
 
         if rev <= floor {
             return Ok(());
@@ -1042,11 +1096,18 @@ impl<B: Backend> MvccStore<B> {
         let available = self.compute_available(rev);
         self.commit_compaction_deletes(rev, &available).await?;
 
-        // Step 9: advance the floor. Done BEFORE the in-mem
-        // compaction so a concurrent `Range` reader observing
-        // the new floor will reject `rev < floor` reads — the
-        // on-disk state is already physically advanced to match.
-        self.compacted.store(rev, Ordering::Release);
+        // Step 9: publish the new floor as part of an
+        // atomically-published Snapshot (L846). Done BEFORE the
+        // in-mem compaction so a concurrent `Range` reader
+        // observing the new floor will reject `rev < floor`
+        // reads — the on-disk state is already physically
+        // advanced to match. `rev` (revision head) is unchanged
+        // by compact; `current` was captured under the writer
+        // mutex above.
+        self.snapshot.store(Arc::new(Snapshot {
+            rev: current,
+            compacted: rev,
+        }));
 
         // Step 10: in-mem compaction. `ShardedKeyIndex::compact`
         // drops entries whose history becomes empty. Walk
@@ -1169,9 +1230,12 @@ impl<B: Backend> MvccStore<B> {
     ///   non-`RevisionNotFound` index errors (those two are the
     ///   "absent" path — not errors).
     pub(super) fn evaluate_compares(&self, compares: &[Compare]) -> Result<Vec<bool>, MvccError> {
-        let current = self.current_main.load(Ordering::Acquire);
-        // Snapshot is only needed for `Compare::Value`; skip
-        // snapshot acquisition if no value compares appear.
+        // Caller (`txn`) holds the writer mutex, so the snapshot
+        // value is stable across this call. L846: read rev via
+        // the published Snapshot, not a separate atomic.
+        let current = self.snapshot.load().rev;
+        // Backend snapshot is only needed for `Compare::Value`;
+        // skip snapshot acquisition if no value compares appear.
         let snap = if compares.iter().any(|c| matches!(c, Compare::Value { .. })) {
             Some(self.backend.snapshot()?)
         } else {
@@ -1265,10 +1329,11 @@ mod tests {
         clippy::indexing_slicing
     )]
 
-    use super::MvccStore;
+    use super::{MvccStore, Snapshot};
     use crate::bucket::{KEY_BUCKET_ID, KEY_INDEX_BUCKET_ID};
     use crate::error::OpenError;
     use mango_storage::{Backend, BackendConfig, InMemBackend, ReadSnapshot};
+    use std::sync::Arc;
 
     /// Compile-time check: `MvccStore<InMemBackend>` is
     /// `Send + Sync`. A future change that breaks this (e.g.
@@ -1679,12 +1744,15 @@ mod tests {
             revision: Some(2),
             ..RangeRequest::default()
         };
-        // current_main is still 1 (we tombstoned through the
-        // index only); rev=2 would be FutureRevision. Bump head
-        // via the test hook to avoid the future-rev path.
-        store
-            .current_main
-            .store(2, std::sync::atomic::Ordering::Release);
+        // Snapshot.rev is still 1 (we tombstoned through the
+        // index only); rev=2 would be FutureRevision. Bump the
+        // published snapshot directly to avoid the future-rev
+        // path. L846: writes go through ArcSwap, not an atomic.
+        let prev = store.snapshot.load_full();
+        store.snapshot.store(Arc::new(Snapshot {
+            rev: 2,
+            compacted: prev.compacted,
+        }));
         let r = store.range(req).expect("range");
         assert!(r.kvs.is_empty(), "tombstoned key must not appear");
         assert_eq!(r.count, 0);
