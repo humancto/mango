@@ -1,0 +1,860 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mango — a Rust-native distributed key-value store</title>
+<meta name="description" content="A ground-up Rust port of etcd. Linearizable KV over Raft, watch streams, leases, MVCC. Pre-alpha.">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" type="image/svg+xml" href="./favicon.svg">
+
+<meta property="og:title" content="mango — a Rust-native distributed key-value store">
+<meta property="og:description" content="A ground-up Rust port of etcd. Linearizable KV over Raft, watch streams, leases, MVCC. Pre-alpha.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://humancto.github.io/mango/">
+<meta property="og:image" content="https://humancto.github.io/mango/og.svg">
+<meta name="twitter:card" content="summary_large_image">
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT@9..144,300..900,0..100&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+
+<style>
+:root {
+  --paper:        #F5F1E8;
+  --paper-2:      #EDE7D9;
+  --ink:          #1A1815;
+  --ink-2:        #4A453E;
+  --rule:         #C9C0AE;
+  --mango:        #C04E1A;
+  --mango-soft:   #D5683A;
+  --max-w:        1200px;
+  --col-gap:      32px;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper:      #15140F;
+    --paper-2:    #1F1D17;
+    --ink:        #F0EBDF;
+    --ink-2:      #B5AC97;
+    --rule:       #3A352B;
+    --mango:      #E8794D;
+    --mango-soft: #C04E1A;
+  }
+}
+
+* { box-sizing: border-box; }
+html { -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: "Fraunces", Georgia, "Times New Roman", serif;
+  font-variation-settings: "opsz" 14, "SOFT" 30;
+  font-size: 17px;
+  line-height: 1.55;
+  text-rendering: optimizeLegibility;
+}
+.mono { font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+a {
+  color: var(--ink);
+  text-decoration: none;
+  border-bottom: 1px solid var(--rule);
+  transition: border-color 120ms ease, color 120ms ease;
+}
+a:hover { color: var(--mango); border-bottom-color: var(--mango); }
+a:focus-visible {
+  outline: 2px solid var(--mango);
+  outline-offset: 3px;
+  border-bottom-color: transparent;
+}
+
+.skip-link {
+  position: absolute; left: -9999px; top: 0;
+  background: var(--mango); color: var(--paper);
+  padding: 12px 16px; font-family: "JetBrains Mono", monospace;
+  font-size: 13px; border-bottom: 0;
+}
+.skip-link:focus { left: 16px; top: 16px; z-index: 100; }
+
+.container {
+  max-width: var(--max-w);
+  margin: 0 auto;
+  padding: 0 32px;
+}
+
+/* ---- Top bar ---- */
+.topbar {
+  border-bottom: 1px solid var(--rule);
+  padding: 18px 0;
+}
+.topbar-row {
+  display: flex; align-items: baseline; justify-content: space-between;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+}
+.topbar-id { color: var(--ink); }
+.topbar-id b { font-weight: 700; }
+.topbar-links { display: flex; gap: 28px; }
+.topbar-links a { border-bottom: 0; }
+.topbar-links a:hover { color: var(--mango); }
+
+/* ---- Hero ---- */
+.hero {
+  padding: 72px 0 48px;
+  position: relative;
+}
+.hero-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 24px;
+}
+.hero-eyebrow {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 12px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+  display: flex; align-items: baseline; gap: 14px;
+  opacity: 0; animation: fadeUp 600ms 80ms ease-out forwards;
+}
+.hero-eyebrow .dot {
+  display: inline-block;
+  width: 8px; height: 8px;
+  background: var(--mango);
+  border-radius: 50%;
+}
+.wordmark {
+  font-family: "Fraunces", serif;
+  font-variation-settings: "opsz" 144, "SOFT" 0;
+  font-weight: 500;
+  font-size: clamp(96px, 22vw, 280px);
+  line-height: 0.85;
+  letter-spacing: -0.04em;
+  margin: 0;
+  color: var(--ink);
+  opacity: 0; animation: fadeUp 700ms 160ms ease-out forwards;
+}
+.wordmark em {
+  font-style: italic;
+  color: var(--mango);
+  font-variation-settings: "opsz" 144, "SOFT" 100;
+}
+.hero-tag {
+  font-family: "Fraunces", serif;
+  font-variation-settings: "opsz" 36, "SOFT" 50;
+  font-weight: 400;
+  font-style: italic;
+  font-size: clamp(20px, 2.6vw, 30px);
+  line-height: 1.3;
+  max-width: 720px;
+  color: var(--ink-2);
+  margin: 8px 0 0;
+  opacity: 0; animation: fadeUp 700ms 240ms ease-out forwards;
+}
+.hero-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 28px;
+  align-items: baseline;
+  margin-top: 28px;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+  opacity: 0; animation: fadeUp 700ms 320ms ease-out forwards;
+}
+.hero-meta span b { color: var(--ink); font-weight: 500; }
+.cta-row {
+  display: flex; gap: 14px; flex-wrap: wrap;
+  margin-top: 36px;
+  opacity: 0; animation: fadeUp 700ms 400ms ease-out forwards;
+}
+.cta {
+  display: inline-block;
+  padding: 14px 22px;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 13px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border: 1px solid var(--ink);
+  border-bottom: 1px solid var(--ink);
+  background: var(--ink);
+  color: var(--paper);
+  transition: background 140ms ease, color 140ms ease, transform 140ms ease;
+}
+.cta:hover {
+  background: var(--mango);
+  color: var(--paper);
+  border-color: var(--mango);
+  transform: translate(-2px, -2px);
+  box-shadow: 4px 4px 0 var(--ink);
+}
+.cta.secondary {
+  background: transparent;
+  color: var(--ink);
+}
+.cta.secondary:hover {
+  background: var(--ink);
+  color: var(--paper);
+  border-color: var(--ink);
+  box-shadow: 4px 4px 0 var(--mango);
+}
+
+/* ---- Pre-alpha band ---- */
+.banner {
+  background: var(--mango);
+  color: var(--paper);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 14px 0;
+  border-top: 1px solid var(--ink);
+  border-bottom: 1px solid var(--ink);
+}
+.banner-row {
+  display: flex; gap: 18px; align-items: baseline; flex-wrap: wrap;
+}
+.banner-stamp {
+  background: var(--paper); color: var(--mango);
+  padding: 2px 8px; letter-spacing: 0.12em;
+}
+
+/* ---- Sections ---- */
+section {
+  padding: 80px 0;
+  border-bottom: 1px solid var(--rule);
+}
+.section-head {
+  display: grid;
+  grid-template-columns: 80px 1fr;
+  gap: var(--col-gap);
+  align-items: baseline;
+  margin-bottom: 48px;
+}
+.section-num {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 13px;
+  color: var(--mango);
+  letter-spacing: 0.06em;
+}
+.section-title {
+  font-family: "Fraunces", serif;
+  font-variation-settings: "opsz" 96, "SOFT" 20;
+  font-weight: 500;
+  font-size: clamp(34px, 4.6vw, 56px);
+  line-height: 1.05;
+  letter-spacing: -0.02em;
+  margin: 0;
+}
+.section-lede {
+  font-family: "Fraunces", serif;
+  font-variation-settings: "opsz" 24, "SOFT" 50;
+  font-weight: 400;
+  font-style: italic;
+  font-size: clamp(18px, 2vw, 22px);
+  line-height: 1.5;
+  color: var(--ink-2);
+  max-width: 760px;
+  margin-top: 18px;
+}
+
+/* ---- Manifesto ---- */
+.manifesto-body {
+  display: grid;
+  grid-template-columns: 80px 1fr;
+  gap: var(--col-gap);
+}
+.manifesto-prose p {
+  font-family: "Fraunces", serif;
+  font-variation-settings: "opsz" 18, "SOFT" 20;
+  font-size: clamp(18px, 1.8vw, 21px);
+  line-height: 1.65;
+  margin: 0 0 1.1em;
+  max-width: 720px;
+}
+.manifesto-prose p:first-child::first-letter {
+  font-family: "Fraunces", serif;
+  font-variation-settings: "opsz" 144, "SOFT" 0;
+  font-weight: 600;
+  font-size: 5.2em;
+  line-height: 0.82;
+  float: left;
+  padding: 0.05em 0.12em 0 0;
+  color: var(--mango);
+}
+.manifesto-prose strong {
+  font-weight: 600;
+  font-variation-settings: "opsz" 18, "SOFT" 0;
+}
+
+/* ---- Ten bars ---- */
+.bars {
+  display: grid;
+  grid-template-columns: 80px 1fr;
+  gap: var(--col-gap);
+}
+.bars-list { margin: 0; padding: 0; list-style: none; }
+.bar {
+  display: grid;
+  grid-template-columns: 56px 1fr;
+  gap: 24px;
+  padding: 24px 0;
+  border-top: 1px solid var(--rule);
+  align-items: baseline;
+}
+.bar:last-child { border-bottom: 1px solid var(--rule); }
+.bar-num {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 13px;
+  letter-spacing: 0.04em;
+  color: var(--mango);
+  padding-top: 4px;
+}
+.bar-name {
+  font-family: "Fraunces", serif;
+  font-variation-settings: "opsz" 28, "SOFT" 20;
+  font-weight: 500;
+  font-size: clamp(22px, 2.4vw, 30px);
+  line-height: 1.15;
+  margin: 0 0 6px;
+  letter-spacing: -0.01em;
+}
+.bar-desc {
+  font-family: "Fraunces", serif;
+  font-variation-settings: "opsz" 16, "SOFT" 30;
+  font-size: 16px;
+  line-height: 1.55;
+  color: var(--ink-2);
+  margin: 0;
+  max-width: 760px;
+}
+.bar-metric {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 12px;
+  color: var(--ink);
+  letter-spacing: 0.02em;
+  display: inline-block;
+  margin-top: 8px;
+  padding: 3px 7px;
+  border: 1px solid var(--rule);
+  background: var(--paper-2);
+}
+
+/* ---- Comparison table ---- */
+.comparison {
+  background: var(--paper-2);
+}
+.comp-wrap {
+  display: grid;
+  grid-template-columns: 80px 1fr;
+  gap: var(--col-gap);
+}
+.comp-scroll {
+  overflow-x: auto;
+  margin: 0 -32px;
+  padding: 0 32px;
+  -webkit-overflow-scrolling: touch;
+}
+table.comp {
+  width: 100%;
+  min-width: 800px;
+  border-collapse: collapse;
+  font-family: "Fraunces", serif;
+  font-variation-settings: "opsz" 14, "SOFT" 30;
+  font-size: 14.5px;
+  line-height: 1.45;
+}
+table.comp thead th {
+  font-family: "JetBrains Mono", monospace;
+  font-weight: 500;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+  text-align: left;
+  padding: 14px 16px;
+  border-bottom: 2px solid var(--ink);
+  vertical-align: bottom;
+  background: var(--paper-2);
+}
+table.comp thead th.mango-col {
+  color: var(--mango);
+  border-bottom-color: var(--mango);
+}
+table.comp tbody th {
+  font-weight: 500;
+  font-variation-settings: "opsz" 14, "SOFT" 0;
+  text-align: left;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--rule);
+  vertical-align: top;
+  width: 26%;
+  color: var(--ink);
+}
+table.comp tbody td {
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--rule);
+  vertical-align: top;
+}
+table.comp tbody td.mango-col {
+  background: var(--paper);
+}
+table.comp tr:last-child th,
+table.comp tr:last-child td { border-bottom: 0; }
+.tag {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--mango);
+  display: inline-block;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
+/* ---- Contract / shipped vs planned ---- */
+.contract-grid {
+  display: grid;
+  grid-template-columns: 80px 1fr 1fr;
+  gap: var(--col-gap);
+}
+.contract-col h3 {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 12px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+  font-weight: 500;
+  margin: 0 0 18px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--ink);
+}
+.contract-col h3 .pip {
+  display: inline-block; width: 6px; height: 6px;
+  background: var(--mango); border-radius: 50%;
+  margin-right: 8px; vertical-align: middle;
+}
+.contract-list { margin: 0; padding: 0; list-style: none; }
+.contract-list li {
+  font-family: "Fraunces", serif;
+  font-variation-settings: "opsz" 14, "SOFT" 30;
+  font-size: 15.5px;
+  line-height: 1.45;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--rule);
+  display: grid;
+  grid-template-columns: 70px 1fr;
+  gap: 14px;
+  align-items: baseline;
+}
+.contract-list li .phase {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 11px;
+  color: var(--ink-2);
+  letter-spacing: 0.04em;
+}
+.contract-list.planned li .phase { color: var(--mango); }
+
+/* ---- Footer ---- */
+footer {
+  padding: 48px 0 64px;
+  border-bottom: 0;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  color: var(--ink-2);
+}
+.foot-row {
+  display: flex; flex-wrap: wrap; gap: 24px;
+  justify-content: space-between; align-items: baseline;
+  text-transform: uppercase;
+}
+.foot-row a { border-bottom: 0; }
+.foot-row a:hover { color: var(--mango); }
+
+/* ---- Animation ---- */
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+  .hero-eyebrow, .wordmark, .hero-tag, .hero-meta, .cta-row { opacity: 1; }
+}
+
+/* ---- Mobile ---- */
+@media (max-width: 720px) {
+  .container { padding: 0 22px; }
+  .section-head, .manifesto-body, .bars, .comp-wrap {
+    grid-template-columns: 1fr;
+    gap: 16px;
+  }
+  .contract-grid { grid-template-columns: 1fr; }
+  .bar { grid-template-columns: 48px 1fr; gap: 16px; }
+  .topbar-links { display: none; }
+  .hero { padding: 48px 0 32px; }
+  section { padding: 56px 0; }
+  .comp-scroll { margin: 0 -22px; padding: 0 22px; }
+}
+</style>
+</head>
+
+<body>
+<a class="skip-link" href="#main">Skip to main content</a>
+
+<div class="topbar">
+  <div class="container topbar-row">
+    <div class="topbar-id">
+      <b>mango</b> · ground-up rust port of etcd · pre-alpha
+    </div>
+    <nav class="topbar-links" aria-label="Primary">
+      <a href="https://github.com/humancto/mango/blob/main/ROADMAP.md">Roadmap</a>
+      <a href="https://github.com/humancto/mango/blob/main/CONTRIBUTING.md">Contribute</a>
+      <a href="https://github.com/humancto/mango">GitHub</a>
+    </nav>
+  </div>
+</div>
+
+<header class="hero">
+  <div class="container hero-grid">
+    <div class="hero-eyebrow">
+      <span class="dot" aria-hidden="true"></span>
+      <span>document &nbsp;·&nbsp; v0 &nbsp;·&nbsp; engineering brief</span>
+    </div>
+    <h1 class="wordmark">m<em>a</em>ngo</h1>
+    <p class="hero-tag">
+      A Rust-native distributed key-value store. Linearizable KV over Raft,
+      watch streams, leases, MVCC. Built to beat etcd on ten measurable axes.
+    </p>
+    <div class="hero-meta" role="list">
+      <span role="listitem"><b>License</b> &nbsp;Apache-2.0</span>
+      <span role="listitem"><b>MSRV</b> &nbsp;<span class="mono">stable</span></span>
+      <span role="listitem"><b>Status</b> &nbsp;<span class="mono">pre-alpha</span></span>
+      <span role="listitem"><b>Replication</b> &nbsp;Raft</span>
+      <span role="listitem"><b>Consistency</b> &nbsp;Linearizable</span>
+    </div>
+    <div class="cta-row">
+      <a class="cta" href="https://github.com/humancto/mango/blob/main/ROADMAP.md">Read the roadmap →</a>
+      <a class="cta secondary" href="https://github.com/humancto/mango">View on GitHub</a>
+    </div>
+  </div>
+</header>
+
+<div class="banner" role="alert">
+  <div class="container banner-row">
+    <span class="banner-stamp">Pre-alpha</span>
+    <span>APIs, schemas, benchmarks in flight · do not deploy · phases 1-2 of 14 mostly shipped · 19% of roadmap complete</span>
+  </div>
+</div>
+
+<main id="main">
+
+<section aria-labelledby="manifesto-h">
+  <div class="container">
+    <div class="section-head">
+      <span class="section-num">§ 01</span>
+      <div>
+        <h2 class="section-title" id="manifesto-h">Etcd's problem space, attacked with Rust.</h2>
+        <p class="section-lede">
+          Mango is not "etcd, rewritten." It is etcd's problem space attacked with
+          a language whose primitives lift specific etcd footguns out of existence
+          at compile time.
+        </p>
+      </div>
+    </div>
+    <div class="manifesto-body">
+      <span aria-hidden="true"></span>
+      <div class="manifesto-prose">
+        <p>
+          Etcd is the reference implementation we study. We are not bound by its
+          Go-isms. <strong>No GC</strong> means tail latency is bounded by what we
+          do in our own code, never by a runtime collector. <strong>Memory safety
+          without a runtime</strong> means use-after-free, double-free, and data
+          races on shared memory are not possible in safe Rust — CVEs in this
+          class become impossible-by-construction, not impossible-after-careful-review.
+        </p>
+        <p>
+          <strong>Fearless concurrency</strong> via <span class="mono">Send</span>
+          and <span class="mono">Sync</span> turns "shared mutable state across
+          threads" from a Friday-night page into a compile error. <strong>Explicit
+          failure as a value</strong> via <span class="mono">Result&lt;T, E&gt;</span>
+          makes every fallible operation visible at the call site. <strong>Cargo-native
+          supply chain hygiene</strong> via <span class="mono">cargo-deny</span>,
+          <span class="mono">cargo-audit</span>, <span class="mono">cargo-vet</span>,
+          and SBOM via CycloneDX.
+        </p>
+        <p>
+          These are the <em>mechanism</em>. The ten bars below are the
+          <em>measurement</em>. Every PR is judged against them. If a change merely
+          matches etcd, that is a regression relative to the goal — find the win,
+          or find the lever.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section aria-labelledby="bars-h">
+  <div class="container">
+    <div class="section-head">
+      <span class="section-num">§ 02</span>
+      <div>
+        <h2 class="section-title" id="bars-h">Ten measurable axes.</h2>
+        <p class="section-lede">
+          Each bar has a comparison oracle (the pinned etcd v3.5.x binary at
+          <span class="mono">benches/oracles/etcd/</span>), a hardware signature,
+          and a named test that gates merge. Full bar definitions in the roadmap.
+        </p>
+      </div>
+    </div>
+    <div class="bars">
+      <span aria-hidden="true"></span>
+      <ol class="bars-list">
+
+        <li class="bar">
+          <span class="bar-num">01</span>
+          <div>
+            <h3 class="bar-name">Performance — blazing fast.</h3>
+            <p class="bar-desc">Rust's no-GC plus zero-cost abstractions are the structural lever. We target ≥ 1.5× etcd write throughput, ≤ 0.7× p99 latency, ≤ 0.7× idle RSS, ≤ 0.7× cold start, ≤ 0.7× failover.</p>
+            <span class="bar-metric">benches/runner/{raft,grpc,idle-rss,cold-start,failover}.sh</span>
+          </div>
+        </li>
+
+        <li class="bar">
+          <span class="bar-num">02</span>
+          <div>
+            <h3 class="bar-name">Concurrency &amp; parallelism.</h3>
+            <p class="bar-desc">Per-core scaling is workload-shaped. Read-only ≥ 14× at 16 cores. Mixed ≥ 8×. Write-heavy ≥ 4× (apply is fundamentally serial in Raft). Zero deadlocks under fuzzed concurrent loads.</p>
+            <span class="bar-metric">per-core-scaling.sh · loom/* · clippy::await_holding_lock</span>
+          </div>
+        </li>
+
+        <li class="bar">
+          <span class="bar-num">03</span>
+          <div>
+            <h3 class="bar-name">Reliability.</h3>
+            <p class="bar-desc">Graceful degradation. No thundering herds on follower restart. Bounded recovery time. Disk-full enters read-only, raises NOSPACE, never crashes, never corrupts.</p>
+            <span class="bar-metric">tests/reliability/*.rs · tests/chaos/*.rs</span>
+          </div>
+        </li>
+
+        <li class="bar">
+          <span class="bar-num">04</span>
+          <div>
+            <h3 class="bar-name">Correctness — distributed-systems grade.</h3>
+            <p class="bar-desc">Linearizability is the load-bearing claim and we verify it externally. Public Jepsen run in CI. Deterministic simulator on madsim. Porcupine linearizability checker on every recorded history.</p>
+            <span class="bar-metric">tests/jepsen · tests/simulator · tests/linearizability</span>
+          </div>
+        </li>
+
+        <li class="bar">
+          <span class="bar-num">05</span>
+          <div>
+            <h3 class="bar-name">Safety — memory-safe by construction.</h3>
+            <p class="bar-desc">unsafe_code = "forbid" workspace-wide except in audited, named modules with documented invariants and Miri tests. No panics in steady state — denied by clippy in non-test code.</p>
+            <span class="bar-metric">unsafe_code = "forbid" · MIRIFLAGS=-Zmiri-strict-provenance</span>
+          </div>
+        </li>
+
+        <li class="bar">
+          <span class="bar-num">06</span>
+          <div>
+            <h3 class="bar-name">Security — defense in depth.</h3>
+            <p class="bar-desc">Memory safety is necessary but not sufficient. SHA-pinned actions, cargo-deny, cargo-audit, cargo-vet, CycloneDX SBOM. Threat model formalized in Phase 12.</p>
+            <span class="bar-metric">deny.toml · supply-chain/audits.toml · cyclonedx</span>
+          </div>
+        </li>
+
+        <li class="bar">
+          <span class="bar-num">07</span>
+          <div>
+            <h3 class="bar-name">Large-scale distributed.</h3>
+            <p class="bar-desc">Tier 2 read-scale-out via learner replicas. Up to ~5-10× etcd on linearizable ReadIndex; up to ~2× on bounded-staleness reads. 5-voter + 5-learner cluster on canonical hardware.</p>
+            <span class="bar-metric">phase 14.5 · benches/runner/read-scale-out.sh</span>
+          </div>
+        </li>
+
+        <li class="bar">
+          <span class="bar-num">08</span>
+          <div>
+            <h3 class="bar-name">Operability.</h3>
+            <p class="bar-desc">Production-grade defaults. Predictable behavior at scale. OpenTelemetry-native observability with structured logs, OTel traces, richer metrics than etcd ships.</p>
+            <span class="bar-metric">otel · structured logs · runtime tunables documented</span>
+          </div>
+        </li>
+
+        <li class="bar">
+          <span class="bar-num">09</span>
+          <div>
+            <h3 class="bar-name">Developer ergonomics.</h3>
+            <p class="bar-desc">Mango should be pleasant to contribute to. Fast CI. Small contribution surface. Expert-gated PR review on every change. cargo nextest + loom + madsim + miri all in scope.</p>
+            <span class="bar-metric">cargo nextest · CONTRIBUTING.md · expert-gated PRs</span>
+          </div>
+        </li>
+
+        <li class="bar">
+          <span class="bar-num">10</span>
+          <div>
+            <h3 class="bar-name">Storage efficiency.</h3>
+            <p class="bar-desc">Smaller on-disk footprint than bbolt-based etcd. Faster compaction with bounded read-p99 impact during compaction (≤ 1.5× steady-state). LZ4/zstd block compression configurable.</p>
+            <span class="bar-metric">benches/runner/disk-size.sh · benches/results/phase-1/</span>
+          </div>
+        </li>
+      </ol>
+    </div>
+  </div>
+</section>
+
+<section class="comparison" aria-labelledby="comp-h">
+  <div class="container">
+    <div class="section-head">
+      <span class="section-num">§ 03</span>
+      <div>
+        <h2 class="section-title" id="comp-h">Is mango the right tool for me?</h2>
+        <p class="section-lede">
+          Distributed KV stores are not interchangeable. Pick the one whose
+          consistency model and scale ceiling match the problem you have.
+        </p>
+      </div>
+    </div>
+    <div class="comp-wrap">
+      <span aria-hidden="true"></span>
+      <div class="comp-scroll">
+        <table class="comp">
+          <thead>
+            <tr>
+              <th scope="col"></th>
+              <th scope="col" class="mango-col">Mango</th>
+              <th scope="col">etcd</th>
+              <th scope="col">FoundationDB</th>
+              <th scope="col">DynamoDB</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <th scope="row">Consistency</th>
+              <td class="mango-col">Linearizable</td>
+              <td>Linearizable</td>
+              <td>Strict serializable</td>
+              <td>Eventual; strong opt-in (2× cost)</td>
+            </tr>
+            <tr>
+              <th scope="row">Replication</th>
+              <td class="mango-col">Raft, single cluster</td>
+              <td>Raft, single cluster</td>
+              <td>Multi-version, multi-shard</td>
+              <td>Hash-sharded, multi-region async</td>
+            </tr>
+            <tr>
+              <th scope="row">Writes / cluster</th>
+              <td class="mango-col">&ge; 1.5&times; etcd <span class="tag">target · bar #1</span></td>
+              <td>~50-200K /sec</td>
+              <td>~10M /sec (mixed)</td>
+              <td>~10-100M /sec global (mixed)</td>
+            </tr>
+            <tr>
+              <th scope="row">Linearizable reads</th>
+              <td class="mango-col">~600K /sec (Tier 2b) <span class="tag">target</span></td>
+              <td>~50-150K /sec (ReadIndex)</td>
+              <td>(see above)</td>
+              <td>Strong-reads-only mode (2× cost)</td>
+            </tr>
+            <tr>
+              <th scope="row">Stale reads</th>
+              <td class="mango-col">~1M /sec (Tier 2a) <span class="tag">target</span></td>
+              <td>~500K-1M /sec (serializable)</td>
+              <td>(see above)</td>
+              <td>Default mode</td>
+            </tr>
+            <tr>
+              <th scope="row">Deployment</th>
+              <td class="mango-col">Self-host, OSS</td>
+              <td>Self-host, OSS</td>
+              <td>Self-host, OSS</td>
+              <td>AWS-only, hosted</td>
+            </tr>
+            <tr>
+              <th scope="row">Primary use case</th>
+              <td class="mango-col">Cluster metadata, coordination, config, leader election</td>
+              <td>Same as mango</td>
+              <td>Application data, ACID at scale</td>
+              <td>Application data CRUD at hyperscale</td>
+            </tr>
+            <tr>
+              <th scope="row">Operational profile</th>
+              <td class="mango-col">Single-binary, deterministic latency (no GC)</td>
+              <td>Single-binary, Go GC</td>
+              <td>Multi-process; coordinators, storage, log</td>
+              <td>Fully managed</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section aria-labelledby="contract-h">
+  <div class="container">
+    <div class="section-head">
+      <span class="section-num">§ 04</span>
+      <div>
+        <h2 class="section-title" id="contract-h">Shipped, in flight, planned.</h2>
+        <p class="section-lede">
+          The roadmap progresses phase by phase, expert-gated PR by expert-gated PR.
+          ROADMAP.md is the source of truth; everything below is a snapshot.
+        </p>
+      </div>
+    </div>
+    <div class="contract-grid">
+      <span aria-hidden="true"></span>
+      <div class="contract-col">
+        <h3><span class="pip"></span>Shipped</h3>
+        <ul class="contract-list">
+          <li><span class="phase">Phase 0</span><span>Governance, CI gates, lints, supply-chain tooling.</span></li>
+          <li><span class="phase">Phase 0.5</span><span>Foundation tooling: nextest, loom, madsim, miri, semver-checks, cargo-deny.</span></li>
+          <li><span class="phase">Phase 1</span><span>Single-node storage layer on redb plus tikv/raft-engine, behind a swappable Backend trait.</span></li>
+          <li><span class="phase">Phase 2</span><span>MVCC: Revision, sharded KeyIndex, snapshots via arc_swap, compaction with physical removal, fuzz target on key encoding.</span></li>
+        </ul>
+      </div>
+      <div class="contract-col">
+        <h3><span class="pip"></span>Planned</h3>
+        <ul class="contract-list planned">
+          <li><span class="phase">Phase 3</span><span>Watch: streaming change notifications, sync &amp; unsync watcher groups, progress notifies.</span></li>
+          <li><span class="phase">Phase 4</span><span>Lease: TTL keys, keep-alive, expiry-driven atomic delete.</span></li>
+          <li><span class="phase">Phase 5</span><span>Raft consensus on tikv/raft-rs. Pipelined replication, ReadIndex, deterministic simulation.</span></li>
+          <li><span class="phase">Phase 6</span><span>gRPC server: KV, Watch, Lease services + the node binary.</span></li>
+          <li><span class="phase">Phase 7</span><span>mangoctl, the etcdctl-equivalent CLI.</span></li>
+          <li><span class="phase">Phase 13</span><span>Robustness: public Jepsen run, deterministic simulator regression suite.</span></li>
+          <li><span class="phase">Phase 14</span><span>Performance push against the pinned etcd v3.5.x oracle.</span></li>
+          <li><span class="phase">Phase 14.5</span><span>Tier 2 read-scale-out via learner replicas.</span></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="container foot-row">
+    <div>© <span class="mono">2026</span> · <a href="https://github.com/humancto/mango/blob/main/LICENSE">Apache-2.0</a></div>
+    <div>
+      <a href="https://github.com/humancto/mango">Repository</a>
+      &nbsp;·&nbsp;
+      <a href="https://github.com/humancto/mango/blob/main/SECURITY.md">Security</a>
+      &nbsp;·&nbsp;
+      <a href="https://github.com/humancto/mango/blob/main/ROADMAP.md">Roadmap</a>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>

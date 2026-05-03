@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
+  <defs>
+    <style>
+      .bg { fill: #F5F1E8; }
+      .ink { fill: #1A1815; }
+      .ink2 { fill: #4A453E; }
+      .mango { fill: #C04E1A; }
+      .rule { stroke: #C9C0AE; stroke-width: 1; }
+      .word { font-family: Georgia, "Times New Roman", serif; font-weight: 500; }
+      .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+    </style>
+  </defs>
+
+  <rect class="bg" width="1200" height="630"/>
+
+  <line class="rule" x1="80" y1="100" x2="1120" y2="100"/>
+  <line class="rule" x1="80" y1="540" x2="1120" y2="540"/>
+
+  <text class="mono ink2" x="80" y="78" font-size="14" letter-spacing="2">
+    DOCUMENT · V0 · ENGINEERING BRIEF
+  </text>
+  <text class="mono ink" x="1120" y="78" font-size="14" letter-spacing="2" text-anchor="end">
+    PRE-ALPHA
+  </text>
+
+  <text class="word ink" x="80" y="370" font-size="280" letter-spacing="-12">
+    m<tspan class="mango" font-style="italic">a</tspan>ngo
+  </text>
+
+  <text class="word ink2" x="80" y="450" font-size="32" font-style="italic">
+    A Rust-native distributed key-value store.
+  </text>
+  <text class="word ink2" x="80" y="490" font-size="32" font-style="italic">
+    Built to beat etcd on ten measurable axes.
+  </text>
+
+  <text class="mono ink2" x="80" y="572" font-size="14" letter-spacing="2">
+    LINEARIZABLE · RAFT · MVCC · WATCH · LEASE
+  </text>
+  <text class="mono ink" x="1120" y="572" font-size="14" letter-spacing="2" text-anchor="end">
+    HUMANCTO/MANGO
+  </text>
+</svg>
