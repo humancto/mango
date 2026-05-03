@@ -32,8 +32,9 @@ mod raft_engine;
 pub mod inmem;
 
 pub use backend::{
-    Backend, BackendConfig, BackendError, BucketId, CommitStamp, HardState, RaftEntry,
-    RaftEntryType, RaftLogStore, RaftSnapshotMetadata, RangeIter, ReadSnapshot, WriteBatch,
+    Backend, BackendConfig, BackendError, BucketId, CommitStamp, CompressionMode, HardState,
+    RaftEntry, RaftEntryType, RaftLogStore, RaftSnapshotMetadata, RangeIter, ReadSnapshot,
+    WriteBatch,
 };
 #[cfg(feature = "test-utils")]
 pub use inmem::{batch::InMemBatch, snapshot::InMemSnapshot, InMemBackend};
@@ -193,5 +194,40 @@ mod tests {
         const KV_BUCKET: BucketId = BucketId::new(1);
         assert_eq!(KV_BUCKET.raw, 1);
         assert_eq!(BucketId::new(7).raw, 7);
+    }
+
+    // --- ROADMAP:830 CompressionMode + builder shape ----------------
+
+    #[test]
+    fn compression_mode_default_is_none() {
+        // Pins the parity-bench surface — ROADMAP:828's
+        // "default compression on" is a deployment-time choice, not
+        // the constructor default. Flipping this default would
+        // silently break the differential-vs-bbolt test (which
+        // pins None explicitly) and Phase 1 parity benches.
+        assert_eq!(CompressionMode::default(), CompressionMode::None);
+    }
+
+    #[test]
+    fn backend_config_constructor_default_is_compression_none() {
+        let cfg = BackendConfig::new(std::path::PathBuf::from("/tmp/x"), false);
+        assert_eq!(cfg.compression, CompressionMode::None);
+    }
+
+    #[test]
+    fn backend_config_with_compression_overrides_default() {
+        let cfg = BackendConfig::new(std::path::PathBuf::from("/tmp/x"), false)
+            .with_compression(CompressionMode::Lz4);
+        assert_eq!(cfg.compression, CompressionMode::Lz4);
+    }
+
+    #[test]
+    fn backend_config_with_compression_is_chainable_and_clone_round_trips() {
+        let cfg = BackendConfig::new(std::path::PathBuf::from("/tmp/x"), true)
+            .with_compression(CompressionMode::Lz4);
+        let cloned = cfg.clone();
+        assert_eq!(cloned.read_only, true);
+        assert_eq!(cloned.compression, CompressionMode::Lz4);
+        assert_eq!(cloned.data_dir, std::path::PathBuf::from("/tmp/x"));
     }
 }

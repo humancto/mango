@@ -58,6 +58,7 @@ use crate::backend::{Backend, BackendConfig, BackendError, BucketId, CommitStamp
 pub(crate) mod batch;
 pub(crate) mod registry;
 pub(crate) mod snapshot;
+pub(crate) mod value_compression;
 
 use batch::{RedbBatch, StagedOp};
 use registry::{physical_table_name, RegisterOutcome, Registry, REGISTRY_TABLE_NAME};
