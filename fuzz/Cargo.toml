@@ -1,0 +1,42 @@
+[package]
+name = "mango-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Caret ranges (the cargo-fuzz default). Don't switch to exact
+# pins — those break transitively when cargo-fuzz itself bumps.
+# `fuzz/Cargo.lock` does the real pinning.
+[dependencies]
+arbitrary = { version = "1", features = ["derive"] }
+libfuzzer-sys = "0.4"
+mango-mvcc = { path = "../crates/mango-mvcc" }
+
+# cargo-fuzz's default release profile is `debug = true` (full
+# debuginfo). Line tables are enough for symbolicated panics and
+# noticeably faster — matches the rust-lang/cargo-fuzz docs'
+# recommended baseline for serious fuzzing.
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "round_trip"
+path = "fuzz_targets/round_trip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_arbitrary"
+path = "fuzz_targets/decode_arbitrary.rs"
+test = false
+doc = false
+bench = false
+
+# Empty workspace table pins the boundary — without it Cargo could
+# walk parents and accidentally re-include the crate if the repo
+# layout shifts.
+[workspace]
