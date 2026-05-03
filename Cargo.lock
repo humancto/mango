@@ -784,6 +784,7 @@ name = "mango-mvcc"
 version = "0.1.0"
 dependencies = [
  "ahash",
+ "bytes",
  "loom",
  "madsim-tokio",
  "mango-storage",

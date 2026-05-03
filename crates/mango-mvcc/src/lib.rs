@@ -18,10 +18,9 @@
 //!
 //! What this crate is NOT (each is a separate ROADMAP item):
 //!
-//! - The in-memory `KeyIndex` (L839)
-//! - The `KV` API (L844)
 //! - Read transactions / snapshot publication (L845/L846)
-//! - Compaction (L849/L850)
+//! - Online / bounded-impact compaction (L850)
+//! - Restart-from-disk recovery (L852)
 //! - Property test against a model (L851)
 //! - `cargo fuzz` target (L853)
 //!
@@ -30,14 +29,21 @@
 
 pub mod bucket;
 pub mod encoding;
+pub mod error;
 pub mod key_history;
 pub mod revision;
 pub mod sharded_key_index;
+pub mod store;
 
 pub use bucket::{
     register, KEY_BUCKET_ID, KEY_BUCKET_NAME, KEY_INDEX_BUCKET_ID, KEY_INDEX_BUCKET_NAME,
 };
 pub use encoding::{decode_key, encode_key, EncodedKey, KeyDecodeError, KeyKind};
+pub use error::{MvccError, OpenError};
 pub use key_history::{KeyAtRev, KeyHistory, KeyHistoryError, RestoreInvalidReason};
 pub use revision::Revision;
 pub use sharded_key_index::{KeyIndexError, ShardedKeyIndex};
+pub use store::{
+    Compare, CompareOp, KeyValue, LeaseId, RangeRequest, RangeResult, RequestOp, ResponseOp,
+    TxnRequest, TxnResponse,
+};
