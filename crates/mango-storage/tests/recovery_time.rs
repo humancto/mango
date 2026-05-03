@@ -194,7 +194,6 @@ fn required_free_bytes(scenario_size: u64) -> u64 {
 // already, so the multiplication is straight `u64 * u64` —
 // `saturating_mul` defends against pathological FS reports without
 // arithmetic-policy violation.
-#[cfg(unix)]
 fn available_bytes(path: &Path) -> Option<u64> {
     let stat = nix::sys::statvfs::statvfs(path).ok()?;
     Some((stat.blocks_available() as u64).saturating_mul(stat.fragment_size() as u64))
@@ -343,10 +342,28 @@ fn parse_value_index(value: &[u8]) -> Option<u64> {
 }
 
 fn child_role() -> Option<(String, PathBuf, u64)> {
-    let scenario = std::env::var(ENV_SCENARIO).ok()?;
-    let path: PathBuf = std::env::var(ENV_PATH).ok()?.into();
-    let size: u64 = std::env::var(ENV_SIZE).ok()?.parse().ok()?;
-    Some((scenario, path, size))
+    // Partial-env footgun guard: setting only one or two of the
+    // three child env vars (e.g., when a developer manually exports
+    // `MANGO_TEST_RECOVERY_TIME_PATH` to debug the child) would
+    // silently drop into the *parent* role and recurse via
+    // spawn_child, producing a confusing watchdog timeout. Detect
+    // partial state explicitly and fail loudly.
+    let s = std::env::var(ENV_SCENARIO).ok();
+    let p = std::env::var(ENV_PATH).ok();
+    let n = std::env::var(ENV_SIZE).ok();
+    match (s, p, n) {
+        (None, None, None) => None,
+        (Some(scenario), Some(path), Some(size)) => {
+            let size: u64 = size
+                .parse()
+                .expect("MANGO_TEST_RECOVERY_TIME_SIZE_BYTES must parse as u64");
+            Some((scenario, PathBuf::from(path), size))
+        }
+        (s, p, n) => panic!(
+            "child_role: partial env state — set ALL of {ENV_SCENARIO}/{ENV_PATH}/{ENV_SIZE} or NONE. \
+             scenario={s:?} path={p:?} size={n:?}"
+        ),
+    }
 }
 
 fn spawn_child(
@@ -389,6 +406,7 @@ fn assert_aborted(out: &std::process::Output, ctx: &str) {
 // with bulk) because its presence-on-recover is the first
 // load-bearing assertion the parent makes.
 async fn run_child_writer(path: PathBuf, total_bytes: u64, watchdog: Duration) -> ! {
+    let started = Instant::now();
     let fut = async move {
         let backend = RedbBackend::open(BackendConfig::new(path, false)).expect("child open");
         backend.register_bucket("kv", KV).expect("register kv");
@@ -415,6 +433,9 @@ async fn run_child_writer(path: PathBuf, total_bytes: u64, watchdog: Duration) -
             // force_fsync=true: every batch must be durable before
             // the next begins. This ensures no in-flight fsync at
             // abort time (the recovery semantics this test pins).
+            // `let _ =` because `commit_batch` returns a #[must_use]
+            // `CommitStamp` we deliberately discard — the test only
+            // cares that the commit fsynced.
             let _ = backend
                 .commit_batch(batch, true)
                 .await
@@ -439,9 +460,13 @@ async fn run_child_writer(path: PathBuf, total_bytes: u64, watchdog: Duration) -
         // abort. Tokio cannot reorder this.
         std::process::abort();
     };
-    tokio::time::timeout(watchdog, fut)
-        .await
-        .expect("child timed out before abort — write phase wedged or watchdog too tight");
+    let outcome = tokio::time::timeout(watchdog, fut).await;
+    assert!(
+        outcome.is_ok(),
+        "child timed out before abort — write phase wedged or watchdog too tight. \
+         elapsed={elapsed:?} watchdog={watchdog:?} total_bytes={total_bytes}",
+        elapsed = started.elapsed(),
+    );
     unreachable!("child fut must abort or time out");
 }
 
@@ -564,16 +589,15 @@ async fn recovery_time_1gib() {
         run_child_writer(path, size, child_watchdog(size)).await;
     }
     // Parent role.
-    let m = run_parent_measurement("recovery_time_1gib", "1GiB", SCENARIO_1G);
-    if let Some(m) = m {
+    // 1 GiB is not budget-gated (only 8 GiB is per ADR 0002 §W8);
+    // the line is printed for trend tooling, the integrity probe is
+    // the only assertion here.
+    if let Some(m) = run_parent_measurement("recovery_time_1gib", "1GiB", SCENARIO_1G) {
         assert_eq!(
             m.samples_ok, BULK_SAMPLE_COUNT,
             "1 GiB: bulk-sample probe found only {} of {} keys",
             m.samples_ok, BULK_SAMPLE_COUNT
         );
-        // 1 GiB is not budget-gated (only 8 GiB is per ADR 0002 §W8).
-        // We still print the number so trend tooling can chart it.
-        let _ = m.cache_mode;
     }
 }
 
@@ -678,4 +702,14 @@ fn child_watchdog_scales_with_size() {
     assert_eq!(child_watchdog(SCENARIO_1G), Duration::from_secs(90 + 60));
     assert_eq!(child_watchdog(SCENARIO_4G), Duration::from_secs(360 + 60));
     assert_eq!(child_watchdog(SCENARIO_8G), Duration::from_secs(720 + 60));
+}
+
+// Pins the `.max(1)` floor inside `child_watchdog`. A zero or
+// sub-GiB total should still get a valid (non-zero) watchdog so a
+// fat-fingered call site does not produce a Duration::ZERO that
+// trips the timeout immediately.
+#[test]
+fn child_watchdog_has_one_gib_floor() {
+    assert_eq!(child_watchdog(0), Duration::from_secs(90 + 60));
+    assert_eq!(child_watchdog(1), Duration::from_secs(90 + 60));
 }
