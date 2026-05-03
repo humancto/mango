@@ -210,6 +210,17 @@ thiserror = "2"
 # exemption already present (parking_lot@0.12.5, parking_lot_core@0.9.12).
 parking_lot = "0.12"
 
+# Phase 2 sharded KeyIndex hasher (ROADMAP:840).
+#
+# ahash: HashDoS-resistant `BuildHasher` with per-process random seed
+# pulled from the OS CSPRNG (via ahash's `runtime-rng` default
+# feature). Used by `mango_mvcc::ShardedKeyIndex` for both routing
+# (key → shard) and per-shard `HashMap` hashing — the same
+# `RandomState` instance is cloned into every shard so routing and
+# in-shard lookup agree. We deliberately do not pull `getrandom` as
+# a direct dep; ahash already does the OS-CSPRNG read.
+ahash = "0.8"
+
 # Phase 1 user-data block compression (ROADMAP:830).
 #
 # lz4_flex: pure-Rust LZ4. ADR 0002 §3 names lz4_flex as the
@@ -267,7 +278,12 @@ unreachable_pub = "warn"
 # without tripping `unexpected_cfgs`. No-op for crates that do not
 # reference the cfg. mango-madsim-demo opts out of workspace lints
 # entirely and declares this locally; every other crate inherits.
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(madsim)"] }
+# `--cfg loom` is loom's standard activation mechanism for permutation
+# tests. The L840 `ShardedKeyIndex` carries a `cfg(loom)` shim that
+# swaps `parking_lot::RwLock` for `loom::sync::RwLock` so L841's loom
+# tests can drop in without a retrofit. Registering here keeps the
+# `unexpected_cfgs` lint quiet across the workspace.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(madsim)", "cfg(loom)"] }
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
