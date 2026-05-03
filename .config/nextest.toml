@@ -64,6 +64,17 @@ slow-timeout = { period = "30m", terminate-after = 1 }
 filter = 'test(~chaos)'
 slow-timeout = { period = "24h", terminate-after = 1 }
 
+# recovery class: long unclean-shutdown recovery measurements.
+# ROADMAP:822 (`tests/recovery_time.rs`) writes 1/4/8 GiB of data
+# then aborts — write phase alone can take 60-90s on commodity
+# SSD; the 8 GiB scenario must allocate the full 8.5-minute child
+# watchdog plus parent-side recovery measurement. The default
+# `kind(test)` 5m would kill the 8 GiB run mid-write. Budget:
+# 30 min covers all three scenarios with margin.
+[[profile.default.overrides]]
+filter = 'test(~recovery_time)'
+slow-timeout = { period = "30m", terminate-after = 1 }
+
 [profile.ci]
 # CI inherits every policy field from [profile.default]. This
 # section exists so `--profile ci` is a valid invocation and to

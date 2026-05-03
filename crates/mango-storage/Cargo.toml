@@ -121,6 +121,15 @@ proptest = "1.5"
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# ROADMAP:822 recovery-time test: direct `libc::statvfs` FFI for a
+# pre-flight free-disk check (the 8 GiB scenario soft-skips on
+# runners that physically cannot run it). `set_len` ENOSPC probing
+# is unreliable on ext4/apfs/tmpfs (lazy allocation); statvfs is the
+# correct primitive. ~15 LoC of `unsafe` in the test, SAFETY comment
+# explains the invariants. libc is already exempted at 0.2.185 in
+# supply-chain/config.toml as a workspace transitive. Test-target
+# unsafe is not tracked by the geiger storage_deps baseline.
+libc = "0.2"
 
 [lints]
 workspace = true
