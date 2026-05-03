@@ -45,5 +45,5 @@ pub use revision::Revision;
 pub use sharded_key_index::{KeyIndexError, ShardedKeyIndex};
 pub use store::{
     Compare, CompareOp, KeyValue, LeaseId, RangeRequest, RangeResult, RequestOp, ResponseOp,
-    TxnRequest, TxnResponse,
+    Snapshot, TxnRequest, TxnResponse,
 };

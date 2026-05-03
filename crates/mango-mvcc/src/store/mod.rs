@@ -42,11 +42,13 @@
 
 pub mod lease;
 pub mod range;
+pub mod snapshot;
 pub mod txn;
 mod writer;
 
 pub use lease::LeaseId;
 pub use range::{KeyValue, RangeRequest, RangeResult};
+pub use snapshot::Snapshot;
 pub use txn::{Compare, CompareOp, RequestOp, ResponseOp, TxnRequest, TxnResponse};
 
 use std::collections::{BTreeMap, HashSet};

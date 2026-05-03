@@ -35,6 +35,13 @@ parking_lot = { workspace = true }
 # `madsim-tokio`; under default builds this is real tokio's `sync`
 # module. See `.planning/l844-mvcc-kv-api.plan.md` §4.1.
 tokio = { workspace = true, features = ["sync"] }
+# `arc_swap::ArcSwap<Snapshot>` for L846 lock-free snapshot
+# publication. `arc-swap` is `forbid(unsafe_code)`-friendly from
+# our side (it uses unsafe internally but exposes a safe API),
+# loom-aware upstream, and the workspace-blessed primitive named
+# in ROADMAP.md:846. Stable 1.x supports rustc 1.61+, well under
+# our `rust-version.workspace = "1.89"`.
+arc-swap = "1"
 # Optional `proptest::Arbitrary`-style strategies for `Revision` and
 # `KeyKind`. Gated so the dep is invisible in default builds. L851's
 # model proptest will turn this on as a dev-dep feature.
