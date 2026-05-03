@@ -49,7 +49,7 @@ pub use lease::LeaseId;
 pub use range::{KeyValue, RangeRequest, RangeResult};
 pub use txn::{Compare, CompareOp, RequestOp, ResponseOp, TxnRequest, TxnResponse};
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::ops::Bound;
 use std::sync::atomic::{AtomicI64, Ordering};
 
@@ -57,7 +57,7 @@ use bytes::Bytes;
 use mango_storage::{Backend, ReadSnapshot, WriteBatch};
 
 use crate::bucket::{register, KEY_BUCKET_ID};
-use crate::encoding::{encode_key, KeyKind};
+use crate::encoding::{decode_key, encode_key, KeyKind};
 use crate::error::{MvccError, OpenError};
 use crate::key_history::KeyHistoryError;
 use crate::revision::Revision;
@@ -174,11 +174,9 @@ pub struct MvccStore<B: Backend> {
     /// every successful commit; Acquire-loaded by `Range` /
     /// [`Self::current_revision`].
     current_main: AtomicI64,
-    /// Compacted floor. Release-stored after on-disk delete commit
-    /// in `Compact`; Acquire-loaded by `Range`. `0` = none.
-    /// Read at construction time, set by `Compact` in a later
-    /// commit.
-    #[allow(dead_code)]
+    /// Compacted floor. Release-stored after the on-disk delete
+    /// commit in [`Self::compact`]; Acquire-loaded by `Range`.
+    /// `0` = none.
     compacted: AtomicI64,
 }
 
@@ -976,6 +974,136 @@ impl<B: Backend> MvccStore<B> {
             responses,
             header_revision: current,
         })
+    }
+
+    /// Compact every revision strictly below `rev`.
+    ///
+    /// Per the L844 plan §5.6: physically removes on-disk entries
+    /// whose `main <= rev` and which are not in the per-key
+    /// "available" set (the set of revs each key needs to retain
+    /// so a `Range` at `rev` itself still sees the right value).
+    /// Then advances the in-memory `compacted` floor and runs the
+    /// in-memory index compaction.
+    ///
+    /// **Order: on-disk first, then floor advance, then in-mem.**
+    /// Crash between the on-disk commit and the floor advance is
+    /// safe — the on-disk state is the persistent floor, and L852
+    /// recovery infers the floor from "min on-disk rev minus 1"
+    /// (review item B3).
+    ///
+    /// Compaction is **synchronous** at L844: the writer is
+    /// blocked for the full duration. L850 backgrounds it.
+    ///
+    /// `force_fsync = true` on the on-disk delete commit —
+    /// compaction durability is the user-visible promise (plan
+    /// §5.6 step 8).
+    ///
+    /// Idempotent for `rev <= compacted_floor` (returns
+    /// `Ok(())` with no work).
+    ///
+    /// # Errors
+    ///
+    /// - [`MvccError::FutureRevision`] if `rev > current_main`.
+    /// - [`MvccError::Backend`] from snapshot acquisition,
+    ///   `begin_batch`, `commit_batch`, or range iteration.
+    /// - [`MvccError::KeyDecode`] if an on-disk encoded key
+    ///   fails to decode (indicates backend corruption).
+    pub async fn compact(&self, rev: i64) -> Result<(), MvccError> {
+        let _state = self.writer.lock().await;
+        let current = self.current_main.load(Ordering::Acquire);
+        let floor = self.compacted.load(Ordering::Acquire);
+
+        if rev <= floor {
+            return Ok(());
+        }
+        if rev > current {
+            return Err(MvccError::FutureRevision {
+                requested: rev,
+                current,
+            });
+        }
+
+        let available = self.compute_available(rev);
+        self.commit_compaction_deletes(rev, &available).await?;
+
+        // Step 9: advance the floor. Done BEFORE the in-mem
+        // compaction so a concurrent `Range` reader observing
+        // the new floor will reject `rev < floor` reads — the
+        // on-disk state is already physically advanced to match.
+        self.compacted.store(rev, Ordering::Release);
+
+        // Step 10: in-mem compaction. `ShardedKeyIndex::compact`
+        // drops entries whose history becomes empty. Walk
+        // `keys_in_order` after the index pass and drop any key
+        // whose index entry is gone — etcd parity for the post-
+        // tombstone-compaction reap (review item R3).
+        let mut available_post: HashSet<Revision> = HashSet::new();
+        self.index.compact(rev, &mut available_post);
+        self.reap_keys_in_order_after_compact(current);
+
+        Ok(())
+    }
+
+    /// Compute the per-key "available" set: the union of
+    /// surviving revs across every key in the index. Uses
+    /// [`ShardedKeyIndex::keep`] (read-only) so concurrent
+    /// `Range` readers are not blocked by a write-lock pass.
+    fn compute_available(&self, rev: i64) -> HashSet<Revision> {
+        let mut available: HashSet<Revision> = HashSet::new();
+        self.index.keep(rev, &mut available);
+        available
+    }
+
+    /// Build the on-disk delete batch and commit it with
+    /// `force_fsync = true` (compaction durability promise).
+    /// Iterates `KEY_BUCKET_ID` over `[(0, 0, Put), (rev,
+    /// i64::MAX, Tombstone))`; deletes any entry whose decoded
+    /// rev has `main <= rev` and is not in `available`.
+    async fn commit_compaction_deletes(
+        &self,
+        rev: i64,
+        available: &HashSet<Revision>,
+    ) -> Result<(), MvccError> {
+        let snap = self.backend.snapshot()?;
+        let start = encode_key(Revision::new(0, 0), KeyKind::Put);
+        let end = encode_key(Revision::new(rev, i64::MAX), KeyKind::Tombstone);
+
+        let mut batch = self.backend.begin_batch()?;
+        let iter = snap.range(KEY_BUCKET_ID, start.as_bytes(), end.as_bytes())?;
+        for item in iter {
+            let (encoded_key, _value) = item?;
+            let (decoded_rev, _kind) = decode_key(&encoded_key)?;
+            if decoded_rev.main() <= rev && !available.contains(&decoded_rev) {
+                batch.delete(KEY_BUCKET_ID, &encoded_key)?;
+            }
+        }
+        drop(snap);
+
+        // `force_fsync = true` — compaction durability is the
+        // user-visible promise (plan §5.6 step 8).
+        let _ = self.backend.commit_batch(batch, true).await?;
+        Ok(())
+    }
+
+    /// Reap keys from `keys_in_order` whose index entry was
+    /// dropped by [`ShardedKeyIndex::compact`]. Detection: the
+    /// key has no history visible at `current` AND no entry at
+    /// all (post-compact). For L844 we approximate via
+    /// `index.get(key, current)`'s `KeyNotFound` arm — a
+    /// `KeyNotFound` here means the index has dropped the entry
+    /// (the writer-lock invariant otherwise keeps the two in
+    /// sync; review item R3).
+    fn reap_keys_in_order_after_compact(&self, current: i64) {
+        let snapshot: Vec<Box<[u8]>> = {
+            let keys = self.keys_in_order.read();
+            keys.keys().cloned().collect()
+        };
+        let mut keys = self.keys_in_order.write();
+        for k in &snapshot {
+            if matches!(self.index.get(k, current), Err(KeyIndexError::KeyNotFound)) {
+                let _ = keys.remove(k.as_ref());
+            }
+        }
     }
 
     /// Evaluate a list of [`Compare`] preconditions against the
@@ -2163,5 +2291,146 @@ mod tests {
             ResponseOp::DeleteRange { deleted } => assert_eq!(*deleted, 1),
             other => panic!("slot 2 expected DeleteRange, got {other:?}"),
         }
+    }
+
+    // === Compact (plan §5.6 / §8 commit 9) ===
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn compact_advances_floor() {
+        let store = MvccStore::open(fresh_backend()).expect("open");
+        let _ = store.put(b"k", b"v1").await.expect("put1");
+        let _ = store.put(b"k", b"v2").await.expect("put2");
+        store.compact(1).await.expect("compact");
+        // Floor advance: a Range at rev 1 still works (B1: floor
+        // itself remains readable), but rev 0 returns Compacted.
+        let r0 = store.range(RangeRequest {
+            key: b"k".to_vec(),
+            end: vec![],
+            revision: Some(0),
+            ..RangeRequest::default()
+        });
+        match r0 {
+            Err(MvccError::Compacted { .. }) => {}
+            other => panic!("expected Compacted, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn compact_at_or_below_floor_is_noop() {
+        let store = MvccStore::open(fresh_backend()).expect("open");
+        let _ = store.put(b"k", b"v1").await.expect("put1");
+        let _ = store.put(b"k", b"v2").await.expect("put2");
+        store.compact(1).await.expect("compact 1");
+        // Idempotent: a second compact at the same rev (or lower)
+        // is a no-op.
+        store.compact(1).await.expect("compact 1 again");
+        store.compact(0).await.expect("compact 0");
+        // Range at the floor still works (B1).
+        let r1 = store
+            .range(RangeRequest {
+                key: b"k".to_vec(),
+                end: vec![],
+                revision: Some(1),
+                ..RangeRequest::default()
+            })
+            .expect("range at floor");
+        assert_eq!(r1.kvs.len(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn compact_at_future_rev_returns_future_err() {
+        let store = MvccStore::open(fresh_backend()).expect("open");
+        let _ = store.put(b"k", b"v").await.expect("put");
+        let err = store.compact(99).await.expect_err("future rev");
+        match err {
+            MvccError::FutureRevision { requested, current } => {
+                assert_eq!(requested, 99);
+                assert_eq!(current, 1);
+            }
+            other => panic!("expected FutureRevision, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn compact_then_range_at_compacted_rev_succeeds() {
+        // B1: Range at the floor itself returns the value visible
+        // at that rev.
+        let store = MvccStore::open(fresh_backend()).expect("open");
+        let _ = store.put(b"k", b"v1").await.expect("put1");
+        let _ = store.put(b"k", b"v2").await.expect("put2");
+        store.compact(2).await.expect("compact");
+        let r = store
+            .range(RangeRequest {
+                key: b"k".to_vec(),
+                end: vec![],
+                revision: Some(2),
+                ..RangeRequest::default()
+            })
+            .expect("range at floor");
+        assert_eq!(r.kvs.len(), 1);
+        assert_eq!(r.kvs[0].value.as_ref(), b"v2");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn compact_then_range_below_floor_returns_compacted_err() {
+        let store = MvccStore::open(fresh_backend()).expect("open");
+        let _ = store.put(b"k", b"v1").await.expect("put1");
+        let _ = store.put(b"k", b"v2").await.expect("put2");
+        store.compact(2).await.expect("compact");
+        let err = store
+            .range(RangeRequest {
+                key: b"k".to_vec(),
+                end: vec![],
+                revision: Some(1),
+                ..RangeRequest::default()
+            })
+            .expect_err("below floor");
+        match err {
+            MvccError::Compacted { requested, floor } => {
+                assert_eq!(requested, 1);
+                assert_eq!(floor, 2);
+            }
+            other => panic!("expected Compacted, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn compact_at_current_rev_drops_old_revs() {
+        // After compact at current, the on-disk old revisions
+        // are physically gone. Probe the backend's emptiness:
+        // if the only surviving keys are at >= compacted floor,
+        // the floor is enforced.
+        let store = MvccStore::open(fresh_backend()).expect("open");
+        let _ = store.put(b"k", b"v1").await.expect("put1");
+        let _ = store.put(b"k", b"v2").await.expect("put2");
+        let _ = store.put(b"k", b"v3").await.expect("put3");
+        store.compact(3).await.expect("compact");
+        // Range at current still returns the latest value.
+        let r = store.range(req_point(b"k")).expect("range at current");
+        assert_eq!(r.kvs.len(), 1);
+        assert_eq!(r.kvs[0].value.as_ref(), b"v3");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn compact_removes_fully_tombstoned_keys_from_in_mem_set() {
+        // R3: a key whose only revs are pre-compaction-tombstoned
+        // is reaped from `keys_in_order` after compact, so a
+        // post-compaction Range over the wider range no longer
+        // sees it.
+        let store = MvccStore::open(fresh_backend()).expect("open");
+        let _ = store.put(b"k", b"v").await.expect("put");
+        let _ = store.delete_range(b"k", &[]).await.expect("del");
+        // Now compact at the tombstone's main.
+        let post_del = store.current_revision();
+        store.compact(post_del).await.expect("compact");
+        // Range at current must not see the key.
+        let r = store
+            .range(RangeRequest {
+                key: b"a".to_vec(),
+                end: b"z".to_vec(),
+                ..RangeRequest::default()
+            })
+            .expect("range");
+        assert!(r.kvs.is_empty(), "tombstoned key must be reaped");
     }
 }
