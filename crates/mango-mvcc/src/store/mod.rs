@@ -2568,6 +2568,138 @@ mod tests {
         );
     }
 
+    // === L849 compaction physical-removal byte-level identity ===
+    //
+    // The three tests above verify post-compact reads, but every
+    // assertion goes through the in-memory index. A regression that
+    // removed `commit_compaction_deletes` (`store/mod.rs:1144-1168`)
+    // entirely would still pass them — old on-disk bytes would just
+    // leak silently. The three tests below probe the backend
+    // directly, asserting the exact decoded survivor set: rev, kind,
+    // and value bytes.
+
+    /// Decoded snapshot of every record in `KEY_BUCKET_ID`, in
+    /// backend iteration order (lex over encoded keys).
+    ///
+    /// Returns `(Revision, KeyKind, value bytes)` per record. The
+    /// helper exists for L849 byte-level identity checks; counting
+    /// alone is too weak (a regression that deletes the right rev
+    /// and writes a different one preserves the count).
+    fn key_bucket_survivors<B: Backend>(
+        b: &B,
+    ) -> Result<
+        Vec<(crate::revision::Revision, crate::encoding::KeyKind, Vec<u8>)>,
+        mango_storage::BackendError,
+    > {
+        let snap = b.snapshot()?;
+        let iter = snap.range(KEY_BUCKET_ID, &[], super::NON_EMPTY_PROBE_END)?;
+        let mut out = Vec::new();
+        for item in iter {
+            let (k, v) = item?;
+            let (rev, kind) = crate::encoding::decode_key(&k).expect("on-disk key must decode");
+            out.push((rev, kind, v.to_vec()));
+        }
+        Ok(out)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn compact_physically_removes_old_revs_from_backend() {
+        let store = MvccStore::open(fresh_backend()).expect("open");
+
+        let r1 = store.put(b"k", b"v1").await.expect("put1");
+        let r2 = store.put(b"k", b"v2").await.expect("put2");
+        let r3 = store.put(b"k", b"v3").await.expect("put3");
+        assert_eq!((r1.main(), r2.main(), r3.main()), (1, 2, 3));
+
+        let before = key_bucket_survivors(store.backend()).expect("probe");
+        assert_eq!(before.len(), 3, "3 puts → 3 backend records");
+
+        store.compact(3).await.expect("compact");
+
+        let after = key_bucket_survivors(store.backend()).expect("probe");
+        assert_eq!(
+            after,
+            vec![(
+                crate::revision::Revision::new(3, 0),
+                crate::encoding::KeyKind::Put,
+                b"v3".to_vec(),
+            )],
+            "compact at HEAD must keep exactly the latest Put on-disk, byte-for-byte",
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn compact_at_head_keeps_only_latest_per_key() {
+        let store = MvccStore::open(fresh_backend()).expect("open");
+        for round in 0..3 {
+            for k in [b"a".as_slice(), b"b", b"c"] {
+                let _ = store
+                    .put(k, format!("v{round}").as_bytes())
+                    .await
+                    .expect("put");
+            }
+        }
+        let before = key_bucket_survivors(store.backend()).expect("probe");
+        assert_eq!(before.len(), 9, "3 keys × 3 rounds → 9 records");
+
+        let head = store.current_revision();
+        assert_eq!(head, 9);
+        store.compact(head).await.expect("compact");
+
+        // Round 2 wrote v2 to all three keys at revs 7, 8, 9.
+        let after = key_bucket_survivors(store.backend()).expect("probe");
+        assert_eq!(
+            after,
+            vec![
+                (
+                    crate::revision::Revision::new(7, 0),
+                    crate::encoding::KeyKind::Put,
+                    b"v2".to_vec(),
+                ),
+                (
+                    crate::revision::Revision::new(8, 0),
+                    crate::encoding::KeyKind::Put,
+                    b"v2".to_vec(),
+                ),
+                (
+                    crate::revision::Revision::new(9, 0),
+                    crate::encoding::KeyKind::Put,
+                    b"v2".to_vec(),
+                ),
+            ],
+            "compact at HEAD keeps exactly the live KV per key, by rev",
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn compact_removes_tombstone_bytes_when_keep_drops_them() {
+        // The strongest of the three: pins the asymmetry between
+        // `KeyHistory::keep` (drops trailing-tombstone-of-non-final-
+        // generation) and per-key `KeyHistory::compact` (retains
+        // it). `compute_available` uses `keep`, so the on-disk
+        // tombstone IS deleted even though the per-key compact
+        // would have retained it. If `commit_compaction_deletes`
+        // regresses to a no-op this test fails loudest.
+        let store = MvccStore::open(fresh_backend()).expect("open");
+        let _ = store.put(b"k", b"v").await.expect("put");
+        let _ = store.delete_range(b"k", &[]).await.expect("del");
+        let head = store.current_revision();
+        assert_eq!(head, 2);
+
+        let before = key_bucket_survivors(store.backend()).expect("probe");
+        assert_eq!(before.len(), 2, "1 put + 1 tombstone = 2 backend records");
+        assert_eq!(before[0].1, crate::encoding::KeyKind::Put);
+        assert_eq!(before[1].1, crate::encoding::KeyKind::Tombstone);
+
+        store.compact(head).await.expect("compact");
+
+        let after = key_bucket_survivors(store.backend()).expect("probe");
+        assert!(
+            after.is_empty(),
+            "tombstone-only key compacted at head leaves zero bytes (got {after:?})",
+        );
+    }
+
     // === L846 snapshot publication coherence (plan §"New tokio test") ===
 
     /// Concurrent writer + readers — every observed snapshot
