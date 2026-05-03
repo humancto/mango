@@ -16,6 +16,13 @@ thiserror.workspace = true
 # helper. `mango-storage` is the trait surface; we touch nothing
 # below it (no redb, no I/O).
 mango-storage = { path = "../mango-storage" }
+# `ahash::RandomState` for the L840 sharded `KeyIndex` — HashDoS
+# resistance via per-process OS-CSPRNG-derived seed. See workspace
+# Cargo.toml for the rationale.
+ahash = { workspace = true }
+# `parking_lot::RwLock` for per-shard locks in `ShardedKeyIndex`.
+# Workspace-blessed alternative to `std::sync` (clippy.toml ban).
+parking_lot = { workspace = true }
 # Optional `proptest::Arbitrary`-style strategies for `Revision` and
 # `KeyKind`. Gated so the dep is invisible in default builds. L851's
 # model proptest will turn this on as a dev-dep feature.
@@ -25,6 +32,12 @@ proptest = { version = "1.5", optional = true }
 # Exposes `proptest::strategy::Strategy` adapters for `Revision` and
 # `KeyKind`. Off by default so the core dep surface stays minimal.
 proptest = ["dep:proptest"]
+# Exposes `ShardedKeyIndex::with_seed(...)` to integration-test crates
+# (notably L842's hostile-key DoS test in
+# `crates/mango-mvcc/tests/security/`). Off by default; integration
+# tests in other crates cannot see `cfg(test)` items, so a feature
+# flag is the right gate.
+test-seed = []
 
 [dev-dependencies]
 # Cross-check encoding against an etcd-produced golden vector and
