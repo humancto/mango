@@ -261,6 +261,20 @@ lz4_flex = { version = "=0.13.0", default-features = false, features = [
     "std",
 ] }
 
+# Phase 2 lock-free snapshot publication primitive (ROADMAP:846).
+#
+# arc-swap: Atomic swap of `Arc<T>` — the publication primitive
+# named in ROADMAP.md:846 for `MvccStore`'s `(rev, compacted)`
+# snapshot, and the read-side foundation for L854's gRPC server
+# (Concurrency axis #2). `ArcSwap<T>` is `ArcSwapAny<Arc<T>>` — the
+# right spelling is `ArcSwap<Snapshot>` (NOT `ArcSwap<Arc<Snapshot>>`,
+# which would be a double-Arc). Internally uses unsafe; exposes a
+# safe API and is `forbid(unsafe_code)`-friendly from our side.
+# Stable 1.x supports rustc 1.61+, comfortably under our
+# `rust-version.workspace = "1.89"`. cargo-vet exemption recorded
+# in supply-chain/config.toml.
+arc-swap = "1.9"
+
 [workspace.package]
 version = "0.1.0"
 edition = "2021"

@@ -35,6 +35,9 @@ parking_lot = { workspace = true }
 # `madsim-tokio`; under default builds this is real tokio's `sync`
 # module. See `.planning/l844-mvcc-kv-api.plan.md` §4.1.
 tokio = { workspace = true, features = ["sync"] }
+# `arc_swap::ArcSwap<Snapshot>` for L846 lock-free snapshot
+# publication. Workspace-blessed; rationale in workspace Cargo.toml.
+arc-swap = { workspace = true }
 # Optional `proptest::Arbitrary`-style strategies for `Revision` and
 # `KeyKind`. Gated so the dep is invisible in default builds. L851's
 # model proptest will turn this on as a dev-dep feature.
