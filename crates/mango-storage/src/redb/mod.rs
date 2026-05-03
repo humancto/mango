@@ -53,7 +53,9 @@ use parking_lot::RwLock;
 // read-write database types can share them.
 use ::redb::{ReadableDatabase, ReadableTable};
 
-use crate::backend::{Backend, BackendConfig, BackendError, BucketId, CommitStamp};
+use crate::backend::{
+    Backend, BackendConfig, BackendError, BucketId, CommitStamp, CompressionMode,
+};
 
 pub(crate) mod batch;
 pub(crate) mod registry;
@@ -114,6 +116,15 @@ pub(crate) struct Inner {
     /// `Database` handle, so `size_on_disk` has to stat the file we
     /// recorded ourselves.
     db_path: PathBuf,
+    /// Block-level value compression mode (ROADMAP:830). Captured
+    /// from [`BackendConfig::compression`] at open time and
+    /// **never mutated** post-open: a backend's compression mode is
+    /// fixed for the lifetime of the handle. Threaded into
+    /// [`apply_staged`] via [`commit_staged`]. The decoder side
+    /// (in [`snapshot::RedbSnapshot`]) is config-blind — the on-disk
+    /// tag byte alone dispatches decoding — so reopening a database
+    /// under a different mode does not lose data.
+    pub(super) compression: CompressionMode,
 }
 
 impl Inner {
@@ -267,7 +278,19 @@ fn validate_ops(registry: &Registry, ops: &[StagedOp]) -> Result<(), BackendErro
 /// Groups by [`BucketId`] via `BTreeMap` so each redb `Table` is
 /// opened exactly once per commit — see the module doc for why this
 /// is correctness-load-bearing, not just a perf trick.
-fn apply_staged(txn: &::redb::WriteTransaction, ops: Vec<StagedOp>) -> Result<(), BackendError> {
+///
+/// `mode` is the [`CompressionMode`] captured at backend-open time
+/// (see [`Inner::compression`]). Every `Put` value flows through
+/// [`value_compression::encode`] before being handed to redb; the
+/// **registry table** write path (`register_bucket`) is NOT routed
+/// through here and therefore stores `&str → u16` rows verbatim, as
+/// pinned by the `registry_table_wire_format_unchanged` integration
+/// test.
+fn apply_staged(
+    txn: &::redb::WriteTransaction,
+    ops: Vec<StagedOp>,
+    mode: CompressionMode,
+) -> Result<(), BackendError> {
     use std::collections::BTreeMap;
 
     let mut by_bucket: BTreeMap<u16, Vec<StagedOp>> = BTreeMap::new();
@@ -282,8 +305,15 @@ fn apply_staged(txn: &::redb::WriteTransaction, ops: Vec<StagedOp>) -> Result<()
         for op in group {
             match op {
                 StagedOp::Put { key, value, .. } => {
+                    // ROADMAP:830: encode through the value-compression
+                    // codec. The codec always emits a 1-byte tag
+                    // prefix; the decoder side (in
+                    // `RedbSnapshot::get` / `RedbRangeIter::next`)
+                    // dispatches on that tag, so a database written
+                    // under one mode is readable under any other.
+                    let encoded = value_compression::encode(mode, &value)?;
                     table
-                        .insert(key.as_slice(), value.as_slice())
+                        .insert(key.as_slice(), encoded.as_slice())
                         .map_err(map_storage_error)?;
                 }
                 StagedOp::Delete { key, .. } => {
@@ -358,6 +388,7 @@ impl Backend for RedbBackend {
                 closed: AtomicBool::new(false),
                 commit_seq: AtomicU64::new(0),
                 db_path,
+                compression: config.compression,
             }),
         })
     }
@@ -558,6 +589,10 @@ impl RedbBackend {
                 closed: AtomicBool::new(false),
                 commit_seq: AtomicU64::new(0),
                 db_path,
+                // The fault-injection constructor does not take a
+                // `BackendConfig`; tests that exercise the compression
+                // path go through `Backend::open` instead.
+                compression: CompressionMode::None,
             }),
         })
     }
@@ -576,7 +611,7 @@ fn commit_staged(inner: &Inner, staged: Vec<StagedOp>) -> Result<CommitStamp, Ba
     let mut txn = db.begin_write().map_err(map_txn_error)?;
     txn.set_durability(::redb::Durability::Immediate)
         .map_err(|e| BackendError::Other(format!("set_durability: {e}")))?;
-    apply_staged(&txn, staged)?;
+    apply_staged(&txn, staged, inner.compression)?;
     txn.commit().map_err(map_commit_error)?;
     drop(guard);
     // Strictly monotonic. `Release` pairs with callers that observe
