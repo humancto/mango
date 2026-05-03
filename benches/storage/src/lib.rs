@@ -13,6 +13,12 @@
 //! `cargo build -p mango-bench-storage --release`.
 
 #![deny(rust_2018_idioms)]
+// `publish = false` bench-only crate — opted out of the workspace
+// `clippy::exhaustive_enums = "deny"` policy; the workload schema
+// enums (`Distribution`, `ValueFill`, `Generator`) are deliberately
+// closed so that toml typos surface as parse errors, not silently
+// fall through. Same pattern as `crates/mango-loom-demo`.
+#![allow(clippy::exhaustive_enums)]
 
 pub mod measure;
 pub mod stats;
