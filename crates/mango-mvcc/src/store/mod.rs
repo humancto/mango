@@ -2562,4 +2562,101 @@ mod tests {
             "fully-tombstoned key must be reaped from keys_in_order"
         );
     }
+
+    // === L846 snapshot publication coherence (plan §"New tokio test") ===
+
+    /// Concurrent writer + readers — every observed snapshot
+    /// satisfies `compacted <= rev`, and both fields are
+    /// monotonically non-decreasing across reader iterations.
+    ///
+    /// Iteration-counted (not wall-clock) so the same work runs
+    /// on slow CI runners and fast laptops; readers run on
+    /// `spawn_blocking` so they sit on dedicated threads instead
+    /// of being multiplexed onto the writer's worker. The
+    /// readers' tight `spin_loop()` loop maximises the chance of
+    /// observing a torn pair if one were possible.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn snapshot_publish_is_coherent_pair() {
+        use std::sync::atomic::{AtomicBool, Ordering as Ord};
+
+        let store = Arc::new(MvccStore::open(fresh_backend()).expect("open"));
+        let stop = Arc::new(AtomicBool::new(false));
+
+        // Writer: 5_000 puts with periodic compact at rev/2.
+        // 5_000 (not 50_000 from the plan draft) keeps the test
+        // under nextest's 60s default and still gives readers
+        // tens of millions of snapshot loads under the
+        // multi-thread runtime.
+        let writer = {
+            let s = Arc::clone(&store);
+            let stop = Arc::clone(&stop);
+            tokio::spawn(async move {
+                for i in 0_i64..5_000 {
+                    let key = format!("k{i}");
+                    s.put(key.as_bytes(), b"v").await.expect("put");
+                    if i % 16 == 15 {
+                        let target = s.current_revision() / 2;
+                        if target > 0 {
+                            s.compact(target).await.expect("compact");
+                        }
+                    }
+                }
+                stop.store(true, Ord::Relaxed);
+            })
+        };
+
+        // Readers: spawn_blocking so they sit on dedicated
+        // threads — under the multi-thread runtime each reader
+        // races the writer concurrently.
+        let mut readers = Vec::new();
+        for _ in 0..3 {
+            let s = Arc::clone(&store);
+            let stop = Arc::clone(&stop);
+            readers.push(tokio::task::spawn_blocking(move || {
+                let mut prev_rev: i64 = 0;
+                let mut prev_compacted: i64 = 0;
+                while !stop.load(Ord::Relaxed) {
+                    let snap = s.current_snapshot();
+                    assert!(
+                        snap.compacted <= snap.rev,
+                        "torn pair: compacted={} > rev={}",
+                        snap.compacted,
+                        snap.rev,
+                    );
+                    assert!(
+                        snap.rev >= prev_rev,
+                        "rev went backwards: {} -> {}",
+                        prev_rev,
+                        snap.rev,
+                    );
+                    assert!(
+                        snap.compacted >= prev_compacted,
+                        "compacted went backwards: {} -> {}",
+                        prev_compacted,
+                        snap.compacted,
+                    );
+                    prev_rev = snap.rev;
+                    prev_compacted = snap.compacted;
+                    std::hint::spin_loop();
+                }
+            }));
+        }
+
+        writer.await.expect("writer task");
+        for r in readers {
+            r.await.expect("reader task");
+        }
+
+        // Sanity: writer ran to completion; final snapshot has
+        // a non-trivial rev and a compacted floor strictly less
+        // than rev (the writer compacted at rev/2 throughout).
+        let final_snap = store.current_snapshot();
+        assert!(final_snap.rev > 0, "writer did at least one put");
+        assert!(
+            final_snap.compacted < final_snap.rev,
+            "compaction floor strictly below head: rev={}, compacted={}",
+            final_snap.rev,
+            final_snap.compacted,
+        );
+    }
 }
