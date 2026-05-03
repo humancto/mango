@@ -12,6 +12,11 @@ publish = false
 [dependencies]
 # `Revision` is pure data; `KeyDecodeError` derives via thiserror.
 thiserror.workspace = true
+# `bytes::Bytes` for `KeyValue::{key, value}` — cheap clone (refcount
+# fetch_add) so `Range` results can be passed across boundaries
+# without copying. Already transitive via `mango-storage`; declared
+# directly so the dep edge is visible in `cargo tree`.
+bytes.workspace = true
 # `BucketId`, `Backend`, `BackendError` for the bucket-registration
 # helper. `mango-storage` is the trait surface; we touch nothing
 # below it (no redb, no I/O).
