@@ -780,6 +780,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mango-mvcc"
+version = "0.1.0"
+dependencies = [
+ "mango-storage",
+ "proptest",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "mango-proto"
 version = "0.1.0"
 dependencies = [
