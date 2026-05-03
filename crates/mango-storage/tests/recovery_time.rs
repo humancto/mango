@@ -230,8 +230,7 @@ fn drop_page_caches() -> CacheMode {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
+            .is_ok_and(|s| s.success());
         if !sync_ok {
             return CacheMode::Warm;
         }
@@ -249,8 +248,7 @@ fn drop_page_caches() -> CacheMode {
                 }
                 child.wait().ok()
             })
-            .map(|s| s.success())
-            .unwrap_or(false);
+            .is_some_and(|s| s.success());
         if drop_ok {
             return CacheMode::Cold;
         }

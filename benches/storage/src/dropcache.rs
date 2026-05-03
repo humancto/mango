@@ -168,7 +168,8 @@ fn linux_drop_for_files(paths: &[PathBuf], drop_caches_writable: bool) -> ColdCa
             Ok(f) => f,
             Err(err) => {
                 return ColdCacheVerdict::Incomplete(format!(
-                    "open {path:?} for fadvise failed: {err}"
+                    "open {} for fadvise failed: {err}",
+                    path.display()
                 ));
             }
         };
@@ -180,7 +181,8 @@ fn linux_drop_for_files(paths: &[PathBuf], drop_caches_writable: bool) -> ColdCa
             // refuses `Incomplete` as a satisfaction of L829, so
             // this is the operationally-honest classification.
             return ColdCacheVerdict::Incomplete(format!(
-                "posix_fadvise(POSIX_FADV_DONTNEED) on {path:?} failed: {err}"
+                "posix_fadvise(POSIX_FADV_DONTNEED) on {} failed: {err}",
+                path.display()
             ));
         }
     }
@@ -307,7 +309,7 @@ mod tests {
     }
 
     /// On Linux, Stage 1 (per-file fadvise) succeeds on a regular
-    /// file in tmpfs without root. The actual drop_caches write
+    /// file in tmpfs without root. The actual `drop_caches` write
     /// is gated on `drop_caches_writable: false` so this does not
     /// require sudo.
     #[cfg(target_os = "linux")]

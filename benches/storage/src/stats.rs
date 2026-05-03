@@ -29,7 +29,7 @@
 //! # Bootstrap details
 //!
 //! 10 000 resamples of **paired** per-run ratios. Pairing is by
-//! run index: ratio[i] = mango[i] op bbolt[i]. The bootstrap
+//! run index: `ratio[i] = mango[i] op bbolt[i]`. The bootstrap
 //! samples the ratios with replacement (n samples drawn n times
 //! over), takes the mean of each resample, and the 2.5 %/97.5 %
 //! percentiles of the resample-mean distribution are the CI

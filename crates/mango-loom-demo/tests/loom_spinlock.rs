@@ -1,4 +1,10 @@
 #![cfg(loom)]
+// `t.join().unwrap()` is the idiomatic loom-test pattern: a panic
+// inside a spawned closure surfaces via `Err` from `join()`, and an
+// `unwrap()` here re-raises it on the model thread so loom's own
+// failure reporting kicks in. Allowing `unwrap_used` here only;
+// production code still falls under the workspace-level deny.
+#![allow(clippy::unwrap_used)]
 
 use loom::sync::Arc;
 use mango_loom_demo::Spinlock;

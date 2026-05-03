@@ -386,6 +386,36 @@ fn write_lock<T>(lock: &RwLock<T>) -> loom::sync::RwLockWriteGuard<'_, T> {
     })
 }
 
+/// Test seed for the L841 loom integration tests. Doc-hidden,
+/// gated to test-only visibility. The integration test imports
+/// these via the public path
+/// `mango_mvcc::sharded_key_index::{LOOM_SEED, LOOM_KEY_A, LOOM_KEY_B}`
+/// when the `test-seed` feature is on; the unit test sees them
+/// directly via `super::*`.
+///
+/// `pre_compute_l841_routing_keys` (in `mod tests`) pins:
+/// `shard_for(LOOM_KEY_A) < shard_for(LOOM_KEY_B)` — so an `ahash`
+/// version bump that re-routes either key fails fast under default
+/// `cargo test`, before the loom CI job even starts.
+#[cfg(any(test, feature = "test-seed"))]
+#[doc(hidden)]
+pub const LOOM_SEED: [u8; 32] = [
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
+    26, 27, 28, 29, 30, 31,
+];
+
+/// L841 loom test fixture key. Routes to a lower shard than
+/// [`LOOM_KEY_B`] under [`LOOM_SEED`].
+#[cfg(any(test, feature = "test-seed"))]
+#[doc(hidden)]
+pub const LOOM_KEY_A: &[u8] = b"k0";
+
+/// L841 loom test fixture key. Routes to a higher shard than
+/// [`LOOM_KEY_A`] under [`LOOM_SEED`].
+#[cfg(any(test, feature = "test-seed"))]
+#[doc(hidden)]
+pub const LOOM_KEY_B: &[u8] = b"k1";
+
 /// Errors returned by [`ShardedKeyIndex`] operations.
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -406,7 +436,14 @@ pub enum KeyIndexError {
     History(#[from] KeyHistoryError),
 }
 
-#[cfg(test)]
+// Gated `not(loom)`: the lib unit tests construct `ShardedKeyIndex`
+// directly and exercise `RwLock` acquisitions outside `loom::model`.
+// Under `--cfg loom`, `RwLock` is `loom::sync::RwLock`, which panics
+// when accessed outside a model. The integration test in
+// `tests/loom_sharded_index.rs` is the loom-arm coverage; these
+// unit tests cover the default-build behavior that the loom run
+// would miss anyway. Same idiom as `mango-loom-demo/src/lib.rs:173`.
+#[cfg(all(test, not(loom)))]
 mod tests {
     #![allow(
         clippy::unwrap_used,
@@ -695,6 +732,41 @@ mod tests {
         assert!(
             max <= mean * 3,
             "shard imbalance: max {max} vs mean {mean} (counts: {counts:?})"
+        );
+    }
+
+    /// Pins the routing invariants the loom file in
+    /// `tests/loom_sharded_index.rs` depends on. Runs under default
+    /// `cargo test`, so an `ahash` version bump that re-routes
+    /// either key fails fast here, before the loom CI job even
+    /// starts.
+    ///
+    /// Test name deliberately does NOT contain "loom" — the nextest
+    /// filter `test(~loom)` (`.config/nextest.toml:55-57`) routes
+    /// matching tests to the 30-min watchdog class, and we want this
+    /// trivial test in the unit (30s) class.
+    ///
+    /// Caller-contract reminder for `compact`: `at_rev` is
+    /// monotonically non-decreasing; concurrent `put` ops with
+    /// `rev > at_rev` are safe regardless of shard visit order. The
+    /// loom Models 3, 4, 6, 8 rely on this; do not relax without
+    /// re-checking them.
+    #[test]
+    fn pre_compute_l841_routing_keys() {
+        let idx = ShardedKeyIndex::with_seed(LOOM_SEED);
+        let sa = idx.shard_for(LOOM_KEY_A);
+        let sb = idx.shard_for(LOOM_KEY_B);
+        assert_ne!(
+            sa, sb,
+            "LOOM_KEY_A and LOOM_KEY_B must route to different shards \
+             under LOOM_SEED — adjust either keys or seed if ahash routing \
+             changed (recorded indices: {sa:?} / {sb:?})"
+        );
+        assert!(
+            sa.as_index() < sb.as_index(),
+            "LOOM_KEY_A must hash to a *lower* shard than LOOM_KEY_B \
+             (so Model 3 pins compact-walks-A-first-then-B and \
+             Model 6 the inverse); got A={sa:?}, B={sb:?}"
         );
     }
 

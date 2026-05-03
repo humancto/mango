@@ -18,7 +18,22 @@ audit-as-crates-io = false
 criteria = "safe-to-deploy"
 notes = "first-party workspace crate; audit-as-crates-io=false so cargo-vet does not require third-party audits for mango's own code. safe-to-deploy is governed by in-tree review (CODEOWNERS + PR review)."
 
+[policy.mango-bench-storage]
+audit-as-crates-io = false
+criteria = "safe-to-run"
+notes = "first-party bench harness; audit-as-crates-io=false so cargo-vet does not require third-party audits for mango's own code. criteria=safe-to-run because the bench harness is test/CI-only — no production deploy surface. Test-only deps (proptest, hdrhistogram dev-paths) may be exempted at safe-to-run rather than safe-to-deploy."
+
 [policy.mango-loom-demo]
+audit-as-crates-io = false
+criteria = "safe-to-deploy"
+notes = "first-party workspace crate; audit-as-crates-io=false so cargo-vet does not require third-party audits for mango's own code. safe-to-deploy is governed by in-tree review (CODEOWNERS + PR review)."
+
+[policy.mango-madsim-demo]
+audit-as-crates-io = false
+criteria = "safe-to-run"
+notes = "first-party simulator-demo crate; audit-as-crates-io=false so cargo-vet does not require third-party audits for mango's own code. criteria=safe-to-run because madsim demo is test/CI-only — no production deploy surface."
+
+[policy.mango-mvcc]
 audit-as-crates-io = false
 criteria = "safe-to-deploy"
 notes = "first-party workspace crate; audit-as-crates-io=false so cargo-vet does not require third-party audits for mango's own code. safe-to-deploy is governed by in-tree review (CODEOWNERS + PR review)."
@@ -482,8 +497,8 @@ notes = "review-by: 2026-10-23 — raft-engine 0.4.2 transitive (prometheus help
 
 [[exemptions.proptest]]
 version = "1.11.0"
-criteria = "safe-to-run"
-notes = "review-by: 2026-10-23 — AltSysrq, test-only via mango-storage differential harness (ROADMAP:819). 26k-line inspect backlog; running with exemption until upstream vet audit published or in-house review completes. Not on any runtime path."
+criteria = "safe-to-deploy"
+notes = "review-by: 2026-10-23 — AltSysrq, test-only via mango-storage differential harness (ROADMAP:819) and mango-mvcc Arbitrary-impl feature. 26k-line inspect backlog; running with exemption until upstream vet audit published or in-house review completes. mango-mvcc's `proptest` feature is opt-in (off by default); criteria=safe-to-deploy because mango-mvcc declares it as an optional regular dep — cargo-vet cannot tell that no production caller enables the feature."
 
 [[exemptions.prost]]
 version = "0.13.5"
@@ -524,6 +539,11 @@ notes = "review-by: 2026-10-23 — raft-rs 0.7.0 transitive (build-dep only: rus
 version = "1.1.0+21.5"
 criteria = "safe-to-deploy"
 notes = "review-by: 2026-10-23 — raft-rs 0.7.0 transitive (build-dep only: vendors the upstream protoc binary for codegen). No runtime surface; pure build-time tooling. Version suffix `+21.5` tracks the vendored protoc release. See ROADMAP:818."
+
+[[exemptions.quick-error]]
+version = "1.2.3"
+criteria = "safe-to-deploy"
+notes = "review-by: 2026-10-23 — rusty-fork 0.3.1 transitive (tailhook), test-only via mango-storage differential harness (ROADMAP:819) and mango-mvcc Arbitrary-impl feature, audit pending. Criteria=safe-to-deploy because of proptest exemption transitive coverage."
 
 [[exemptions.quote]]
 version = "1.0.45"
@@ -572,8 +592,8 @@ notes = "review-by: 2026-10-23 — raft-rs 0.7.0 transitive (rand 0.9.x core tra
 
 [[exemptions.rand_xorshift]]
 version = "0.4.0"
-criteria = "safe-to-run"
-notes = "review-by: 2026-10-23 — proptest 1.11.0 transitive (rust-random/dhardy), test-only via mango-storage differential harness (ROADMAP:819), audit pending"
+criteria = "safe-to-deploy"
+notes = "review-by: 2026-10-23 — proptest 1.11.0 transitive (rust-random/dhardy), test-only via mango-storage differential harness (ROADMAP:819) and mango-mvcc Arbitrary-impl feature, audit pending. Criteria escalated to safe-to-deploy to match proptest exemption."
 
 [[exemptions.rand_xoshiro]]
 version = "0.6.0"
@@ -627,8 +647,8 @@ notes = "review-by: 2026-10-23 — dtolnay, audit pending"
 
 [[exemptions.rusty-fork]]
 version = "0.3.1"
-criteria = "safe-to-run"
-notes = "review-by: 2026-10-23 — proptest 1.11.0 transitive (AltSysrq), test-only via mango-storage differential harness (ROADMAP:819), audit pending"
+criteria = "safe-to-deploy"
+notes = "review-by: 2026-10-23 — proptest 1.11.0 transitive (AltSysrq), test-only via mango-storage differential harness (ROADMAP:819) and mango-mvcc Arbitrary-impl feature, audit pending. Criteria escalated to safe-to-deploy to match proptest exemption."
 
 [[exemptions.scoped-tls]]
 version = "1.0.1"
@@ -829,6 +849,11 @@ notes = "review-by: 2026-10-23 — tracing dep, rust-lang, audit pending"
 version = "0.9.5"
 criteria = "safe-to-deploy"
 notes = "review-by: 2026-10-23 — madsim 0.2.30 transitive (dev-dep via mango-madsim-demo), audit pending"
+
+[[exemptions.wait-timeout]]
+version = "0.2.1"
+criteria = "safe-to-deploy"
+notes = "review-by: 2026-10-23 — rusty-fork 0.3.1 transitive (alexcrichton), test-only via mango-storage differential harness (ROADMAP:819) and mango-mvcc Arbitrary-impl feature, audit pending. mozilla and bytecode-alliance trust alexcrichton; consider `cargo vet trust wait-timeout` once vet-update.sh's import policy is finalized. Criteria=safe-to-deploy because of proptest exemption transitive coverage."
 
 [[exemptions.wasi]]
 version = "0.11.1+wasi-snapshot-preview1"

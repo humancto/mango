@@ -31,6 +31,12 @@ on:
     branches: [main]
     paths:
       - "crates/mango-loom-demo/**"
+      - "crates/mango-mvcc/**"
+      # mango-mvcc has a path-dep on mango-storage; storage changes
+      # can break the mango-mvcc build under --cfg loom even if no
+      # mvcc file is touched. Broad filter trades extra CI runs for
+      # not silently skipping loom on storage refactors.
+      - "crates/mango-storage/**"
       - ".github/workflows/loom.yml"
       - ".config/nextest.toml"
       - "Cargo.toml"
@@ -38,6 +44,8 @@ on:
   pull_request:
     paths:
       - "crates/mango-loom-demo/**"
+      - "crates/mango-mvcc/**"
+      - "crates/mango-storage/**"
       - ".github/workflows/loom.yml"
       - ".config/nextest.toml"
       - "Cargo.toml"
@@ -78,10 +86,31 @@ jobs:
           tool: cargo-nextest
       - name: cargo fetch
         run: cargo fetch --locked
+      - name: cargo clippy (loom)
+        # Lint the loom build *before* nextest. The default-build
+        # clippy in ci.yml does not exercise the `#[cfg(loom)]` arms
+        # of `sharded_key_index.rs` — only `--cfg loom` does — so a
+        # warning introduced inside a `cfg(loom)` block (e.g. an
+        # unused import, a doc nit) would slip past ci.yml and only
+        # surface here. Running clippy under `--cfg loom` with
+        # `-D warnings` keeps the loom-arm code held to the same bar
+        # as the default build.
+        #
+        # Scope is `-p` per-crate (NOT `--workspace`): under
+        # `--cfg loom`, `madsim 0.2.30`'s `std/fs.rs` references
+        # `tokio::fs::*`, which tokio gates out via `cfg(not(loom))`.
+        # `--workspace` would try to compile every workspace member
+        # under `--cfg loom` and trip those E0432/E0433 errors in
+        # crates that aren't even loom-aware. The two crates listed
+        # here are the only ones with `[target.'cfg(loom)'.dependencies]`
+        # blocks. Add new entries when more loom-aware crates land.
+        env:
+          RUSTFLAGS: "--cfg loom -C debug-assertions"
+        run: cargo clippy --all-targets -p mango-loom-demo -p mango-mvcc --features mango-mvcc/test-seed -- -D warnings
       - name: cargo nextest run (loom)
         # Canonical loom invocation. Documented in docs/loom.md.
         #
-        # --cfg loom: activates loom::* imports in the demo crate
+        # --cfg loom: activates loom::* imports in loom-aware crates
         #   (the ecosystem-standard idiom, not a Cargo feature).
         # -C debug-assertions: loom's internal aliasing and causality
         #   checks are gated on debug_assertions. Without this flag,
@@ -101,8 +130,24 @@ jobs:
         # --profile ci: inherits the 30m per-test watchdog from the
         #   [profile.default.overrides] filter='test(~loom)' entry in
         #   .config/nextest.toml.
+        # Two invocations: the loom run is per-crate-scoped to its
+        # integration-test target. mango-mvcc has lib unit tests in
+        # `sharded_key_index::tests` that construct `RwLock` outside
+        # `loom::model`; under `--cfg loom` those would panic with
+        # "cannot access Loom execution state from outside a Loom
+        # model". The lib `mod tests` is gated `cfg(all(test,
+        # not(loom)))` (matching `mango-loom-demo/src/lib.rs:173`),
+        # so they're compiled-out under loom — but running
+        # `cargo nextest -p mango-mvcc` would also try integration
+        # tests and any future examples. Scoping to `--test
+        # loom_sharded_index` keeps the loom run narrowly on the
+        # model-checked target. The demo crate has no such hazard
+        # because `loom_spinlock.rs` is its only test.
         env:
           RUSTFLAGS: "--cfg loom -C debug-assertions"
           LOOM_MAX_PREEMPTIONS: "2"
           LOOM_MAX_BRANCHES: "10000"
-        run: cargo nextest run --profile ci --release -p mango-loom-demo
+        run: |
+          cargo nextest run --profile ci --release -p mango-loom-demo
+          cargo nextest run --profile ci --release -p mango-mvcc \
+            --features mango-mvcc/test-seed --test loom_sharded_index

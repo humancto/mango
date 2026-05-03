@@ -99,14 +99,20 @@ artifact is uploaded. The validator asserts, per file:
 
 The workflow additionally asserts, across all four files:
 
-7. Exactly four SBOMs produced — one per workspace member, using
+7. Exactly one SBOM per workspace member, using
    `cargo metadata --no-deps --format-version=1 | jq -r
 '.packages[] | select(.source == null) | .name'` as the
-   source of truth (same pattern as `geiger.yml`).
+   source of truth (same pattern as `geiger.yml`). Workspace
+   members live under `crates/` and `benches/` so the workflow
+   scans both roots.
 8. Every `components[].purl` of shape `pkg:cargo/<name>@<version>`
    corresponds to a `(name, version)` row in `Cargo.lock`
    (forward check — every SBOM entry exists in the lockfile,
-   proving no fabrication).
+   proving no fabrication). The oracle is the full `Cargo.lock`
+   without a `source` filter: Cargo.lock contains both registry
+   packages and workspace members, and workspace-internal deps
+   (e.g. mango-mvcc → mango-storage) legitimately appear as
+   `pkg:cargo/<sibling>@<ver>` purls in cargo-cyclonedx output.
 9. Every runtime (normal-edge) dep reachable from any
    workspace member — derived from `cargo tree --workspace
 --edges=normal --prefix=none --no-dedupe` — appears in the
