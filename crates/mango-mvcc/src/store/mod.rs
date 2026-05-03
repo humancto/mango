@@ -52,10 +52,12 @@ pub use txn::{Compare, CompareOp, RequestOp, ResponseOp, TxnRequest, TxnResponse
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicI64, Ordering};
 
-use mango_storage::{Backend, ReadSnapshot};
+use mango_storage::{Backend, ReadSnapshot, WriteBatch};
 
 use crate::bucket::{register, KEY_BUCKET_ID};
-use crate::error::OpenError;
+use crate::encoding::{encode_key, KeyKind};
+use crate::error::{MvccError, OpenError};
+use crate::revision::Revision;
 use crate::sharded_key_index::ShardedKeyIndex;
 
 use self::writer::WriterState;
@@ -89,9 +91,6 @@ pub struct MvccStore<B: Backend> {
     /// shared access.
     backend: B,
     /// Per-key revision history. Point-lookup; sharded.
-    /// Read at construction time, populated by writer impls in
-    /// later commits.
-    #[allow(dead_code)]
     index: ShardedKeyIndex,
     /// Ordered live-key set, used by `Range`. The L846 substrate
     /// (will be wrapped in `arc_swap::ArcSwap<Arc<...>>` then),
@@ -100,14 +99,11 @@ pub struct MvccStore<B: Backend> {
     /// `zero_sized_map_values` clippy lint flags the `()` value
     /// type — silenced here because the type is forward-design
     /// for L859's watch cache, per the L844 plan §4.1.
-    /// Populated by writer impls in later commits.
-    #[allow(dead_code, clippy::zero_sized_map_values)]
+    #[allow(clippy::zero_sized_map_values)]
     keys_in_order: parking_lot::RwLock<BTreeMap<Box<[u8]>, ()>>,
     /// Writer serialization. Async-aware mutex because the guard
     /// is held across `commit_batch().await` (`parking_lot` guards
     /// are `!Send`).
-    /// Populated by writer impls in later commits.
-    #[allow(dead_code)]
     writer: tokio::sync::Mutex<WriterState>,
     /// Highest fully-published revision. Release-stored at end of
     /// every successful commit; Acquire-loaded by `Range` /
@@ -198,6 +194,95 @@ impl<B: Backend> MvccStore<B> {
     pub(crate) fn backend(&self) -> &B {
         &self.backend
     }
+
+    /// Single-key put.
+    ///
+    /// Allocates one `main` revision (sub = 0) and persists the
+    /// `(key, value)` pair under the encoded `(rev, KeyKind::Put)`
+    /// on-disk key. On success, the returned [`Revision`] is the
+    /// allocation point — `current_revision()` will reflect it
+    /// after this method returns.
+    ///
+    /// # Ordering
+    ///
+    /// 1. Acquire writer lock.
+    /// 2. Allocate `rev = (state.next_main, 0)`.
+    /// 3. Begin batch, put on-disk, commit (no fsync — Raft owns
+    ///    durability at the WAL above us).
+    /// 4. Insert `key` into `keys_in_order` under its write lock.
+    /// 5. `index.put(key, rev)` (structurally infallible under the
+    ///    writer-lock invariant; surfaces as
+    ///    [`MvccError::Internal`] if violated).
+    /// 6. Bump `next_main` (checked).
+    /// 7. Release-store `current_main` so readers see the new head.
+    ///
+    /// # Errors
+    ///
+    /// - [`MvccError::Backend`] from `begin_batch` /
+    ///   `commit_batch` / `WriteBatch::put`.
+    /// - [`MvccError::Internal`] if `next_main` would overflow
+    ///   `i64::MAX`, or if the in-memory index rejects a put that
+    ///   the writer-lock invariant says it must accept (a Mango
+    ///   bug — see plan §5.2 review item S2; surfaced rather than
+    ///   panicked).
+    pub async fn put(&self, key: &[u8], value: &[u8]) -> Result<Revision, MvccError> {
+        let mut state = self.writer.lock().await;
+        let rev = Revision::new(state.next_main, 0);
+
+        let mut batch = self.backend.begin_batch()?;
+        let encoded = encode_key(rev, KeyKind::Put);
+        batch.put(KEY_BUCKET_ID, encoded.as_bytes(), value)?;
+        // No fsync — durability is Raft's WAL contract above this
+        // layer (plan §5.2 step 5).
+        let _ = self.backend.commit_batch(batch, false).await?;
+
+        // No `.await` is held under either of the in-memory locks
+        // below. `keys_in_order`'s guard is dropped before the
+        // index is touched, so the lock-ordering edge `writer →
+        // keys_in_order → index shard` holds (module docs).
+        {
+            let mut keys = self.keys_in_order.write();
+            // `BTreeMap::insert` is idempotent on identical-key
+            // overwrites — the value is `()`. Repeated puts on the
+            // same user key keep the entry exactly once.
+            let _ = keys.insert(key.into(), ());
+        }
+
+        // Structurally: `KeyHistory::put` rejects only with
+        // `NonMonotonic`, but `state.next_main` is allocated under
+        // the writer lock and increases monotonically across all
+        // writes — so any `rev` we assign strictly exceeds every
+        // prior `modified` for any key. If this returns `Err` the
+        // invariant is broken (plan §5.2 review item S2).
+        if let Err(_e) = self.index.put(key, rev) {
+            return Err(MvccError::Internal {
+                context: "index.put failed under monotonic invariant",
+            });
+        }
+
+        let next = state.next_main.checked_add(1).ok_or(MvccError::Internal {
+            context: "next_main overflow",
+        })?;
+        state.next_main = next;
+
+        // Release-store: pairs with the Acquire-load in
+        // `current_revision` and (later) `Range`.
+        self.current_main.store(rev.main(), Ordering::Release);
+
+        Ok(rev)
+    }
+
+    /// Test-only hook: reset the writer's `next_main` to a chosen
+    /// value. Used by `put_index_invariant_violation_returns_internal_not_panic`
+    /// to construct the impossible state the structural invariant
+    /// rules out (plan §5.2 review item S2). Holding the writer
+    /// lock here mirrors the production allocator path so any
+    /// future reordering catches concurrent calls.
+    #[cfg(test)]
+    pub(crate) async fn set_next_main_for_test(&self, value: i64) {
+        let mut state = self.writer.lock().await;
+        state.next_main = value;
+    }
 }
 
 #[cfg(test)]
@@ -212,7 +297,7 @@ mod tests {
     use super::MvccStore;
     use crate::bucket::{KEY_BUCKET_ID, KEY_INDEX_BUCKET_ID};
     use crate::error::OpenError;
-    use mango_storage::{Backend, BackendConfig, InMemBackend};
+    use mango_storage::{Backend, BackendConfig, InMemBackend, ReadSnapshot};
 
     /// Compile-time check: `MvccStore<InMemBackend>` is
     /// `Send + Sync`. A future change that breaks this (e.g.
@@ -311,5 +396,82 @@ mod tests {
         assert_eq!(store.current_revision(), 0);
         // Multiple loads are stable.
         assert_eq!(store.current_revision(), 0);
+    }
+
+    // === Put (plan §5.2) ===
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn put_returns_allocated_rev() {
+        let store = MvccStore::open(fresh_backend()).expect("open");
+        let rev = store.put(b"k", b"v").await.expect("put");
+        // First put on a fresh store allocates `(1, 0)` — `next_main`
+        // starts at 1 per plan §5.1, sub is 0 for any single-op.
+        assert_eq!(rev.main(), 1);
+        assert_eq!(rev.sub(), 0);
+        // `current_revision` reflects the allocation after the
+        // writer drops the lock.
+        assert_eq!(store.current_revision(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn put_then_put_increments_main() {
+        let store = MvccStore::open(fresh_backend()).expect("open");
+        let r1 = store.put(b"a", b"1").await.expect("put a");
+        let r2 = store.put(b"b", b"2").await.expect("put b");
+        let r3 = store.put(b"a", b"3").await.expect("re-put a");
+        assert_eq!(r1.main(), 1);
+        assert_eq!(r2.main(), 2);
+        assert_eq!(r3.main(), 3);
+        // Sub is always 0 for a single-key Put — sub allocation
+        // resets per top-level op (plan §5.1).
+        assert_eq!(r1.sub(), 0);
+        assert_eq!(r2.sub(), 0);
+        assert_eq!(r3.sub(), 0);
+        assert_eq!(store.current_revision(), 3);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn put_persists_encoded_key_to_backend() {
+        let store = MvccStore::open(fresh_backend()).expect("open");
+        let rev = store.put(b"k", b"v").await.expect("put");
+        // Read back through the backend snapshot directly. The
+        // on-disk key is the Put-kind 17-byte encoding of `rev`;
+        // the value is the user payload byte-for-byte.
+        let snap = store.backend().snapshot().expect("snapshot");
+        let enc = crate::encoding::encode_key(rev, crate::encoding::KeyKind::Put);
+        let got = snap
+            .get(crate::bucket::KEY_BUCKET_ID, enc.as_bytes())
+            .expect("get");
+        assert_eq!(got.as_deref(), Some(&b"v"[..]));
+    }
+
+    /// S2 of the plan: a writer-invariant violation surfaces as
+    /// `MvccError::Internal`, not `panic!()`. We force the
+    /// impossible state by rewinding `next_main` after a successful
+    /// put — the next put then re-allocates the same rev for the
+    /// same user key, which the index's monotonicity check rejects.
+    #[tokio::test(flavor = "current_thread")]
+    async fn put_index_invariant_violation_returns_internal_not_panic() {
+        let store = MvccStore::open(fresh_backend()).expect("open");
+        let _ = store.put(b"k", b"v1").await.expect("first put");
+
+        // Force the impossible: rewind `next_main` to the same
+        // value the first put consumed. The structural invariant
+        // (plan §5.1) is broken by this test hook only.
+        store.set_next_main_for_test(1).await;
+
+        let err = store
+            .put(b"k", b"v2")
+            .await
+            .expect_err("must surface invariant violation");
+        match err {
+            crate::error::MvccError::Internal { context } => {
+                assert!(
+                    context.contains("monotonic"),
+                    "unexpected context: {context}"
+                );
+            }
+            other => panic!("expected Internal, got {other:?}"),
+        }
     }
 }

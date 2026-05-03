@@ -27,9 +27,6 @@
 #[derive(Debug)]
 pub(crate) struct WriterState {
     /// Next `main` revision to allocate. Monotone; never resets.
-    /// Read in commit 3 onwards; `#[allow(dead_code)]` keeps the
-    /// skeleton-only commit clippy-clean.
-    #[allow(dead_code)]
     pub(crate) next_main: i64,
 }
 
