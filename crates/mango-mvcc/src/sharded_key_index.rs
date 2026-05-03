@@ -332,6 +332,33 @@ impl ShardedKeyIndex {
         true
     }
 
+    /// L842 test-only public wrapper around the `pub(crate)` routing
+    /// function [`ShardedKeyIndex::shard_for`]. Returns the shard
+    /// index as a `usize` so the inner [`ShardId`] type can stay
+    /// `pub(crate)` — the routing surface is not promoted into the
+    /// public API.
+    ///
+    /// **Invariant**: this function MUST remain a thin wrapper —
+    /// `self.shard_for(key).as_index()`. A future refactor of
+    /// [`ShardId`] (e.g., widening to `u16` or wrapping in a struct)
+    /// must keep both surfaces in sync. The unit test
+    /// `shard_for_test_matches_pub_crate_shard_for` (in `mod tests`)
+    /// round-trips this expectation; the unit test
+    /// `shard_count_for_test_pins_64` pins
+    /// [`SHARD_COUNT_FOR_TEST`] = 64 so the
+    /// distribution-sensitive integration tests in
+    /// `tests/security_keyindex_dos.rs` cannot be silently
+    /// rebalanced by a `SHARD_COUNT` bump.
+    ///
+    /// Gated `cfg(any(test, feature = "test-seed"))` — same gate
+    /// as [`ShardedKeyIndex::with_seed`].
+    #[cfg(any(test, feature = "test-seed"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn shard_for_test(&self, key: &[u8]) -> usize {
+        self.shard_for(key).as_index()
+    }
+
     /// Compute the routing shard for `key`.
     pub(crate) fn shard_for(&self, key: &[u8]) -> ShardId {
         let mut h = self.hasher.build_hasher();
@@ -385,6 +412,17 @@ fn write_lock<T>(lock: &RwLock<T>) -> loom::sync::RwLockWriteGuard<'_, T> {
         unreachable!("loom RwLock poisoned — earlier panic should have failed the test");
     })
 }
+
+/// L842 test-only mirror of the lib's `SHARD_COUNT`. Gated to
+/// test-only visibility so the integration test can reference the
+/// same value without a stringly-typed magic number. Pinned equal
+/// to `64` by the unit test `shard_count_for_test_pins_64`; a
+/// future bump of `SHARD_COUNT` fails that test explicitly so the
+/// distribution-sensitive integration tests in
+/// `tests/security_keyindex_dos.rs` are not silently rebalanced.
+#[cfg(any(test, feature = "test-seed"))]
+#[doc(hidden)]
+pub const SHARD_COUNT_FOR_TEST: usize = SHARD_COUNT;
 
 /// Test seed for the L841 loom integration tests. Doc-hidden,
 /// gated to test-only visibility. The integration test imports
@@ -768,6 +806,37 @@ mod tests {
              (so Model 3 pins compact-walks-A-first-then-B and \
              Model 6 the inverse); got A={sa:?}, B={sb:?}"
         );
+    }
+
+    /// L842 surface: `shard_for_test` MUST stay a thin wrapper
+    /// around `shard_for(key).as_index()`. If a refactor of
+    /// `ShardId` (e.g., widening or wrapping) drifts the two
+    /// surfaces, this test fails immediately rather than letting
+    /// `tests/security_keyindex_dos.rs` produce nonsense.
+    #[test]
+    fn shard_for_test_matches_pub_crate_shard_for() {
+        let idx = ShardedKeyIndex::with_seed(fixed_seed());
+        for i in 0..1000_u32 {
+            let key = format!("k{i}");
+            let from_pub_crate = idx.shard_for(key.as_bytes()).as_index();
+            let from_test_api = idx.shard_for_test(key.as_bytes());
+            assert_eq!(
+                from_pub_crate, from_test_api,
+                "shard_for_test must mirror shard_for(...).as_index() exactly"
+            );
+        }
+    }
+
+    /// L842 surface: `SHARD_COUNT_FOR_TEST` MUST equal 64 so
+    /// integration tests can compute `mean = N / 64` without a
+    /// magic number. A future `SHARD_COUNT` bump fails this
+    /// test explicitly and forces the distribution-sensitive
+    /// tests in `tests/security_keyindex_dos.rs` to be
+    /// re-derived for the new shard count.
+    #[test]
+    fn shard_count_for_test_pins_64() {
+        assert_eq!(SHARD_COUNT_FOR_TEST, 64);
+        assert_eq!(SHARD_COUNT_FOR_TEST, SHARD_COUNT);
     }
 
     /// Regression for the routing-vs-per-shard-hasher contract: if
