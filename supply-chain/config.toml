@@ -90,10 +90,20 @@ version = "0.2.7"
 criteria = "safe-to-deploy"
 notes = "review-by: 2026-10-23 — raft-rs 0.7.0 transitive (build-dep of protobuf-src for codegen-time pure-C protoc vendoring; our protobuf-codec feature set for raft does NOT invoke protoc but autotools still enters the dep graph as a build-time tool). See ROADMAP:818 and .planning/raft-engine-logstore.plan.md."
 
+[[exemptions.base64]]
+version = "0.21.7"
+criteria = "safe-to-deploy"
+notes = "review-by: 2026-11-03 — hdrhistogram transitive AND direct dep of mango-bench-storage for HdrHistogram V2 wire encoding (ROADMAP:829, B1). marshallpierce, widely deployed, audit pending"
+
 [[exemptions.bincode]]
 version = "1.3.3"
 criteria = "safe-to-deploy"
 notes = "review-by: 2026-10-23 — madsim 0.2.30 transitive (dev-dep via mango-madsim-demo), audit pending"
+
+[[exemptions.block-buffer]]
+version = "0.10.4"
+criteria = "safe-to-deploy"
+notes = "review-by: 2026-11-03 — sha2 0.10.9 transitive (RustCrypto), used by mango-bench-storage (ROADMAP:829) for workload toml hashing, audit pending"
 
 [[exemptions.bytes]]
 version = "1.11.1"
@@ -115,15 +125,10 @@ version = "2.5.0"
 criteria = "safe-to-deploy"
 notes = "review-by: 2026-10-23 — madsim 0.2.30 transitive (dev-dep via mango-madsim-demo), audit pending"
 
-[[exemptions.const-random]]
-version = "0.1.18"
+[[exemptions.cpufeatures]]
+version = "0.2.17"
 criteria = "safe-to-deploy"
-notes = "review-by: 2026-10-23 — raft-engine 0.4.2 transitive, audit pending"
-
-[[exemptions.const-random-macro]]
-version = "0.1.16"
-criteria = "safe-to-deploy"
-notes = "review-by: 2026-10-23 — raft-engine 0.4.2 transitive, audit pending"
+notes = "review-by: 2026-11-03 — sha2 transitive (RustCrypto/tarcieri), used by mango-bench-storage (ROADMAP:829) for workload toml hashing, audit pending"
 
 [[exemptions.crc32fast]]
 version = "1.5.0"
@@ -160,10 +165,10 @@ version = "0.8.8"
 criteria = "safe-to-deploy"
 notes = "review-by: 2026-10-23 — madsim 0.2.30 transitive (dev-dep via mango-madsim-demo), audit pending"
 
-[[exemptions.crunchy]]
-version = "0.2.4"
+[[exemptions.crypto-common]]
+version = "0.1.7"
 criteria = "safe-to-deploy"
-notes = "review-by: 2026-10-23 — raft-engine 0.4.2 transitive (tiny-keccak), audit pending"
+notes = "review-by: 2026-11-03 — sha2 transitive (RustCrypto/newpavlov), used by mango-bench-storage (ROADMAP:829) for workload toml hashing, audit pending"
 
 [[exemptions.darling]]
 version = "0.14.4"
@@ -179,6 +184,11 @@ notes = "review-by: 2026-10-23 — madsim 0.2.30 transitive (dev-dep via mango-m
 version = "0.14.4"
 criteria = "safe-to-deploy"
 notes = "review-by: 2026-10-23 — madsim 0.2.30 transitive (dev-dep via mango-madsim-demo), audit pending"
+
+[[exemptions.digest]]
+version = "0.10.7"
+criteria = "safe-to-deploy"
+notes = "review-by: 2026-11-03 — sha2 transitive (RustCrypto/tarcieri), used by mango-bench-storage (ROADMAP:829) for workload toml hashing, audit pending"
 
 [[exemptions.downcast-rs]]
 version = "1.2.1"
@@ -225,6 +235,11 @@ version = "0.5.7"
 criteria = "safe-to-deploy"
 notes = "review-by: 2026-10-23 — petgraph dep, audit pending"
 
+[[exemptions.flate2]]
+version = "1.1.9"
+criteria = "safe-to-deploy"
+notes = "review-by: 2026-11-03 — hdrhistogram transitive (Byron/Sebastian Thiel), used by mango-bench-storage (ROADMAP:829) for V2 compressed encoding, audit pending"
+
 [[exemptions.fs2]]
 version = "0.4.3"
 criteria = "safe-to-deploy"
@@ -265,6 +280,11 @@ version = "0.8.8"
 criteria = "safe-to-deploy"
 notes = "review-by: 2026-10-23 — loom dep, Xudong-Huang, audit pending"
 
+[[exemptions.generic-array]]
+version = "0.14.7"
+criteria = "safe-to-deploy"
+notes = "review-by: 2026-11-03 — sha2 → block-buffer / crypto-common transitive (novacrazy), used by mango-bench-storage (ROADMAP:829), audit pending"
+
 [[exemptions.getrandom]]
 version = "0.2.17"
 criteria = "safe-to-deploy"
@@ -290,6 +310,11 @@ version = "0.16.1"
 criteria = "safe-to-deploy"
 notes = "review-by: 2026-10-23 — rust-lang, audit pending"
 
+[[exemptions.hdrhistogram]]
+version = "7.5.4"
+criteria = "safe-to-deploy"
+notes = "review-by: 2026-11-03 — direct dep of mango-bench-storage (ROADMAP:829) for latency histograms with cross-language V2 interchange (B1). jonhoo, used by tikv/vector/tracing-rs. Internal `unsafe` confined to recorder hot path (~50 lines, well-reviewed); audit pending"
+
 [[exemptions.ident_case]]
 version = "1.0.1"
 criteria = "safe-to-deploy"
@@ -309,11 +334,6 @@ notes = "review-by: 2026-10-23 — rust-itertools, audit pending"
 version = "1.0.18"
 criteria = "safe-to-deploy"
 notes = "review-by: 2026-10-23 — dtolnay, audit pending"
-
-[[exemptions.js-sys]]
-version = "0.3.95"
-criteria = "safe-to-deploy"
-notes = "review-by: 2026-10-23 — raft-engine 0.4.2 transitive (rhai/web-time); wasm targets only. audit pending"
 
 [[exemptions.libc]]
 version = "0.2.185"
@@ -338,7 +358,7 @@ notes = "review-by: 2026-10-23 — tokio-rs, exact-pinned for determinism"
 [[exemptions.lz4_flex]]
 version = "0.13.0"
 criteria = "safe-to-deploy"
-notes = "review-by: 2026-11-03 — pseitz/lz4_flex pure-Rust LZ4 implementation. Direct workspace dep for ROADMAP:830 user-data block compression in mango-storage. ADR 0002 §3 names lz4_flex as the workspace's pure-Rust LZ4 library (vs. lz4-sys C FFI banned by §W5). Consumed with `default-features = false, features = [\"safe-encode\", \"safe-decode\", \"checked-decode\", \"std\"]` — `safe-*` keeps the codec on the unsafe-free path (cargo-geiger ROADMAP:823 baseline ⇒ 0); `checked-decode` is the decoder-side bounds-check layer for adversarial disk bytes; no `frame` feature ⇒ no `twox-hash` transitive. Verify post-add: `cargo tree -e no-dev | grep -E 'lz4|twox-hash'` shows only `lz4_flex 0.13.0`. Exact-version pin (`=0.13.0`) — bump requires this exemption refresh + re-audit; Dependabot does not auto-bump exact pins."
+notes = """review-by: 2026-11-03 — pseitz/lz4_flex pure-Rust LZ4 implementation. Direct workspace dep for ROADMAP:830 user-data block compression in mango-storage. ADR 0002 §3 names lz4_flex as the workspace's pure-Rust LZ4 library (vs. lz4-sys C FFI banned by §W5). Consumed with `default-features = false, features = ["safe-encode", "safe-decode", "checked-decode", "std"]` — `safe-*` keeps the codec on the unsafe-free path (cargo-geiger ROADMAP:823 baseline ⇒ 0); `checked-decode` is the decoder-side bounds-check layer for adversarial disk bytes; no `frame` feature ⇒ no `twox-hash` transitive. Verify post-add: `cargo tree -e no-dev | grep -E 'lz4|twox-hash'` shows only `lz4_flex 0.13.0`. Exact-version pin (`=0.13.0`) — bump requires this exemption refresh + re-audit; Dependabot does not auto-bump exact pins."""
 
 [[exemptions.madsim]]
 version = "0.2.30"
@@ -365,6 +385,11 @@ version = "0.6.5"
 criteria = "safe-to-deploy"
 notes = "review-by: 2026-10-23 — raft-engine 0.4.2 transitive (nix 0.26), audit pending"
 
+[[exemptions.minimal-lexical]]
+version = "0.2.1"
+criteria = "safe-to-deploy"
+notes = "review-by: 2026-11-03 — nom transitive via toml→serde-spanned, used by mango-bench-storage (ROADMAP:829), audit pending"
+
 [[exemptions.mio]]
 version = "1.2.0"
 criteria = "safe-to-deploy"
@@ -384,11 +409,6 @@ notes = "review-by: 2026-10-23 — madsim 0.2.30 transitive (dev-dep via mango-m
 version = "0.26.4"
 criteria = "safe-to-deploy"
 notes = "review-by: 2026-10-23 — raft-engine 0.4.2 transitive (pins 0.26.4; modern tree on newer nix), audit pending"
-
-[[exemptions.no-std-compat]]
-version = "0.4.1"
-criteria = "safe-to-deploy"
-notes = "review-by: 2026-10-23 — raft-engine 0.4.2 transitive (rhai/spin), audit pending"
 
 [[exemptions.num-conv]]
 version = "0.2.1"
@@ -424,11 +444,6 @@ notes = "review-by: 2026-10-23 — petgraph team, audit pending"
 version = "0.2.17"
 criteria = "safe-to-deploy"
 notes = "review-by: 2026-10-23 — taiki-e, audit pending"
-
-[[exemptions.portable-atomic]]
-version = "1.13.1"
-criteria = "safe-to-deploy"
-notes = "review-by: 2026-10-23 — raft-engine 0.4.2 transitive (once_cell), taiki-e, audit pending"
 
 [[exemptions.ppv-lite86]]
 version = "0.2.21"
@@ -600,16 +615,6 @@ version = "0.8.10"
 criteria = "safe-to-deploy"
 notes = "review-by: 2026-10-23 — rust-lang, audit pending"
 
-[[exemptions.rhai]]
-version = "1.24.0"
-criteria = "safe-to-deploy"
-notes = "review-by: 2026-10-23 — raft-engine 0.4.2 transitive (scripting engine), audit pending"
-
-[[exemptions.rhai_codegen]]
-version = "3.1.0"
-criteria = "safe-to-deploy"
-notes = "review-by: 2026-10-23 — raft-engine 0.4.2 transitive (rhai proc-macros), audit pending"
-
 [[exemptions.rustix]]
 version = "1.1.4"
 criteria = "safe-to-deploy"
@@ -652,8 +657,8 @@ notes = "review-by: 2026-10-23 — serde-rs/dtolnay, audit pending"
 
 [[exemptions.serde_json]]
 version = "1.0.149"
-criteria = "safe-to-run"
-notes = "review-by: 2026-10-23 — dtolnay, test-only via mango-storage differential harness (ROADMAP:819), audit pending"
+criteria = "safe-to-deploy"
+notes = "review-by: 2026-11-03 — dtolnay, used by mango-storage differential harness (ROADMAP:819) and mango-bench-storage (ROADMAP:829); upgraded from safe-to-run when the bench harness made it a non-dev dep, audit pending"
 
 [[exemptions.serde_repr]]
 version = "0.1.20"
@@ -665,10 +670,20 @@ version = "0.6.9"
 criteria = "safe-to-deploy"
 notes = "review-by: 2026-10-23 — toml dep, toml-rs team, audit pending"
 
+[[exemptions.sha2]]
+version = "0.10.9"
+criteria = "safe-to-deploy"
+notes = "review-by: 2026-11-03 — direct dep of mango-bench-storage (ROADMAP:829) for sha256 of the workload toml bytes (verbatim, no canonicalization). RustCrypto/newpavlov, audit pending"
+
 [[exemptions.signal-hook-registry]]
 version = "1.4.8"
 criteria = "safe-to-deploy"
 notes = "review-by: 2026-10-23 — madsim 0.2.30 transitive (dev-dep via mango-madsim-demo), audit pending"
+
+[[exemptions.simd-adler32]]
+version = "0.3.9"
+criteria = "safe-to-deploy"
+notes = "review-by: 2026-11-03 — flate2 → miniz_oxide transitive (mcountryman), used by mango-bench-storage (ROADMAP:829) for HdrHistogram V2 compressed encoding path, audit pending"
 
 [[exemptions.slab]]
 version = "0.4.12"
@@ -680,20 +695,10 @@ version = "2.8.2"
 criteria = "safe-to-deploy"
 notes = "review-by: 2026-10-23 — raft-rs 0.7.0 transitive. slog is the structured-logger raft-rs emits internal events through; mango-storage does NOT attach a slog Drain (raft-rs accepts a no-op logger by default). No runtime surface in practice. See ROADMAP:818."
 
-[[exemptions.smartstring]]
-version = "1.0.1"
-criteria = "safe-to-deploy"
-notes = "review-by: 2026-10-23 — raft-engine 0.4.2 transitive (rhai), audit pending"
-
 [[exemptions.socket2]]
 version = "0.6.3"
 criteria = "safe-to-deploy"
 notes = "review-by: 2026-10-23 — madsim 0.2.30 transitive (dev-dep via mango-madsim-demo), audit pending"
-
-[[exemptions.spin]]
-version = "0.5.2"
-criteria = "safe-to-deploy"
-notes = "review-by: 2026-10-23 — raft-engine 0.4.2 transitive (no-std-compat), audit pending"
 
 [[exemptions.spin]]
 version = "0.9.4"
@@ -744,11 +749,6 @@ notes = "review-by: 2026-10-23 — Amanieu, audit pending"
 version = "0.3.41"
 criteria = "safe-to-deploy"
 notes = "review-by: 2026-10-23 — jhpratt, audit pending"
-
-[[exemptions.tiny-keccak]]
-version = "2.0.2"
-criteria = "safe-to-deploy"
-notes = "review-by: 2026-10-23 — raft-engine 0.4.2 transitive (const-random), audit pending"
 
 [[exemptions.tokio]]
 version = "1.52.1"
@@ -810,6 +810,11 @@ version = "0.3.23"
 criteria = "safe-to-deploy"
 notes = "review-by: 2026-10-23 — tokio-rs tracing, audit pending"
 
+[[exemptions.typenum]]
+version = "1.20.0"
+criteria = "safe-to-deploy"
+notes = "review-by: 2026-11-03 — sha2 → generic-array / crypto-common transitive (paholg), used by mango-bench-storage (ROADMAP:829), audit pending"
+
 [[exemptions.unicode-ident]]
 version = "1.0.24"
 criteria = "safe-to-deploy"
@@ -829,31 +834,6 @@ notes = "review-by: 2026-10-23 — madsim 0.2.30 transitive (dev-dep via mango-m
 version = "0.11.1+wasi-snapshot-preview1"
 criteria = "safe-to-deploy"
 notes = "review-by: 2026-10-23 — madsim 0.2.30 transitive (dev-dep via mango-madsim-demo), audit pending"
-
-[[exemptions.wasm-bindgen]]
-version = "0.2.118"
-criteria = "safe-to-deploy"
-notes = "review-by: 2026-10-23 — raft-engine 0.4.2 transitive (rhai/web-time); wasm targets only. audit pending"
-
-[[exemptions.wasm-bindgen-macro]]
-version = "0.2.118"
-criteria = "safe-to-deploy"
-notes = "review-by: 2026-10-23 — raft-engine 0.4.2 transitive (rhai/web-time); wasm targets only. audit pending"
-
-[[exemptions.wasm-bindgen-macro-support]]
-version = "0.2.118"
-criteria = "safe-to-deploy"
-notes = "review-by: 2026-10-23 — raft-engine 0.4.2 transitive (rhai/web-time); wasm targets only. audit pending"
-
-[[exemptions.wasm-bindgen-shared]]
-version = "0.2.118"
-criteria = "safe-to-deploy"
-notes = "review-by: 2026-10-23 — raft-engine 0.4.2 transitive (rhai/web-time); wasm targets only. audit pending"
-
-[[exemptions.web-time]]
-version = "1.1.0"
-criteria = "safe-to-deploy"
-notes = "review-by: 2026-10-23 — raft-engine 0.4.2 transitive (rhai on wasm targets), audit pending"
 
 [[exemptions.winapi]]
 version = "0.3.9"
@@ -907,5 +887,5 @@ notes = "review-by: 2026-10-23 — madsim 0.2.30 transitive (dev-dep via mango-m
 
 [[exemptions.zmij]]
 version = "1.0.21"
-criteria = "safe-to-run"
-notes = "review-by: 2026-10-23 — serde_json 1.0.149 transitive (itoa renamed by dtolnay), test-only path via mango-storage differential harness (ROADMAP:819), audit pending"
+criteria = "safe-to-deploy"
+notes = "review-by: 2026-11-03 — serde_json 1.0.149 transitive (itoa renamed by dtolnay), used by mango-bench-storage (ROADMAP:829); upgraded from safe-to-run when bench harness made serde_json a non-dev dep, audit pending"
