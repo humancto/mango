@@ -827,7 +827,7 @@ phase 2.
 - [x] **Disk-full reliability test** `tests/reliability/disk_full.rs`: fill the data dir to 100%, attempt a write; assert the server enters read-only mode, raises `NOSPACE`, never crashes, never corrupts; free space; assert the server recovers cleanly and accepts writes. Operationalizes Reliability bar #3.
 - [ ] **Disk-size bench** `benches/runner/disk-size.sh`: load `benches/workloads/storage.toml`'s standard workload into mango (default compression on) and into etcd (default compression off — both defaults). Compare on-disk size. **Mango ≤ 0.7× etcd's**, per the Storage-efficiency bar. Numbers in `benches/results/phase-1/disk-size.md`.
 - [ ] Bench harness in `benches/storage/`: write-throughput (1KB values, batched and unbatched), read-latency p50/p95/p99 (hot and cold cache), range-scan-throughput (100 / 10k / 100k keys), on-disk size after the workload in `benches/workloads/storage.toml`. Comparison oracle is the Go binary at `benches/oracles/bbolt/` on the hardware sig in `benches/runner/HARDWARE.md`. **Mango must win on at least one metric, lose on none. Numbers committed to `benches/results/phase-1/`.**
-- [ ] Block-level compression (LZ4 or zstd, configurable) — disabled by default for parity bench, enabled for the size-comparison number
+- [x] Block-level compression (LZ4 or zstd, configurable) — disabled by default for parity bench, enabled for the size-comparison number
 
 ## Phase 2 — MVCC layer
 
