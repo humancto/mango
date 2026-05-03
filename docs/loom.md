@@ -215,6 +215,13 @@ A PR without these is not mergeable.
 
 ## See also
 
+- [`crates/mango-mvcc/tests/loom_sharded_index.rs`](../crates/mango-mvcc/tests/loom_sharded_index.rs)
+  — L841, the first Phase 2 consumer of this template. 8 models
+  exercising the 64-shard `RwLock`-protected `KeyIndex`: cross-shard
+  no-torn-reads, same-shard happens-before, `compact` × `put`, and
+  read-lock parallelism. Demonstrates the cfg(loom) RwLock shim
+  pattern and the `pub const LOOM_SEED` / `LOOM_KEY_*` fixture
+  approach for routing keys to known shards.
 - [`docs/testing.md`](testing.md) — the `loom` test class (30-minute
   watchdog) lives in the shared nextest policy.
 - [`docs/miri.md`](miri.md) — Miri is the orthogonal UB-detection

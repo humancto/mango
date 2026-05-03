@@ -59,7 +59,7 @@ fn model_1_put_put_two_shards_no_torn_reads() {
 /// Model 2 — `put × get` same shard, happens-before via
 /// pre-population.
 ///
-/// Pre-populating LOOM_KEY_A at `(1,0)` happens-before any spawn,
+/// Pre-populating `LOOM_KEY_A` at `(1,0)` happens-before any spawn,
 /// so the racing `get(LOOM_KEY_A, 1)` must see at least `(1,0)`.
 /// Asserts `at.modified == (1,0)` because `find_generation(1)`
 /// stops at the rev with `main <= 1` even if `(2,0)` has already
@@ -90,8 +90,8 @@ fn model_2_put_then_get_same_shard_happens_before() {
 ///
 /// `shard_for(LOOM_KEY_A) < shard_for(LOOM_KEY_B)` per
 /// `pre_compute_l841_routing_keys`. With `compact(3)` against
-/// LOOM_KEY_A's `[{(1,0),(2,0)}, {empty}]`, gen 0's `last_main=2 <
-/// 3`, so gen_idx advances to 1 (empty); `walk_desc` returns None;
+/// `LOOM_KEY_A`'s `[{(1,0),(2,0)}, {empty}]`, gen 0's `last_main=2 <
+/// 3`, so `gen_idx` advances to 1 (empty); `walk_desc` returns None;
 /// `generations.drain(0..1)` removes gen 0; final state
 /// `[{empty}]`, `is_empty()=true`, `compact` returns true; shard's
 /// `retain` removes the entry. `available` is empty.
@@ -176,7 +176,7 @@ fn model_4_since_concurrent_with_compact_same_shard() {
 /// Model 5 — concurrent readers same shard.
 ///
 /// Pins the L840 design: `RwLock` (not `Mutex`) lets two readers
-/// hold the lock simultaneously under loom's RwLock model.
+/// hold the lock simultaneously under loom's `RwLock` model.
 #[test]
 fn model_5_concurrent_readers_same_shard() {
     loom::model(|| {
@@ -196,9 +196,9 @@ fn model_5_concurrent_readers_same_shard() {
 /// Model 6 — R1 inverse: `compact × put`, high-shard tombstoned,
 /// low-shard put.
 ///
-/// `compact`'s ascending shard walk hits LOOM_KEY_A's (low) shard
-/// before LOOM_KEY_B's (high). So a put on LOOM_KEY_A interleaves
-/// with the compact's walk through the low half, and LOOM_KEY_B's
+/// `compact`'s ascending shard walk hits `LOOM_KEY_A`'s (low) shard
+/// before `LOOM_KEY_B`'s (high). So a put on `LOOM_KEY_A` interleaves
+/// with the compact's walk through the low half, and `LOOM_KEY_B`'s
 /// retirement happens later in the same walk. Combined with Model
 /// 3, both relative orderings of `put_shard_idx` vs the current
 /// position of compact's walk are exercised.
