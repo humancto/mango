@@ -92,6 +92,57 @@ const NON_EMPTY_PROBE_END: &[u8] = &[0xFF; 32];
 /// or a dump tool can recognise the sentinel.
 const TOMBSTONE_VALUE: &[u8] = &[0u8];
 
+/// One entry in a [`MvccStore::txn`] mutating-branch write plan.
+///
+/// Built in the first pass over the chosen branch and consumed in
+/// the commit / in-mem-update / response-building passes. One
+/// entry per branch op, in branch order. Only `Put` and `Delete`
+/// produce physical writes; `Read` is a placeholder so the plan
+/// stays index-aligned with the branch.
+enum OpPlan {
+    /// Placeholder for [`RequestOp::Range`]. No physical write;
+    /// response is computed in the third pass.
+    Read,
+    /// One sub-allocated put. `rev` is `(txn_main, sub)`.
+    Put {
+        /// User key (cloned from `RequestOp::Put.key` so the
+        /// in-mem update pass doesn't borrow from `req`).
+        key: Vec<u8>,
+        /// Value bytes (cloned for the same reason).
+        value: Vec<u8>,
+        /// Allocated revision for this put.
+        rev: Revision,
+    },
+    /// Zero or more sub-allocated tombstones for a single
+    /// [`RequestOp::DeleteRange`]. Empty when no live keys
+    /// matched (the op contributes no physical writes).
+    Delete {
+        /// `(matched_key, allocated_rev)` pairs in match order.
+        tombs: Vec<Tombstone>,
+    },
+}
+
+/// One matched-key / allocated-revision pair inside an
+/// [`OpPlan::Delete`] entry.
+type Tombstone = (Box<[u8]>, Revision);
+
+/// Increment a per-txn `sub` allocator with overflow surfaced as
+/// [`MvccError::Internal`]. Workspace `arithmetic_side_effects`
+/// deny rules out `+ 1` directly.
+fn checked_add_sub(sub: i64) -> Result<i64, MvccError> {
+    sub.checked_add(1).ok_or(MvccError::Internal {
+        context: "txn sub overflow",
+    })
+}
+
+/// Increment the per-txn physical-write counter with overflow
+/// surfaced as [`MvccError::Internal`].
+fn checked_add_total(total: usize) -> Result<usize, MvccError> {
+    total.checked_add(1).ok_or(MvccError::Internal {
+        context: "txn physical write count overflow",
+    })
+}
+
 /// User-facing MVCC store.
 ///
 /// See module docs for locking model and lock ordering.
@@ -550,7 +601,7 @@ impl<B: Backend> MvccStore<B> {
         // Pair each key with the rev it gets tombstoned at, so the
         // post-commit `index.tombstone` calls reuse the on-disk
         // assignments verbatim.
-        let mut tombstones: Vec<(Box<[u8]>, Revision)> = Vec::with_capacity(matched.len());
+        let mut tombstones: Vec<Tombstone> = Vec::with_capacity(matched.len());
         for k in matched {
             let key_rev = Revision::new(rev.main(), sub);
             let encoded = encode_key(key_rev, KeyKind::Tombstone);
@@ -601,31 +652,54 @@ impl<B: Backend> MvccStore<B> {
     /// duration so the chosen branch sees the same `current`
     /// the compares saw.
     ///
-    /// **This commit (plan §8 commit 7) ships the read-only
-    /// path only.** A branch that contains [`RequestOp::Put`]
-    /// or [`RequestOp::DeleteRange`] returns
-    /// [`MvccError::Internal`] until the mutating-branch
-    /// dispatch lands in commit 8. Tests for the read-only
-    /// path use only [`RequestOp::Range`] in both branches.
+    /// # Branch dispatch
     ///
-    /// Read-only txn semantics:
-    /// - **No main rev is allocated.** `header_revision`
-    ///   reflects the pre-txn `current` (etcd parity for
-    ///   `storeTxnRead`).
-    /// - The compare list may be empty; an empty list always
-    ///   succeeds (review item M1 — etcd parity).
-    /// - Range ops inside the chosen branch are executed in
-    ///   order; their responses are index-aligned with the
-    ///   branch slice.
+    /// The chosen branch may interleave [`RequestOp::Range`],
+    /// [`RequestOp::Put`], and [`RequestOp::DeleteRange`].
+    ///
+    /// - **Zero physical writes** (`Range`-only branch, or a
+    ///   branch whose every `DeleteRange` matches no live keys):
+    ///   no main rev is allocated; `header_revision` reflects
+    ///   the pre-txn `current` (etcd parity for `storeTxnRead`).
+    /// - **Mutating branch**: a single `main` rev is allocated;
+    ///   subs increment per **physical write** (one per `Put`,
+    ///   one per matched key in `DeleteRange`) starting at `0`,
+    ///   in branch order (review item S3 / M1).
+    ///
+    /// `Range` responses inside a mutating branch see the
+    /// **post-commit** state — they are evaluated after the
+    /// batch commits and `current_main` advances (plan §5.5
+    /// step 11).
+    ///
+    /// # Intra-branch visibility caveat
+    ///
+    /// `DeleteRange`'s match set is computed against the
+    /// pre-txn `keys_in_order` snapshot — a `Put` earlier in the
+    /// same branch does **not** make the just-put key visible to
+    /// a later `DeleteRange` in the same txn. Symmetrically, a
+    /// `Put` after a `DeleteRange` of the same key still records
+    /// a fresh value (its sub allocates after the delete's). This
+    /// matches the L844 plan §5.5 step 6 phrasing ("compute under
+    /// the same writer lock") and is the simplest correct
+    /// behaviour at this scope; intra-branch reorder semantics
+    /// (`storeTxnWrite`-precise parity) is L851 model-test
+    /// territory.
+    ///
+    /// Empty compare list always succeeds (review item M1).
+    /// Responses are index-aligned with the chosen branch slice.
     ///
     /// # Errors
     ///
-    /// - [`MvccError::Backend`] / [`MvccError::KeyIndex`] /
-    ///   [`MvccError::KeyDecode`] propagated from compare
-    ///   evaluation or branch-op execution.
-    /// - [`MvccError::Internal`] if the chosen branch contains
-    ///   a mutating [`RequestOp`] (deferred to plan §8 commit
-    ///   8). Read-only branches never hit this path.
+    /// - [`MvccError::Backend`] from compare evaluation,
+    ///   `begin_batch` / `commit_batch`, or post-commit `Range`
+    ///   value fetch.
+    /// - [`MvccError::KeyIndex`] / [`MvccError::KeyDecode`]
+    ///   propagated from compare evaluation or response
+    ///   construction.
+    /// - [`MvccError::Internal`] if `next_main` overflows, the
+    ///   per-txn sub allocator overflows, or the in-mem index
+    ///   rejects an op that the writer-lock invariant says it
+    ///   must accept.
     pub async fn txn(&self, req: TxnRequest) -> Result<TxnResponse, MvccError> {
         // Hold the writer lock for the entire txn so compare
         // evaluation and branch execution see the same `current`.
@@ -633,7 +707,7 @@ impl<B: Backend> MvccStore<B> {
         // alternative (RwLock-style upgrade) would need a
         // different primitive and the cost of the async lock
         // acquisition is dwarfed by the work the txn does.
-        let _state = self.writer.lock().await;
+        let mut state = self.writer.lock().await;
         let current = self.current_main.load(Ordering::Acquire);
 
         let outcomes = self.evaluate_compares(&req.compare)?;
@@ -644,26 +718,259 @@ impl<B: Backend> MvccStore<B> {
             &req.failure
         };
 
-        let mut responses: Vec<ResponseOp> = Vec::with_capacity(branch.len());
+        let txn_main = state.next_main;
+        let (plan, total_physical_writes) = self.build_txn_plan(branch, current, txn_main)?;
+
+        // No physical writes → don't allocate a main rev; build
+        // responses against pre-txn state and return.
+        if total_physical_writes == 0 {
+            return self.build_txn_response_readonly(succeeded, branch, current);
+        }
+
+        // Mutating: allocate the single main, commit the batch,
+        // apply in-mem updates, then advance current_main.
+        let head_rev = Revision::new(txn_main, 0);
+        self.commit_txn_batch(&plan).await?;
+        self.apply_txn_in_mem(&plan)?;
+
+        let next = state.next_main.checked_add(1).ok_or(MvccError::Internal {
+            context: "next_main overflow",
+        })?;
+        state.next_main = next;
+        // Release-store: pairs with the Acquire-load in `Range` /
+        // `current_revision`. Range ops below now see the post-
+        // commit state.
+        self.current_main.store(head_rev.main(), Ordering::Release);
+
+        let responses = self.build_txn_responses_mutating(branch, &plan)?;
+
+        Ok(TxnResponse {
+            succeeded,
+            responses,
+            header_revision: head_rev.main(),
+        })
+    }
+
+    /// First pass over the chosen branch: build the per-op
+    /// physical-write plan and total physical-write count. Subs
+    /// allocate from `0`, incrementing per physical write
+    /// (`Put` = one; `DeleteRange` = one per matched live key).
+    /// `DeleteRange`'s match set is computed against the pre-txn
+    /// `keys_in_order` snapshot (see `txn` doc, intra-branch
+    /// visibility caveat).
+    fn build_txn_plan(
+        &self,
+        branch: &[RequestOp],
+        current: i64,
+        txn_main: i64,
+    ) -> Result<(Vec<OpPlan>, usize), MvccError> {
+        let mut plan: Vec<OpPlan> = Vec::with_capacity(branch.len());
+        let mut sub: i64 = 0;
+        let mut total: usize = 0;
         for op in branch {
             match op {
-                RequestOp::Range(range_req) => {
-                    // Re-acquires `current_main` inside `range`,
-                    // but the writer lock keeps it stable — the
-                    // value matches `current` above. Cloning the
-                    // request avoids changing `range`'s public
-                    // by-value signature.
+                RequestOp::Range(_) => plan.push(OpPlan::Read),
+                RequestOp::Put { key, value } => {
+                    let rev = Revision::new(txn_main, sub);
+                    sub = checked_add_sub(sub)?;
+                    total = checked_add_total(total)?;
+                    plan.push(OpPlan::Put {
+                        key: key.clone(),
+                        value: value.clone(),
+                        rev,
+                    });
+                }
+                RequestOp::DeleteRange { key, end } => {
+                    let tombs =
+                        self.plan_delete_range(key, end, current, txn_main, &mut sub, &mut total)?;
+                    plan.push(OpPlan::Delete { tombs });
+                }
+            }
+        }
+        Ok((plan, total))
+    }
+
+    /// Compute the matched-key/sub list for a single
+    /// [`RequestOp::DeleteRange`] under the writer lock. Filters
+    /// already-tombstoned keys (review item S3); allocates one
+    /// sub per surviving match and bumps the running sub /
+    /// total counters.
+    fn plan_delete_range(
+        &self,
+        key: &[u8],
+        end: &[u8],
+        current: i64,
+        txn_main: i64,
+        sub: &mut i64,
+        total: &mut usize,
+    ) -> Result<Vec<Tombstone>, MvccError> {
+        let candidates: Vec<Box<[u8]>> = {
+            let keys = self.keys_in_order.read();
+            if end.is_empty() {
+                if keys.contains_key(key) {
+                    vec![key.into()]
+                } else {
+                    Vec::new()
+                }
+            } else {
+                keys.range::<[u8], _>((Bound::Included(key), Bound::Excluded(end)))
+                    .map(|(k, ())| k.clone())
+                    .collect()
+            }
+        };
+        let mut tombs: Vec<Tombstone> = Vec::with_capacity(candidates.len());
+        for k in candidates {
+            match self.index.get(&k, current) {
+                Ok(_) => {
+                    let rev = Revision::new(txn_main, *sub);
+                    *sub = checked_add_sub(*sub)?;
+                    *total = checked_add_total(*total)?;
+                    tombs.push((k, rev));
+                }
+                Err(KeyIndexError::History(KeyHistoryError::RevisionNotFound)) => {}
+                Err(KeyIndexError::KeyNotFound) => {
+                    return Err(MvccError::Internal {
+                        context: "index/keys_in_order disagree on key presence",
+                    });
+                }
+                Err(e) => return Err(MvccError::KeyIndex(e)),
+            }
+        }
+        Ok(tombs)
+    }
+
+    /// Issue the on-disk batch covering every physical write in
+    /// `plan`. No fsync — Raft's WAL above us owns durability.
+    async fn commit_txn_batch(&self, plan: &[OpPlan]) -> Result<(), MvccError> {
+        let mut batch = self.backend.begin_batch()?;
+        for entry in plan {
+            match entry {
+                OpPlan::Read => {}
+                OpPlan::Put { value, rev, .. } => {
+                    let encoded = encode_key(*rev, KeyKind::Put);
+                    batch.put(KEY_BUCKET_ID, encoded.as_bytes(), value)?;
+                }
+                OpPlan::Delete { tombs } => {
+                    for (_, rev) in tombs {
+                        let encoded = encode_key(*rev, KeyKind::Tombstone);
+                        batch.put(KEY_BUCKET_ID, encoded.as_bytes(), TOMBSTONE_VALUE)?;
+                    }
+                }
+            }
+        }
+        let _ = self.backend.commit_batch(batch, false).await?;
+        Ok(())
+    }
+
+    /// Apply in-memory updates after the on-disk commit
+    /// succeeds: `keys_in_order` insert + `index.put` for each
+    /// `OpPlan::Put`; `index.tombstone` for each entry in each
+    /// `OpPlan::Delete` (`keys_in_order` unchanged — review item
+    /// R3).
+    fn apply_txn_in_mem(&self, plan: &[OpPlan]) -> Result<(), MvccError> {
+        for entry in plan {
+            match entry {
+                OpPlan::Read => {}
+                OpPlan::Put { key, rev, .. } => {
+                    {
+                        let mut keys = self.keys_in_order.write();
+                        let _ = keys.insert(key.as_slice().into(), ());
+                    }
+                    if let Err(_e) = self.index.put(key, *rev) {
+                        return Err(MvccError::Internal {
+                            context: "index.put failed under txn writer-lock invariant",
+                        });
+                    }
+                }
+                OpPlan::Delete { tombs } => {
+                    for (k, rev) in tombs {
+                        if let Err(_e) = self.index.tombstone(k, *rev) {
+                            return Err(MvccError::Internal {
+                                context: "index.tombstone failed under txn writer-lock invariant",
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Third pass: build responses index-aligned with `branch`,
+    /// against post-commit state. `Range` ops re-evaluate via
+    /// `self.range(...)` so they see the just-committed Puts.
+    fn build_txn_responses_mutating(
+        &self,
+        branch: &[RequestOp],
+        plan: &[OpPlan],
+    ) -> Result<Vec<ResponseOp>, MvccError> {
+        let mut responses: Vec<ResponseOp> = Vec::with_capacity(branch.len());
+        for (op, entry) in branch.iter().zip(plan.iter()) {
+            match (op, entry) {
+                (RequestOp::Range(range_req), OpPlan::Read) => {
                     let result = self.range(range_req.clone())?;
                     responses.push(ResponseOp::Range(result));
                 }
-                RequestOp::Put { .. } | RequestOp::DeleteRange { .. } => {
+                (RequestOp::Put { .. }, OpPlan::Put { .. }) => {
+                    // L844 always reports `prev_revision: None`
+                    // (etcd populates this only when
+                    // `prev_kv = true`; Phase 6 wires that
+                    // through).
+                    responses.push(ResponseOp::Put {
+                        prev_revision: None,
+                    });
+                }
+                (RequestOp::DeleteRange { .. }, OpPlan::Delete { tombs }) => {
+                    let deleted = u64::try_from(tombs.len()).map_err(|_| MvccError::Internal {
+                        context: "txn DeleteRange count exceeds u64",
+                    })?;
+                    responses.push(ResponseOp::DeleteRange { deleted });
+                }
+                _ => {
                     return Err(MvccError::Internal {
-                        context: "mutating Txn ops land in L844 plan §8 commit 8",
+                        context: "txn plan/branch op kind mismatch",
                     });
                 }
             }
         }
+        Ok(responses)
+    }
 
+    /// Read-only txn response builder. Splits the no-physical-
+    /// writes path out of `txn` so the mutating path doesn't
+    /// pay for branching on every `OpPlan::Read` entry.
+    fn build_txn_response_readonly(
+        &self,
+        succeeded: bool,
+        branch: &[RequestOp],
+        current: i64,
+    ) -> Result<TxnResponse, MvccError> {
+        let mut responses: Vec<ResponseOp> = Vec::with_capacity(branch.len());
+        for op in branch {
+            match op {
+                RequestOp::Range(range_req) => {
+                    let result = self.range(range_req.clone())?;
+                    responses.push(ResponseOp::Range(result));
+                }
+                RequestOp::Put { .. } => {
+                    // Reachable only via the
+                    // `total_physical_writes == 0` path, which
+                    // means the branch contains no `Put` (Put is
+                    // always a physical write). This arm exists
+                    // for exhaustiveness — surface as Internal
+                    // rather than panic if reached (workspace
+                    // `clippy::panic` is deny).
+                    return Err(MvccError::Internal {
+                        context: "txn read-only path saw RequestOp::Put",
+                    });
+                }
+                RequestOp::DeleteRange { .. } => {
+                    // Zero-match DeleteRange in a no-write branch:
+                    // the response is `deleted = 0` (etcd parity).
+                    responses.push(ResponseOp::DeleteRange { deleted: 0 });
+                }
+            }
+        }
         Ok(TxnResponse {
             succeeded,
             responses,
@@ -1620,12 +1927,14 @@ mod tests {
         assert_eq!(store.current_revision(), pre);
     }
 
+    // === Txn mutating branch dispatch (plan §5.5 / §8 commit 8) ===
+
     #[tokio::test(flavor = "current_thread")]
-    async fn txn_mutating_branch_returns_internal_until_commit_8() {
-        // Boundary check: commit 7's read-only dispatch refuses
-        // mutating ops with a typed Internal error. Removed when
-        // commit 8 lands the mutating branch.
+    async fn txn_with_one_put_advances_by_1_subs_start_at_0() {
+        // Single Put inside a txn advances main by exactly 1 and
+        // allocates sub = 0 (etcd parity for a 1-write txn).
         let store = MvccStore::open(fresh_backend()).expect("open");
+        let pre = store.current_revision();
         let req = TxnRequest {
             compare: vec![],
             success: vec![RequestOp::Put {
@@ -1635,13 +1944,224 @@ mod tests {
             failure: vec![],
             ..TxnRequest::default()
         };
-        let err = store.txn(req).await.expect_err("must reject for now");
-        match err {
-            MvccError::Internal { context } => assert!(
-                context.contains("commit 8"),
-                "unexpected context: {context}"
-            ),
-            other => panic!("expected Internal, got {other:?}"),
+        let resp = store.txn(req).await.expect("txn");
+        assert!(resp.succeeded);
+        assert_eq!(resp.responses.len(), 1);
+        match &resp.responses[0] {
+            ResponseOp::Put { prev_revision } => assert!(prev_revision.is_none()),
+            other => panic!("expected Put, got {other:?}"),
+        }
+        assert_eq!(
+            store.current_revision(),
+            pre.checked_add(1).expect("pre+1"),
+            "txn with one Put must advance main by 1"
+        );
+        assert_eq!(resp.header_revision, store.current_revision());
+        // Sub allocation: read back at the new rev and confirm
+        // the value is visible.
+        let r = store.range(req_point(b"k")).expect("range");
+        assert_eq!(r.kvs.len(), 1);
+        assert_eq!(r.kvs[0].mod_revision.sub(), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn txn_put_deleterange_put_subs_increment_per_physical_write() {
+        // M1 / S3: subs increment per physical write across the
+        // mixed branch — Put(0), DeleteRange-2-keys(1, 2), Put(3).
+        let store = MvccStore::open(fresh_backend()).expect("open");
+        let _ = store.put(b"a", b"1").await.expect("a");
+        let _ = store.put(b"b", b"2").await.expect("b");
+        // current = 2.
+        let req = TxnRequest {
+            compare: vec![],
+            success: vec![
+                RequestOp::Put {
+                    key: b"x".to_vec(),
+                    value: b"x_val".to_vec(),
+                },
+                RequestOp::DeleteRange {
+                    key: b"a".to_vec(),
+                    end: b"c".to_vec(),
+                },
+                RequestOp::Put {
+                    key: b"y".to_vec(),
+                    value: b"y_val".to_vec(),
+                },
+            ],
+            failure: vec![],
+            ..TxnRequest::default()
+        };
+        let resp = store.txn(req).await.expect("txn");
+        assert!(resp.succeeded);
+        assert_eq!(resp.responses.len(), 3);
+        // Slot 1: DeleteRange counted 2.
+        match &resp.responses[1] {
+            ResponseOp::DeleteRange { deleted } => assert_eq!(*deleted, 2),
+            other => panic!("expected DeleteRange, got {other:?}"),
+        }
+        // Main advanced by exactly 1 (single txn allocates 1 main).
+        assert_eq!(store.current_revision(), 3);
+        // x at sub 0; y at sub 3 (after the two tombstones).
+        let rx = store.range(req_point(b"x")).expect("range x");
+        assert_eq!(rx.kvs[0].mod_revision.main(), 3);
+        assert_eq!(rx.kvs[0].mod_revision.sub(), 0);
+        let ry = store.range(req_point(b"y")).expect("range y");
+        assert_eq!(ry.kvs[0].mod_revision.main(), 3);
+        assert_eq!(ry.kvs[0].mod_revision.sub(), 3);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn txn_subs_increment_per_mutating_op() {
+        // S3: each mutating op gets its own sub (Put = 1 sub;
+        // DeleteRange-N = N subs).
+        let store = MvccStore::open(fresh_backend()).expect("open");
+        let req = TxnRequest {
+            compare: vec![],
+            success: vec![
+                RequestOp::Put {
+                    key: b"k1".to_vec(),
+                    value: b"v1".to_vec(),
+                },
+                RequestOp::Put {
+                    key: b"k2".to_vec(),
+                    value: b"v2".to_vec(),
+                },
+            ],
+            failure: vec![],
+            ..TxnRequest::default()
+        };
+        let _ = store.txn(req).await.expect("txn");
+        let r1 = store.range(req_point(b"k1")).expect("k1");
+        let r2 = store.range(req_point(b"k2")).expect("k2");
+        assert_eq!(r1.kvs[0].mod_revision.sub(), 0);
+        assert_eq!(r2.kvs[0].mod_revision.sub(), 1);
+        assert_eq!(r1.kvs[0].mod_revision.main(), r2.kvs[0].mod_revision.main());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn txn_with_zero_match_deleterange_only_does_not_advance_main() {
+        // M1 / S3: a branch whose only mutating op is a
+        // DeleteRange that matches no live keys is read-only
+        // (no main allocation).
+        let store = MvccStore::open(fresh_backend()).expect("open");
+        let _ = store.put(b"k", b"v").await.expect("put");
+        let pre = store.current_revision();
+        let req = TxnRequest {
+            compare: vec![],
+            success: vec![RequestOp::DeleteRange {
+                key: b"absent_a".to_vec(),
+                end: b"absent_z".to_vec(),
+            }],
+            failure: vec![],
+            ..TxnRequest::default()
+        };
+        let resp = store.txn(req).await.expect("txn");
+        assert!(resp.succeeded);
+        match &resp.responses[0] {
+            ResponseOp::DeleteRange { deleted } => assert_eq!(*deleted, 0),
+            other => panic!("expected DeleteRange, got {other:?}"),
+        }
+        assert_eq!(store.current_revision(), pre);
+        assert_eq!(resp.header_revision, pre);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn txn_success_branch_executes_in_order_with_one_main() {
+        // Sanity: two Puts and a Range in the success branch share
+        // one main, and the trailing Range sees the just-committed
+        // Puts (post-commit visibility, plan §5.5 step 11).
+        let store = MvccStore::open(fresh_backend()).expect("open");
+        let req = TxnRequest {
+            compare: vec![],
+            success: vec![
+                RequestOp::Put {
+                    key: b"a".to_vec(),
+                    value: b"1".to_vec(),
+                },
+                RequestOp::Put {
+                    key: b"b".to_vec(),
+                    value: b"2".to_vec(),
+                },
+                RequestOp::Range(RangeRequest {
+                    key: b"a".to_vec(),
+                    end: b"c".to_vec(),
+                    ..RangeRequest::default()
+                }),
+            ],
+            failure: vec![],
+            ..TxnRequest::default()
+        };
+        let resp = store.txn(req).await.expect("txn");
+        assert!(resp.succeeded);
+        match &resp.responses[2] {
+            ResponseOp::Range(r) => {
+                assert_eq!(r.kvs.len(), 2, "post-commit Range sees both Puts");
+                assert_eq!(r.kvs[0].key.as_ref(), b"a");
+                assert_eq!(r.kvs[1].key.as_ref(), b"b");
+            }
+            other => panic!("expected Range, got {other:?}"),
+        }
+        assert_eq!(store.current_revision(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn txn_failure_branch_runs_when_any_compare_fails() {
+        // Mutating branch on the failure path: compare fails →
+        // failure branch's Put executes and main advances.
+        let store = MvccStore::open(fresh_backend()).expect("open");
+        let cmp = Compare::Version {
+            key: b"absent".to_vec(),
+            op: CompareOp::Greater,
+            target: 0,
+        };
+        let req = TxnRequest {
+            compare: vec![cmp],
+            success: vec![],
+            failure: vec![RequestOp::Put {
+                key: b"k".to_vec(),
+                value: b"v".to_vec(),
+            }],
+            ..TxnRequest::default()
+        };
+        let resp = store.txn(req).await.expect("txn");
+        assert!(!resp.succeeded);
+        assert_eq!(store.current_revision(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn txn_response_ops_align_with_request_ops_mutating() {
+        // Index alignment for a mixed mutating branch.
+        let store = MvccStore::open(fresh_backend()).expect("open");
+        let _ = store.put(b"a", b"1").await.expect("put a");
+        let req = TxnRequest {
+            compare: vec![],
+            success: vec![
+                RequestOp::Range(req_point(b"a")),
+                RequestOp::Put {
+                    key: b"b".to_vec(),
+                    value: b"2".to_vec(),
+                },
+                RequestOp::DeleteRange {
+                    key: b"a".to_vec(),
+                    end: b"b".to_vec(),
+                },
+            ],
+            failure: vec![],
+            ..TxnRequest::default()
+        };
+        let resp = store.txn(req).await.expect("txn");
+        assert_eq!(resp.responses.len(), 3);
+        match &resp.responses[0] {
+            ResponseOp::Range(_) => {}
+            other => panic!("slot 0 expected Range, got {other:?}"),
+        }
+        match &resp.responses[1] {
+            ResponseOp::Put { .. } => {}
+            other => panic!("slot 1 expected Put, got {other:?}"),
+        }
+        match &resp.responses[2] {
+            ResponseOp::DeleteRange { deleted } => assert_eq!(*deleted, 1),
+            other => panic!("slot 2 expected DeleteRange, got {other:?}"),
         }
     }
 }
