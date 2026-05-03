@@ -49,5 +49,16 @@ proptest = "1.5"
 mango-storage = { path = "../mango-storage" }
 tempfile = "3"
 
+# loom is a `cfg(loom)` target dep, not a dev-dep, because
+# `sharded_key_index` references `loom::sync::RwLock` under
+# `#[cfg(loom)]` from the *library* path. Dev-deps are scoped to
+# non-lib targets only, so they would compile the lib without loom
+# and fail on the `loom::...` paths under `--cfg loom`. Same idiom
+# as `crates/mango-loom-demo/Cargo.toml:23-24`. The dep is pulled
+# in only when `RUSTFLAGS="--cfg loom"` is set; default builds
+# remain loom-free.
+[target.'cfg(loom)'.dependencies]
+loom.workspace = true
+
 [lints]
 workspace = true
