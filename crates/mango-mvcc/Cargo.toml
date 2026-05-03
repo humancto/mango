@@ -68,7 +68,10 @@ tempfile = "3"
 # `#[tokio::test]` driver for the async open-rejects-non-empty
 # tests (the seed-and-commit setup is async). `rt-multi-thread`
 # matches the surface used by `crates/mango-storage/tests/`.
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# `time` for `tokio::time::timeout` used in the L847 snapshot
+# consistency proptest's per-case 15s timeout (the rest of the
+# tests use `macros` + `rt-multi-thread` only).
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 
 # loom is a `cfg(loom)` target dep, not a dev-dep, because
 # `sharded_key_index` references `loom::sync::RwLock` under
