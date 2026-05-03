@@ -14,21 +14,9 @@
 //! to the on-disk format** — any deployed cluster's data files
 //! would become unreadable.
 //!
-//! # Workspace bucket-ID registry
-//!
-//! No central authority enforces uniqueness; this module is the
-//! de-facto registry. Known allocations as of L838:
-//!
-//! | id        | name                | crate                                 | role          |
-//! | --------- | ------------------- | ------------------------------------- | ------------- |
-//! | `0x0010`  | `"key"`             | `mango-mvcc` (this crate)             | MVCC payload  |
-//! | `0x0011`  | `"key_index"`       | `mango-mvcc` (this crate)             | MVCC index    |
-//! | `0xb007`  | (test-only)         | `benches/storage`                     | Bench harness |
-//! | `1`/`2`   | (test-only)         | `mango-storage::tests`                | Doctests      |
-//! | `99`      | (test-only)         | `mango-storage::tests`                | Doctests      |
-//! | `0x1234`/`0x5678` | (test-only) | `mango-storage::tests`                | Doctests      |
-//!
-//! New allocations: pick the next free `u16` and add a row above.
+//! Mango-MVCC reserves `0x0010` and `0x0011`. Other crates pick
+//! freely; coordinate via grep across the workspace before adding a
+//! new production `BucketId`.
 
 use mango_storage::{Backend, BackendError, BucketId};
 

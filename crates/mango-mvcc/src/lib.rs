@@ -7,9 +7,11 @@
 //!   each apply-batch and each op within it.
 //! - [`encode_key`] / [`decode_key`] — the on-disk byte format used
 //!   by the `key` bucket. **Byte-for-byte equal to etcd's
-//!   `revision.go::BucketKeyToBytes`** so L839's restart path can
-//!   ingest etcd recovery dumps and the Phase 13 differential-fuzz
-//!   harness can share fixtures with etcd unchanged.
+//!   `server/mvcc/revision.go::revToBytes` plus
+//!   `server/mvcc/kvstore.go::appendMarkTombstone` at tag `v3.5.16`**
+//!   so L839's restart path can ingest etcd recovery dumps and the
+//!   Phase 13 differential-fuzz harness can share fixtures with etcd
+//!   unchanged.
 //! - [`bucket`] — the `BucketId` and name reservations for the
 //!   `key` and `key_index` buckets, plus the [`bucket::register`]
 //!   helper that wires both into a [`mango_storage::Backend`].

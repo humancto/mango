@@ -1,7 +1,8 @@
 //! On-disk key encoding for the `key` bucket.
 //!
-//! Byte-for-byte equal to etcd's `BucketKeyToBytes`
-//! (`server/storage/mvcc/revision.go`):
+//! Byte-for-byte equal to etcd's `revToBytes`
+//! (`server/mvcc/revision.go`) plus `appendMarkTombstone`
+//! (`server/mvcc/kvstore.go`), pinned to tag `v3.5.16`:
 //!
 //! ```text
 //! Put       (17 bytes): [main BE u64 (8)] [ '_' 0x5f ] [sub BE u64 (8)]
@@ -64,8 +65,8 @@ pub enum KeyKind {
 ///
 /// `as_bytes()` returns 17 bytes for `Put`, 18 for `Tombstone`. The
 /// inner buffer is always 18 bytes wide; the trailing byte is unused
-/// (and zero) for `Put`. Stack-allocated; clones are byte copies.
-#[derive(Clone, Eq, PartialEq, Hash, Debug)]
+/// (and zero) for `Put`. Stack-allocated; copies are byte copies.
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
 pub struct EncodedKey {
     buf: [u8; ENCODED_TOMBSTONE_LEN],
     /// Always [`ENCODED_PUT_LEN`] (17) or [`ENCODED_TOMBSTONE_LEN`] (18).
@@ -79,13 +80,12 @@ impl EncodedKey {
         let len = usize::from(self.len);
         match self.buf.get(..len) {
             Some(slice) => slice,
-            // SAFETY-by-construction: `self.len` is set only by
-            // `encode_key`, which assigns either `ENCODED_PUT_LEN`
-            // or `ENCODED_TOMBSTONE_LEN`, both `<= self.buf.len()`.
-            // The `None` arm cannot trigger; we return an empty
-            // slice rather than panic to keep `clippy::indexing_slicing`
-            // happy without `unwrap`.
-            None => &[],
+            // `self.len` is set only by `encode_key`, which assigns
+            // either `ENCODED_PUT_LEN` or `ENCODED_TOMBSTONE_LEN`,
+            // both within `self.buf`'s bounds. Reaching this arm
+            // means the struct was constructed outside this module's
+            // invariants and the on-disk contract is already broken.
+            None => unreachable!("EncodedKey::len out of bounds: {len}"),
         }
     }
 }
@@ -167,8 +167,7 @@ pub fn encode_key(rev: Revision, kind: KeyKind) -> EncodedKey {
 
     EncodedKey {
         buf,
-        // Both constants are `<= 18 = u8::MAX`-clamped; no truncation risk.
-        // `arithmetic_side_effects` only fires on `+ - * / %`, not casts.
+        // Both constants are <= 18 < u8::MAX; the cast is lossless.
         #[allow(clippy::cast_possible_truncation)]
         len: len as u8,
     }
@@ -296,6 +295,17 @@ mod tests {
     }
 
     #[test]
+    fn put_sorts_before_tombstone_at_same_revision() {
+        // Etcd's bucket scan iterates `Put` before `Tombstone` for
+        // an identical `(main, sub)` because the 17-byte Put is a
+        // strict prefix of the 18-byte Tombstone, and lex compare on
+        // byte slices treats the shorter prefix as smaller.
+        let put = encode_key(Revision::new(7, 3), KeyKind::Put);
+        let tomb = encode_key(Revision::new(7, 3), KeyKind::Tombstone);
+        assert!(put.as_bytes() < tomb.as_bytes());
+    }
+
+    #[test]
     fn tombstone_distinguishable_by_length_only() {
         let put = encode_key(Revision::new(7, 3), KeyKind::Put);
         let tomb = encode_key(Revision::new(7, 3), KeyKind::Tombstone);
@@ -386,28 +396,27 @@ mod tests {
 
     /// Cross-check the encoder against an actual etcd source.
     ///
-    /// Reference: etcd-io/etcd@release-3.5
-    /// (commit `c95eaa0ad84ce32d4a2c84a7d6a18b09bce0d4d3`),
-    /// `server/storage/mvcc/revision.go`:
+    /// Reference: etcd-io/etcd at tag `v3.5.16`,
+    /// `server/mvcc/revision.go`:
     ///
     /// ```go
-    /// const (
-    ///     revBytesLen        = 8 + 1 + 8
-    ///     markedRevBytesLen  = revBytesLen + 1
-    ///     markBytePosition   = markedRevBytesLen - 1
-    ///     markTombstone byte = 't'
-    /// )
-    /// // BucketKeyToBytes:
-    /// //   binary.BigEndian.PutUint64(bytes, uint64(rev.Main))
-    /// //   bytes[8] = '_'
-    /// //   binary.BigEndian.PutUint64(bytes[9:], uint64(rev.Sub))
-    /// //   if isTombstone { bytes[markBytePosition] = markTombstone }
+    /// // revBytesLen = 8 + 1 + 8 (declared at the top of the file)
+    /// func revToBytes(rev revision, bytes []byte) {
+    ///     binary.BigEndian.PutUint64(bytes, uint64(rev.main))
+    ///     bytes[8] = '_'
+    ///     binary.BigEndian.PutUint64(bytes[9:], uint64(rev.sub))
+    /// }
     /// ```
     ///
-    /// Running that encoder on `Revision{Main: 1, Sub: 2}` Put yields
-    /// the 17-byte sequence below (verified by hand against the Go
-    /// source — `binary.BigEndian.PutUint64(b, 1)` writes
-    /// `[0,0,0,0,0,0,0,1]`).
+    /// The tombstone marker is appended separately by
+    /// `appendMarkTombstone` in `server/mvcc/kvstore.go` (constants
+    /// `markedRevBytesLen = revBytesLen + 1`,
+    /// `markBytePosition = markedRevBytesLen - 1`,
+    /// `markTombstone = 't'`).
+    ///
+    /// Running `revToBytes(revision{main:1, sub:2}, b)` yields the
+    /// 17-byte sequence below — `binary.BigEndian.PutUint64(b, 1)`
+    /// writes `[0,0,0,0,0,0,0,1]`.
     #[test]
     fn golden_put_vs_etcd() {
         let enc = encode_key(Revision::new(1, 2), KeyKind::Put);
@@ -423,9 +432,9 @@ mod tests {
     }
 
     /// Same as `golden_put_vs_etcd` but with the trailing tombstone
-    /// marker. Etcd's `BucketKeyToBytes(... isTombstone: true)`
-    /// produces an 18-byte sequence: the 17-byte Put plus `'t'`
-    /// (0x74) at position 17.
+    /// marker. Etcd's `appendMarkTombstone` (`server/mvcc/kvstore.go`,
+    /// `v3.5.16`) takes the 17-byte `revToBytes` output and writes
+    /// `'t'` (0x74) at `markBytePosition = 17`, yielding 18 bytes.
     #[test]
     fn golden_tombstone_vs_etcd() {
         let enc = encode_key(Revision::new(1, 2), KeyKind::Tombstone);

@@ -163,6 +163,13 @@ jobs:
         # Placed after nextest so the workspace dep cache is warm and
         # only doctest-specific artifacts recompile.
         run: cargo test --doc --workspace --locked
+      - name: cargo build (mango-mvcc, --features proptest)
+        # mango-mvcc exposes `arb_revision`/`arb_key_kind` strategy
+        # adapters under `[features] proptest`. Default builds skip
+        # them, so without an explicit feature-on build the symbols
+        # would silently rot. Smoke-build asserts the feature still
+        # compiles.
+        run: cargo build -p mango-mvcc --features proptest --locked
       - name: watchdog smoke (assert nextest kills runaway tests)
         # Proves `slow-timeout = { ..., terminate-after = 1 }` actually
         # kills. Without this, someone could silently drop
