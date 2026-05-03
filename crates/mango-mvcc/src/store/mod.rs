@@ -300,17 +300,21 @@ impl<B: Backend> MvccStore<B> {
         let _ = self.backend.commit_batch(batch, false).await?;
 
         // No `.await` is held under either of the in-memory locks
-        // below. `keys_in_order`'s guard is dropped before the
-        // index is touched, so the lock-ordering edge `writer →
-        // keys_in_order → index shard` holds (module docs).
-        {
-            let mut keys = self.keys_in_order.write();
-            // `BTreeMap::insert` is idempotent on identical-key
-            // overwrites — the value is `()`. Repeated puts on the
-            // same user key keep the entry exactly once.
-            let _ = keys.insert(key.into(), ());
-        }
-
+        // below. Ordering is **index first, then `keys_in_order`**
+        // (rust-expert PR #75 review R1): a concurrent reader
+        // observing the new `current_main` (Release-stored at the
+        // end of this fn) can scan `keys_in_order` and probe the
+        // index. If we set `keys_in_order` first, there is a
+        // sub-microsecond window where a reader sees the new key
+        // in the ordered set but `index.get` returns
+        // `KeyNotFound` — Range surfaces that as
+        // `MvccError::Internal { context: "index/keys_in_order
+        // disagree" }`. Index first means a reader sees either
+        // (a) neither — pre-Put state, or (b) index set,
+        // `keys_in_order` not yet — Range scans `keys_in_order`
+        // and never visits the new key, or (c) both — fully
+        // committed.
+        //
         // Structurally: `KeyHistory::put` rejects only with
         // `NonMonotonic`, but `state.next_main` is allocated under
         // the writer lock and increases monotonically across all
@@ -321,6 +325,13 @@ impl<B: Backend> MvccStore<B> {
             return Err(MvccError::Internal {
                 context: "index.put failed under monotonic invariant",
             });
+        }
+        {
+            let mut keys = self.keys_in_order.write();
+            // `BTreeMap::insert` is idempotent on identical-key
+            // overwrites — the value is `()`. Repeated puts on the
+            // same user key keep the entry exactly once.
+            let _ = keys.insert(key.into(), ());
         }
 
         let next = state.next_main.checked_add(1).ok_or(MvccError::Internal {
@@ -870,14 +881,17 @@ impl<B: Backend> MvccStore<B> {
             match entry {
                 OpPlan::Read => {}
                 OpPlan::Put { key, rev, .. } => {
-                    {
-                        let mut keys = self.keys_in_order.write();
-                        let _ = keys.insert(key.as_slice().into(), ());
-                    }
+                    // Index first, then `keys_in_order`
+                    // (rust-expert PR #75 review R1) — see
+                    // `Self::put` for the full ordering rationale.
                     if let Err(_e) = self.index.put(key, *rev) {
                         return Err(MvccError::Internal {
                             context: "index.put failed under txn writer-lock invariant",
                         });
+                    }
+                    {
+                        let mut keys = self.keys_in_order.write();
+                        let _ = keys.insert(key.as_slice().into(), ());
                     }
                 }
                 OpPlan::Delete { tombs } => {
@@ -1088,11 +1102,24 @@ impl<B: Backend> MvccStore<B> {
     /// Reap keys from `keys_in_order` whose index entry was
     /// dropped by [`ShardedKeyIndex::compact`]. Detection: the
     /// key has no history visible at `current` AND no entry at
-    /// all (post-compact). For L844 we approximate via
-    /// `index.get(key, current)`'s `KeyNotFound` arm — a
-    /// `KeyNotFound` here means the index has dropped the entry
-    /// (the writer-lock invariant otherwise keeps the two in
-    /// sync; review item R3).
+    /// all (post-compact).
+    ///
+    /// Two arms reap (review item R3, expanded to fix the
+    /// rust-expert S1 finding on PR #75):
+    ///
+    /// - `KeyNotFound` — `ShardedKeyIndex::compact` dropped the
+    ///   entry entirely (last live generation was reaped).
+    /// - `History(RevisionNotFound)` — the index retained a
+    ///   tombstone-only history; `index.get(k, current)` walks
+    ///   into `KeyHistory::get`, sees the tombstone is the only
+    ///   visible generation at `<= current`, and reports
+    ///   `RevisionNotFound`. `Range` skips on this arm, so the
+    ///   key is invisible at HEAD and must be reaped here too —
+    ///   otherwise `keys_in_order` leaks dead entries on every
+    ///   put-then-delete-then-compact loop (etcd parity for
+    ///   `mvcc/kvstore_compaction.go::scheduleCompaction` which
+    ///   discards `KeyIndex` entries whose generations are all
+    ///   compacted away).
     fn reap_keys_in_order_after_compact(&self, current: i64) {
         let snapshot: Vec<Box<[u8]>> = {
             let keys = self.keys_in_order.read();
@@ -1100,7 +1127,11 @@ impl<B: Backend> MvccStore<B> {
         };
         let mut keys = self.keys_in_order.write();
         for k in &snapshot {
-            if matches!(self.index.get(k, current), Err(KeyIndexError::KeyNotFound)) {
+            if let Err(
+                KeyIndexError::KeyNotFound
+                | KeyIndexError::History(KeyHistoryError::RevisionNotFound),
+            ) = self.index.get(k, current)
+            {
                 let _ = keys.remove(k.as_ref());
             }
         }
@@ -1249,6 +1280,25 @@ mod tests {
         }
         check();
     };
+
+    /// Compile-time check: writer futures (`put`, `delete_range`,
+    /// `compact`, `txn`) are `Send` (rust-expert PR #75 review S2).
+    /// A future change that captures a `!Send` local across `await`
+    /// (e.g. holds the batch on the stack instead of letting
+    /// `commit_batch` consume it in its sync prologue) fails the
+    /// build at this site. Required for L854's `tokio::spawn`-per-
+    /// gRPC-request handler.
+    #[allow(dead_code, reason = "compile-time assertion only")]
+    fn _assert_writer_futures_are_send() {
+        fn assert_send_fut<F: core::future::Future + Send>(_: F) {}
+        fn check(s: &'static MvccStore<InMemBackend>) {
+            assert_send_fut(s.put(b"", b"a"));
+            assert_send_fut(s.delete_range(b"", b""));
+            assert_send_fut(s.compact(0));
+            assert_send_fut(s.txn(crate::store::txn::TxnRequest::default()));
+        }
+        let _ = check;
+    }
 
     fn fresh_backend() -> InMemBackend {
         InMemBackend::open(BackendConfig::new("/unused".into(), false))
@@ -2432,5 +2482,14 @@ mod tests {
             })
             .expect("range");
         assert!(r.kvs.is_empty(), "tombstoned key must be reaped");
+        // Direct probe (rust-expert PR #75 review S1/B1): Range
+        // silently skips on `RevisionNotFound`, so the assertion
+        // above passes whether or not `keys_in_order` was reaped.
+        // Probe the in-memory set directly to pin the post-
+        // compact invariant.
+        assert!(
+            !store.keys_in_order.read().contains_key(&b"k"[..]),
+            "fully-tombstoned key must be reaped from keys_in_order"
+        );
     }
 }
