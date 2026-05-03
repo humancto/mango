@@ -173,10 +173,19 @@ fn model_4_since_concurrent_with_compact_same_shard() {
     });
 }
 
-/// Model 5 — concurrent readers same shard.
+/// Model 5 — interleaved readers same shard.
 ///
-/// Pins the L840 design: `RwLock` (not `Mutex`) lets two readers
-/// hold the lock simultaneously under loom's `RwLock` model.
+/// Two `get` calls against the same key on the same shard. Asserts
+/// both readers observe the pre-state `(1,0)` regardless of how
+/// loom interleaves their lock acquisitions.
+///
+/// Note: this model is functional smoke for the read path — the
+/// assertion holds equally under `Mutex`, so it does NOT pin the
+/// L840 `RwLock`-vs-`Mutex` design choice. Loom enumerates
+/// schedules sequentially; it does not model wall-clock parallelism,
+/// so a "two readers in parallel" property is not directly
+/// observable here. Per-core read scaling on `RwLock` is verified
+/// by Phase 6's bench harness, not by loom.
 #[test]
 fn model_5_concurrent_readers_same_shard() {
     loom::model(|| {
