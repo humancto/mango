@@ -593,6 +593,84 @@ impl<B: Backend> MvccStore<B> {
         Ok((deleted, rev))
     }
 
+    /// Multi-op transaction.
+    ///
+    /// Per the L844 plan §5.5: evaluates `req.compare` against
+    /// the head; if all pass, executes `req.success`, else
+    /// `req.failure`. The writer lock is held for the entire
+    /// duration so the chosen branch sees the same `current`
+    /// the compares saw.
+    ///
+    /// **This commit (plan §8 commit 7) ships the read-only
+    /// path only.** A branch that contains [`RequestOp::Put`]
+    /// or [`RequestOp::DeleteRange`] returns
+    /// [`MvccError::Internal`] until the mutating-branch
+    /// dispatch lands in commit 8. Tests for the read-only
+    /// path use only [`RequestOp::Range`] in both branches.
+    ///
+    /// Read-only txn semantics:
+    /// - **No main rev is allocated.** `header_revision`
+    ///   reflects the pre-txn `current` (etcd parity for
+    ///   `storeTxnRead`).
+    /// - The compare list may be empty; an empty list always
+    ///   succeeds (review item M1 — etcd parity).
+    /// - Range ops inside the chosen branch are executed in
+    ///   order; their responses are index-aligned with the
+    ///   branch slice.
+    ///
+    /// # Errors
+    ///
+    /// - [`MvccError::Backend`] / [`MvccError::KeyIndex`] /
+    ///   [`MvccError::KeyDecode`] propagated from compare
+    ///   evaluation or branch-op execution.
+    /// - [`MvccError::Internal`] if the chosen branch contains
+    ///   a mutating [`RequestOp`] (deferred to plan §8 commit
+    ///   8). Read-only branches never hit this path.
+    pub async fn txn(&self, req: TxnRequest) -> Result<TxnResponse, MvccError> {
+        // Hold the writer lock for the entire txn so compare
+        // evaluation and branch execution see the same `current`.
+        // Read-only txns still take the writer lock — the
+        // alternative (RwLock-style upgrade) would need a
+        // different primitive and the cost of the async lock
+        // acquisition is dwarfed by the work the txn does.
+        let _state = self.writer.lock().await;
+        let current = self.current_main.load(Ordering::Acquire);
+
+        let outcomes = self.evaluate_compares(&req.compare)?;
+        let succeeded = outcomes.iter().all(|&b| b);
+        let branch = if succeeded {
+            &req.success
+        } else {
+            &req.failure
+        };
+
+        let mut responses: Vec<ResponseOp> = Vec::with_capacity(branch.len());
+        for op in branch {
+            match op {
+                RequestOp::Range(range_req) => {
+                    // Re-acquires `current_main` inside `range`,
+                    // but the writer lock keeps it stable — the
+                    // value matches `current` above. Cloning the
+                    // request avoids changing `range`'s public
+                    // by-value signature.
+                    let result = self.range(range_req.clone())?;
+                    responses.push(ResponseOp::Range(result));
+                }
+                RequestOp::Put { .. } | RequestOp::DeleteRange { .. } => {
+                    return Err(MvccError::Internal {
+                        context: "mutating Txn ops land in L844 plan §8 commit 8",
+                    });
+                }
+            }
+        }
+
+        Ok(TxnResponse {
+            succeeded,
+            responses,
+            header_revision: current,
+        })
+    }
+
     /// Evaluate a list of [`Compare`] preconditions against the
     /// store's head revision.
     ///
@@ -622,7 +700,6 @@ impl<B: Backend> MvccStore<B> {
     /// - [`MvccError::KeyIndex`] for non-`KeyNotFound` /
     ///   non-`RevisionNotFound` index errors (those two are the
     ///   "absent" path — not errors).
-    #[allow(dead_code)] // wired into `txn` in plan §8 commits 7+8
     pub(super) fn evaluate_compares(&self, compares: &[Compare]) -> Result<Vec<bool>, MvccError> {
         let current = self.current_main.load(Ordering::Acquire);
         // Snapshot is only needed for `Compare::Value`; skip
@@ -702,7 +779,6 @@ impl<B: Backend> MvccStore<B> {
 /// slices, numeric order for `i64`). Pure function so the compare
 /// evaluator only differs by which field it loads, not by which
 /// operator it implements.
-#[allow(dead_code)] // wired into `txn` in plan §8 commits 7+8
 fn apply_compare_ord<T: Ord + ?Sized>(actual: &T, target: &T, op: CompareOp) -> bool {
     match op {
         CompareOp::Equal => actual == target,
@@ -1403,5 +1479,169 @@ mod tests {
             .expect("evaluate");
         assert_eq!(outcomes, vec![true, false, true]);
         assert!(!all_passed(&outcomes));
+    }
+
+    // === Txn read-only branch dispatch (plan §5.5 / §8 commit 7) ===
+
+    use crate::store::txn::{RequestOp, ResponseOp, TxnRequest};
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn txn_empty_compare_list_uses_success_branch() {
+        // M1: empty compare list succeeds — etcd parity.
+        let store = MvccStore::open(fresh_backend()).expect("open");
+        let _ = store.put(b"k", b"v").await.expect("put");
+        let req = TxnRequest {
+            compare: vec![],
+            success: vec![RequestOp::Range(req_point(b"k"))],
+            failure: vec![],
+            ..TxnRequest::default()
+        };
+        let resp = store.txn(req).await.expect("txn");
+        assert!(resp.succeeded);
+        assert_eq!(resp.responses.len(), 1);
+        // Read-only txn does not advance main; header is the
+        // pre-txn current.
+        assert_eq!(resp.header_revision, 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn txn_readonly_does_not_advance_revision() {
+        let store = MvccStore::open(fresh_backend()).expect("open");
+        let _ = store.put(b"k", b"v").await.expect("put");
+        let pre = store.current_revision();
+        let req = TxnRequest {
+            compare: vec![],
+            success: vec![RequestOp::Range(req_point(b"k"))],
+            failure: vec![],
+            ..TxnRequest::default()
+        };
+        let _ = store.txn(req).await.expect("txn");
+        assert_eq!(
+            store.current_revision(),
+            pre,
+            "read-only Txn must not advance head"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn txn_compare_version_eq_picks_success_branch() {
+        let store = MvccStore::open(fresh_backend()).expect("open");
+        let _ = store.put(b"k", b"v").await.expect("put");
+        let cmp = Compare::Version {
+            key: b"k".to_vec(),
+            op: CompareOp::Equal,
+            target: 1,
+        };
+        let req = TxnRequest {
+            compare: vec![cmp],
+            success: vec![RequestOp::Range(req_point(b"k"))],
+            failure: vec![RequestOp::Range(req_point(b"absent"))],
+            ..TxnRequest::default()
+        };
+        let resp = store.txn(req).await.expect("txn");
+        assert!(resp.succeeded);
+        match &resp.responses[0] {
+            ResponseOp::Range(r) => assert_eq!(r.kvs.len(), 1),
+            other => panic!("expected Range, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn txn_compare_failure_picks_failure_branch() {
+        let store = MvccStore::open(fresh_backend()).expect("open");
+        let _ = store.put(b"k", b"v").await.expect("put");
+        // Compare fails: version is 1, target is 99.
+        let cmp = Compare::Version {
+            key: b"k".to_vec(),
+            op: CompareOp::Equal,
+            target: 99,
+        };
+        let req = TxnRequest {
+            compare: vec![cmp],
+            success: vec![RequestOp::Range(req_point(b"k"))],
+            failure: vec![RequestOp::Range(req_point(b"k"))],
+            ..TxnRequest::default()
+        };
+        let resp = store.txn(req).await.expect("txn");
+        assert!(!resp.succeeded, "compare must fail");
+        // Failure branch ran; same Range result content.
+        assert_eq!(resp.responses.len(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn txn_response_ops_align_with_request_ops_readonly() {
+        // M1: index alignment between RequestOp and ResponseOp slices.
+        let store = MvccStore::open(fresh_backend()).expect("open");
+        let _ = store.put(b"a", b"1").await.expect("a");
+        let _ = store.put(b"b", b"2").await.expect("b");
+        let req = TxnRequest {
+            compare: vec![],
+            success: vec![
+                RequestOp::Range(req_point(b"a")),
+                RequestOp::Range(req_point(b"b")),
+                RequestOp::Range(req_point(b"absent")),
+            ],
+            failure: vec![],
+            ..TxnRequest::default()
+        };
+        let resp = store.txn(req).await.expect("txn");
+        assert_eq!(resp.responses.len(), 3);
+        for (idx, op) in resp.responses.iter().enumerate() {
+            match op {
+                ResponseOp::Range(r) => {
+                    if idx == 2 {
+                        assert!(r.kvs.is_empty(), "absent must yield 0 kvs");
+                    } else {
+                        assert_eq!(r.kvs.len(), 1, "slot {idx} expected 1 kv");
+                    }
+                }
+                other => panic!("slot {idx} expected Range, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn txn_with_only_range_does_not_advance() {
+        // Same invariant as `txn_readonly_does_not_advance_revision`
+        // but with multiple Range ops in the success branch.
+        let store = MvccStore::open(fresh_backend()).expect("open");
+        let _ = store.put(b"k", b"v").await.expect("put");
+        let pre = store.current_revision();
+        let req = TxnRequest {
+            compare: vec![],
+            success: vec![
+                RequestOp::Range(req_point(b"k")),
+                RequestOp::Range(req_point(b"k")),
+            ],
+            failure: vec![],
+            ..TxnRequest::default()
+        };
+        let _ = store.txn(req).await.expect("txn");
+        assert_eq!(store.current_revision(), pre);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn txn_mutating_branch_returns_internal_until_commit_8() {
+        // Boundary check: commit 7's read-only dispatch refuses
+        // mutating ops with a typed Internal error. Removed when
+        // commit 8 lands the mutating branch.
+        let store = MvccStore::open(fresh_backend()).expect("open");
+        let req = TxnRequest {
+            compare: vec![],
+            success: vec![RequestOp::Put {
+                key: b"k".to_vec(),
+                value: b"v".to_vec(),
+            }],
+            failure: vec![],
+            ..TxnRequest::default()
+        };
+        let err = store.txn(req).await.expect_err("must reject for now");
+        match err {
+            MvccError::Internal { context } => assert!(
+                context.contains("commit 8"),
+                "unexpected context: {context}"
+            ),
+            other => panic!("expected Internal, got {other:?}"),
+        }
     }
 }
