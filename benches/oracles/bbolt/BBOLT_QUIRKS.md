@@ -179,3 +179,37 @@ Template:
 ```
 
 No entries yet.
+
+---
+
+## Bench-mode wire-format quirks
+
+These are not bbolt-engine quirks per se but cross-language
+serialization quirks specific to the `--mode=bench` driver. They
+land here because the same Go binary owns both modes and a future
+maintainer reading `bench.go` will look here first.
+
+### `hdrhistogram-go` non-zero `normalizingIndexOffset`
+
+- Discovered: 2026-05-03 while landing ROADMAP:829 commit 9.
+- Category: cross-language wire-format
+- Description: `hdrhistogram-go` v1.x hardcodes
+  `getNormalizingIndexOffset() = 1`
+  (see `hdr.go:169` in v1.2.0). The Rust `hdrhistogram` 7.5.x
+  deserializer rejects any non-zero normalizing offset with
+  `DeserializeError::UnsupportedFeature`
+  (`deserializer.rs:146-148`). The two libraries' V2-compressed
+  payloads are therefore not directly interoperable out of the
+  box.
+- Workaround: `bench.go::encodeHistB64` byte-patches the inflated
+  inner V2 payload at offset 8..12 to zero before re-deflating.
+  Safe because no shifted recording happens in the bench harness;
+  the offset is unused metadata.
+- Verified by: `bbolt_runner.rs::tests::load_then_get_seq_round_trip`
+  and `range_checksum_is_non_zero_on_non_empty_scan`, both of
+  which decode the histogram via Rust's `LatencyHistogram::
+from_base64_v2_deflate` after a real bench round-trip.
+- If `hdrhistogram-go` ever ships a fix making
+  `normalizingIndexOffset` configurable (or zero by default), the
+  byte-patch can be deleted in favour of the library's `Encode`
+  output verbatim.

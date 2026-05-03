@@ -33,10 +33,13 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"compress/zlib"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"log"
 	"math"
 	"math/rand"
@@ -451,21 +454,88 @@ func benchOpSize(st *benchState, _ *benchRequest) benchResponse {
 }
 
 // encodeHistB64 serializes a Histogram via the V2-deflate codec and
-// base64-encodes the result. `hdrhistogram-go` v1.x exposes
-// `(*Histogram).Encode(version)` returning a base64'd payload
-// directly; we re-decode and re-encode through `base64.StdEncoding`
-// only if the library's output format differs. As of v1.1.2,
-// `Encode(hdr.V2CompressedEncodingCookieBase)` returns
-// already-base64'd bytes — we therefore convert to a string in
-// place.
+// base64-encodes the result.
+//
+// Cross-language compatibility note: `hdrhistogram-go` v1.x
+// hardcodes `getNormalizingIndexOffset() = 1` (see hdr.go:169
+// in v1.2.0). The Rust `hdrhistogram` crate's deserializer rejects
+// any non-zero normalizing offset with `DeserializeError::
+// UnsupportedFeature` (deserializer.rs:146-148 in 7.5.x). The two
+// libraries' V2-compressed payloads are therefore NOT directly
+// interoperable out of the box.
+//
+// We work around this on the encoder side: take the standard Go
+// output, inflate the inner payload, patch bytes [8..12] of the
+// inflated stream (the normalizingIndexOffset slot) to zero,
+// re-deflate, and emit. The resulting payload decodes cleanly on
+// both sides and changes nothing about the histogram semantics —
+// the offset slot is unused when no shifted recording happens, and
+// our harness never shifts.
+//
+// The fixup is documented in BBOLT_QUIRKS.md and exercised by the
+// Rust-side `bbolt_runner` integration tests
+// (`load_then_get_seq_round_trip`, `range_checksum_is_non_zero`...).
 func encodeHistB64(h *hdr.Histogram) (string, error) {
 	encoded, err := h.Encode(hdr.V2CompressedEncodingCookieBase)
 	if err != nil {
 		return "", err
 	}
-	// `Encode` returns base64-encoded bytes. We treat them as a
-	// UTF-8 string for the JSON channel.
-	return string(encoded), nil
+	// `Encode` returns base64-encoded bytes; the wire wrapper is:
+	//   bytes [0:4]  outer cookie (V2_COMPRESSED, big-endian)
+	//   bytes [4:8]  compressed payload length (big-endian int32)
+	//   bytes [8:8+L] zlib-compressed inner V2 payload
+	raw, err := base64.StdEncoding.DecodeString(string(encoded))
+	if err != nil {
+		return "", fmt.Errorf("encodeHistB64: base64 decode: %w", err)
+	}
+	if len(raw) < 8 {
+		return "", fmt.Errorf("encodeHistB64: encoded payload < 8 bytes (got %d)", len(raw))
+	}
+	var compLen int32
+	if err := binary.Read(bytes.NewReader(raw[4:8]), binary.BigEndian, &compLen); err != nil {
+		return "", fmt.Errorf("encodeHistB64: read compLen: %w", err)
+	}
+	if compLen < 0 || int(compLen) > len(raw)-8 {
+		return "", fmt.Errorf("encodeHistB64: bogus compLen=%d (raw len=%d)", compLen, len(raw))
+	}
+	zr, err := zlib.NewReader(bytes.NewReader(raw[8 : 8+int(compLen)]))
+	if err != nil {
+		return "", fmt.Errorf("encodeHistB64: zlib reader: %w", err)
+	}
+	inflated, err := io.ReadAll(zr)
+	_ = zr.Close()
+	if err != nil {
+		return "", fmt.Errorf("encodeHistB64: inflate: %w", err)
+	}
+	// Inflated layout (V2): cookie[0:4] | payloadLen[4:8] |
+	// normalizingOffset[8:12] | sigFigures[12:16] | low[16:24] |
+	// high[24:32] | int2double[32:40] | counts...
+	if len(inflated) < 12 {
+		return "", fmt.Errorf("encodeHistB64: inflated payload < 12 bytes (got %d)", len(inflated))
+	}
+	inflated[8] = 0
+	inflated[9] = 0
+	inflated[10] = 0
+	inflated[11] = 0
+	var compBuf bytes.Buffer
+	zw, err := zlib.NewWriterLevel(&compBuf, zlib.BestCompression)
+	if err != nil {
+		return "", fmt.Errorf("encodeHistB64: zlib writer: %w", err)
+	}
+	if _, err := zw.Write(inflated); err != nil {
+		_ = zw.Close()
+		return "", fmt.Errorf("encodeHistB64: deflate write: %w", err)
+	}
+	if err := zw.Close(); err != nil {
+		return "", fmt.Errorf("encodeHistB64: deflate close: %w", err)
+	}
+	var out bytes.Buffer
+	out.Write(raw[0:4])
+	if err := binary.Write(&out, binary.BigEndian, int32(compBuf.Len())); err != nil {
+		return "", fmt.Errorf("encodeHistB64: write outer length: %w", err)
+	}
+	out.Write(compBuf.Bytes())
+	return base64.StdEncoding.EncodeToString(out.Bytes()), nil
 }
 
 // decodePairs base64-decodes a slice of (key, value) string pairs

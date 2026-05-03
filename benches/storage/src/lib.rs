@@ -20,6 +20,7 @@
 // fall through. Same pattern as `crates/mango-loom-demo`.
 #![allow(clippy::exhaustive_enums)]
 
+pub mod bbolt_runner;
 pub mod dropcache;
 pub mod measure;
 pub mod stats;
