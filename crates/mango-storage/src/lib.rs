@@ -226,7 +226,7 @@ mod tests {
         let cfg = BackendConfig::new(std::path::PathBuf::from("/tmp/x"), true)
             .with_compression(CompressionMode::Lz4);
         let cloned = cfg.clone();
-        assert_eq!(cloned.read_only, true);
+        assert!(cloned.read_only);
         assert_eq!(cloned.compression, CompressionMode::Lz4);
         assert_eq!(cloned.data_dir, std::path::PathBuf::from("/tmp/x"));
     }

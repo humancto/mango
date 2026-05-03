@@ -229,14 +229,15 @@ async fn lz4_shrinks_size_on_disk_for_compressible_payload() {
 
 #[test]
 fn registry_table_wire_format_unchanged_under_lz4_mode() {
-    let tmp = TempDir::new().unwrap();
+    use ::redb::ReadableDatabase as _;
 
-    // Use a non-trivial id so a tag byte (0x00 / 0x01) added in front
+    // Use non-trivial ids so a tag byte (0x00 / 0x01) added in front
     // would corrupt the value into a different u16 — making the
     // test sensitive to silent re-routing of the registry path.
     const ID_A: BucketId = BucketId::new(0x1234);
     const ID_B: BucketId = BucketId::new(0x5678);
 
+    let tmp = TempDir::new().unwrap();
     {
         let b = open_with(&tmp, CompressionMode::Lz4);
         b.register_bucket("kv", ID_A).unwrap();
@@ -246,7 +247,6 @@ fn registry_table_wire_format_unchanged_under_lz4_mode() {
 
     // Open the file directly via the `redb` crate.
     let db_path = tmp.path().join("mango.redb");
-    use ::redb::ReadableDatabase as _;
     let db = ::redb::Database::open(&db_path).expect("redb open");
     let txn = db.begin_read().expect("begin_read");
     // Same TableDefinition the production code uses; if the registry
