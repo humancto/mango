@@ -30,10 +30,12 @@
 
 pub mod bucket;
 pub mod encoding;
+pub mod key_history;
 pub mod revision;
 
 pub use bucket::{
     register, KEY_BUCKET_ID, KEY_BUCKET_NAME, KEY_INDEX_BUCKET_ID, KEY_INDEX_BUCKET_NAME,
 };
 pub use encoding::{decode_key, encode_key, EncodedKey, KeyDecodeError, KeyKind};
+pub use key_history::{KeyAtRev, KeyHistory, KeyHistoryError, RestoreInvalidReason};
 pub use revision::Revision;
