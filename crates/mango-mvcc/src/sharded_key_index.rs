@@ -436,7 +436,14 @@ pub enum KeyIndexError {
     History(#[from] KeyHistoryError),
 }
 
-#[cfg(test)]
+// Gated `not(loom)`: the lib unit tests construct `ShardedKeyIndex`
+// directly and exercise `RwLock` acquisitions outside `loom::model`.
+// Under `--cfg loom`, `RwLock` is `loom::sync::RwLock`, which panics
+// when accessed outside a model. The integration test in
+// `tests/loom_sharded_index.rs` is the loom-arm coverage; these
+// unit tests cover the default-build behavior that the loom run
+// would miss anyway. Same idiom as `mango-loom-demo/src/lib.rs:173`.
+#[cfg(all(test, not(loom)))]
 mod tests {
     #![allow(
         clippy::unwrap_used,

@@ -130,12 +130,24 @@ jobs:
         # --profile ci: inherits the 30m per-test watchdog from the
         #   [profile.default.overrides] filter='test(~loom)' entry in
         #   .config/nextest.toml.
-        # -p mango-mvcc --features test-seed: scopes the second
-        #   loom-aware crate (L841 sharded `KeyIndex` models). The
-        #   `test-seed` feature exposes `LOOM_SEED` / `LOOM_KEY_*`
-        #   constants the integration test depends on.
+        # Two invocations: the loom run is per-crate-scoped to its
+        # integration-test target. mango-mvcc has lib unit tests in
+        # `sharded_key_index::tests` that construct `RwLock` outside
+        # `loom::model`; under `--cfg loom` those would panic with
+        # "cannot access Loom execution state from outside a Loom
+        # model". The lib `mod tests` is gated `cfg(all(test,
+        # not(loom)))` (matching `mango-loom-demo/src/lib.rs:173`),
+        # so they're compiled-out under loom — but running
+        # `cargo nextest -p mango-mvcc` would also try integration
+        # tests and any future examples. Scoping to `--test
+        # loom_sharded_index` keeps the loom run narrowly on the
+        # model-checked target. The demo crate has no such hazard
+        # because `loom_spinlock.rs` is its only test.
         env:
           RUSTFLAGS: "--cfg loom -C debug-assertions"
           LOOM_MAX_PREEMPTIONS: "2"
           LOOM_MAX_BRANCHES: "10000"
-        run: cargo nextest run --profile ci --release -p mango-loom-demo -p mango-mvcc --features mango-mvcc/test-seed
+        run: |
+          cargo nextest run --profile ci --release -p mango-loom-demo
+          cargo nextest run --profile ci --release -p mango-mvcc \
+            --features mango-mvcc/test-seed --test loom_sharded_index
