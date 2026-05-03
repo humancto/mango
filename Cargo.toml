@@ -43,9 +43,20 @@ default-members = [
 # would fire the workspace lint; excluding the directory keeps
 # the mango workspace clippy run clean. See
 # docs/api-stability.md.
+#
+# fuzz/ is the cargo-fuzz workspace for the L853 on-disk encoding
+# fuzz targets. cargo-fuzz convention: a separate single-crate
+# workspace at the repo root with its own `Cargo.toml`, depending
+# on `libfuzzer-sys` (which uses `unsafe` for FFI to libfuzzer's
+# C runtime). Folding it into the parent workspace would pollute
+# every `cargo build` / `cargo test` / clippy run with sanitizer
+# link flags and a nightly-only dep. Run targets explicitly via
+# `cargo +nightly fuzz run <target>` from `fuzz/`. CI plumbing
+# lands in Phase 15 (per ROADMAP:853).
 exclude = [
     "tests/fixtures/geiger-toy-workspace",
     "tests/fixtures/non-exhaustive",
+    "fuzz",
 ]
 
 # Miri curated-subset opt-in (see docs/miri.md). Any crate that ships
