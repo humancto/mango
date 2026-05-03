@@ -143,7 +143,7 @@ jobs:
               --spec-version "${CYCLONEDX_SPEC_VERSION}" \
               --no-build-deps
 
-          mapfile -t emitted < <(find crates -maxdepth 2 -name '*.cdx.json' -print | sort)
+          mapfile -t emitted < <(find crates benches -maxdepth 2 -name '*.cdx.json' -print | sort)
           if [ "${#emitted[@]}" -eq 0 ]; then
               echo "error: cargo cyclonedx produced zero .cdx.json files" >&2
               exit 1
@@ -167,7 +167,7 @@ jobs:
                   | sort
           )
           actual=$(
-              find crates -maxdepth 2 -name '*.cdx.json' \
+              find crates benches -maxdepth 2 -name '*.cdx.json' \
                   | xargs -n1 basename \
                   | sed 's/\.cdx\.json$//' \
                   | sort
@@ -192,7 +192,7 @@ jobs:
               if ! bash scripts/sbom-check.sh "$sbom" "$expected"; then
                   any_fail=1
               fi
-          done < <(find crates -maxdepth 2 -name '*.cdx.json' | sort)
+          done < <(find crates benches -maxdepth 2 -name '*.cdx.json' | sort)
           if [ "$any_fail" -ne 0 ]; then
               echo "error: one or more SBOMs failed per-file validation" >&2
               exit 1
@@ -232,7 +232,7 @@ jobs:
                   printf '%s\n' "$missing" >&2
                   any_fail=1
               fi
-          done < <(find crates -maxdepth 2 -name '*.cdx.json' | sort)
+          done < <(find crates benches -maxdepth 2 -name '*.cdx.json' | sort)
           if [ "$any_fail" -ne 0 ]; then
               exit 1
           fi
@@ -277,7 +277,7 @@ jobs:
           )"
 
           all_sbom_pairs="$(
-              for sbom in $(find crates -maxdepth 2 -name '*.cdx.json' | sort); do
+              for sbom in $(find crates benches -maxdepth 2 -name '*.cdx.json' | sort); do
                   jq -r '
                       .components[]?.purl
                       | select(startswith("pkg:cargo/"))
@@ -341,7 +341,7 @@ jobs:
           run2="${RUNNER_TEMP}/sbom-run2"
           mkdir -p "$run2"
 
-          find crates -maxdepth 2 -name '*.cdx.json' -delete
+          find crates benches -maxdepth 2 -name '*.cdx.json' -delete
 
           cargo cyclonedx \
               --format json \
@@ -350,7 +350,7 @@ jobs:
 
           while IFS= read -r f; do
               mv "$f" "$run2/$(basename "$f")"
-          done < <(find crates -maxdepth 2 -name '*.cdx.json')
+          done < <(find crates benches -maxdepth 2 -name '*.cdx.json')
 
           for f in "${RUNNER_TEMP}/sbom-run1"/*.cdx.json; do
               cp "$f" "crates/$(basename "$f" .cdx.json)/$(basename "$f")"

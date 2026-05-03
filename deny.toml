@@ -97,6 +97,18 @@ skip = [
     { crate = "rand@0.8.6", reason = "raft-engine 0.4.2 + madsim 0.2.30 transitive; modern raft-rs uses rand 0.9.x. Retires on raft-engine/madsim upstream bumps." },
     { crate = "rand_chacha@0.3.1", reason = "rand 0.8.x transitive; dupe driver is the rand major-version gap above. Retires with rand@0.8.6." },
     { crate = "rand_core@0.6.4", reason = "rand 0.8.x transitive; dupe driver is the rand major-version gap above. Retires with rand@0.8.6." },
+    # --- hdrhistogram 7.5.4 base64 0.21.x vs modern base64 0.22.x ---
+    # hdrhistogram 7.5.4 (transitive via mango-bench-storage) pins
+    # base64 0.21.7 for its v2-compressed-format codec, while
+    # mango-bench-storage and mango-storage's dev-deps use base64
+    # 0.22.x directly. Both are non-cryptographic; base64 is a pure
+    # encoding helper with no security-relevant divergence between
+    # 0.21 and 0.22 (the 0.22 change was an API ergonomic refactor,
+    # not a vuln fix). Retirement trigger: hdrhistogram upstream
+    # bumps base64 past 0.21 (HdrHistogram-rs is in slow maintenance;
+    # last release 7.5.4 is from 2024). Pinned to surface a refresh
+    # if the dep graph shifts.
+    { crate = "base64@0.21.7", reason = "hdrhistogram 7.5.4 transitive via mango-bench-storage; modern tree uses base64 0.22.x. Retires on hdrhistogram upstream refresh." },
 ]
 skip-tree = []
 wildcards = "deny"
