@@ -592,6 +592,124 @@ impl<B: Backend> MvccStore<B> {
 
         Ok((deleted, rev))
     }
+
+    /// Evaluate a list of [`Compare`] preconditions against the
+    /// store's head revision.
+    ///
+    /// Per the L844 plan §5.5: each compare's target field is
+    /// loaded from the index at `current` (the head main rev when
+    /// this method is called); an absent key (no entry in the
+    /// index, or tombstoned at `current`) defaults to `version =
+    /// 0`, `create_revision.main = 0`, `mod_revision.main = 0`,
+    /// `value = b""` (review item B4 — etcd
+    /// `mvcc/kvstore_txn.go::checkCompare` zero-value path).
+    ///
+    /// Returns the per-compare outcomes (index-aligned with the
+    /// input slice). Callers compute `all_passed` as
+    /// `outcomes.iter().all(|&b| b)`. **Empty `compares` returns
+    /// an empty `Vec` whose `all` is `true`** (review item M1 —
+    /// etcd parity for an empty compare list).
+    ///
+    /// This is a pure read function; it acquires no locks beyond
+    /// `index` shard reads + an optional backend snapshot (only
+    /// when at least one [`Compare::Value`] is present, to avoid
+    /// the snapshot cost on the common compare-by-revision path).
+    ///
+    /// # Errors
+    ///
+    /// - [`MvccError::Backend`] if a [`Compare::Value`] needs the
+    ///   on-disk value and the snapshot/get fails.
+    /// - [`MvccError::KeyIndex`] for non-`KeyNotFound` /
+    ///   non-`RevisionNotFound` index errors (those two are the
+    ///   "absent" path — not errors).
+    #[allow(dead_code)] // wired into `txn` in plan §8 commits 7+8
+    pub(super) fn evaluate_compares(&self, compares: &[Compare]) -> Result<Vec<bool>, MvccError> {
+        let current = self.current_main.load(Ordering::Acquire);
+        // Snapshot is only needed for `Compare::Value`; skip
+        // snapshot acquisition if no value compares appear.
+        let snap = if compares.iter().any(|c| matches!(c, Compare::Value { .. })) {
+            Some(self.backend.snapshot()?)
+        } else {
+            None
+        };
+        let mut out = Vec::with_capacity(compares.len());
+        for compare in compares {
+            out.push(self.evaluate_compare(compare, current, snap.as_ref())?);
+        }
+        Ok(out)
+    }
+
+    /// Evaluate a single [`Compare`] against the store. Helper
+    /// for [`Self::evaluate_compares`]; split out so each variant
+    /// has a single focused branch.
+    fn evaluate_compare(
+        &self,
+        compare: &Compare,
+        current: i64,
+        snap: Option<&B::Snapshot>,
+    ) -> Result<bool, MvccError> {
+        let key: &[u8] = match compare {
+            Compare::Version { key, .. }
+            | Compare::CreateRevision { key, .. }
+            | Compare::ModRevision { key, .. }
+            | Compare::Value { key, .. } => key,
+        };
+
+        let at: Option<crate::key_history::KeyAtRev> = match self.index.get(key, current) {
+            Ok(at) => Some(at),
+            // Both "no entry" and "tombstoned at current" are the
+            // absent path (B4 — defaults).
+            Err(
+                KeyIndexError::KeyNotFound
+                | KeyIndexError::History(KeyHistoryError::RevisionNotFound),
+            ) => None,
+            Err(e) => return Err(MvccError::KeyIndex(e)),
+        };
+
+        match compare {
+            Compare::Version { op, target, .. } => {
+                let actual = at.map_or(0_i64, |a| a.version);
+                Ok(apply_compare_ord(&actual, target, *op))
+            }
+            Compare::CreateRevision { op, target, .. } => {
+                let actual = at.map_or(0_i64, |a| a.created.main());
+                Ok(apply_compare_ord(&actual, target, *op))
+            }
+            Compare::ModRevision { op, target, .. } => {
+                let actual = at.map_or(0_i64, |a| a.modified.main());
+                Ok(apply_compare_ord(&actual, target, *op))
+            }
+            Compare::Value { op, target, .. } => {
+                let actual: Bytes = match (at, snap) {
+                    (Some(found), Some(s)) => {
+                        let enc = encode_key(found.modified, KeyKind::Put);
+                        s.get(KEY_BUCKET_ID, enc.as_bytes())?.unwrap_or_default()
+                    }
+                    // Absent key, or no snapshot (caller didn't
+                    // request one — structurally only happens when
+                    // there are no Value compares, so this arm is
+                    // unreachable in practice; default to empty
+                    // bytes for safety).
+                    _ => Bytes::new(),
+                };
+                Ok(apply_compare_ord(actual.as_ref(), target.as_slice(), *op))
+            }
+        }
+    }
+}
+
+/// Apply a [`CompareOp`] to two `Ord` values (lex order for byte
+/// slices, numeric order for `i64`). Pure function so the compare
+/// evaluator only differs by which field it loads, not by which
+/// operator it implements.
+#[allow(dead_code)] // wired into `txn` in plan §8 commits 7+8
+fn apply_compare_ord<T: Ord + ?Sized>(actual: &T, target: &T, op: CompareOp) -> bool {
+    match op {
+        CompareOp::Equal => actual == target,
+        CompareOp::NotEqual => actual != target,
+        CompareOp::Greater => actual > target,
+        CompareOp::Less => actual < target,
+    }
 }
 
 #[cfg(test)]
@@ -1122,5 +1240,168 @@ mod tests {
         assert_eq!(rev.main(), put_rev.main(), "no main advance on zero match");
         assert_eq!(rev.sub(), 0);
         assert_eq!(store.current_revision(), put_rev.main());
+    }
+
+    // === Txn compare evaluator (plan §5.5) ===
+
+    use crate::store::txn::{Compare, CompareOp};
+
+    fn all_passed(outcomes: &[bool]) -> bool {
+        outcomes.iter().all(|&b| b)
+    }
+
+    #[test]
+    fn evaluate_compares_empty_list_passes() {
+        // M1: empty compare list returns Vec::new(), `all` = true.
+        let store = MvccStore::open(fresh_backend()).expect("open");
+        let outcomes = store.evaluate_compares(&[]).expect("evaluate");
+        assert!(outcomes.is_empty());
+        assert!(all_passed(&outcomes));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn evaluate_compare_version_eq_against_present_key() {
+        let store = MvccStore::open(fresh_backend()).expect("open");
+        let _ = store.put(b"k", b"v").await.expect("put");
+        // version is 1 after first put.
+        let cmp = Compare::Version {
+            key: b"k".to_vec(),
+            op: CompareOp::Equal,
+            target: 1,
+        };
+        let outcomes = store.evaluate_compares(&[cmp]).expect("evaluate");
+        assert!(all_passed(&outcomes));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn evaluate_compare_version_eq_zero_against_absent_key_passes() {
+        // B4: absent key defaults to version = 0.
+        let store = MvccStore::open(fresh_backend()).expect("open");
+        let cmp = Compare::Version {
+            key: b"absent".to_vec(),
+            op: CompareOp::Equal,
+            target: 0,
+        };
+        let outcomes = store.evaluate_compares(&[cmp]).expect("evaluate");
+        assert!(all_passed(&outcomes));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn evaluate_compare_create_revision_zero_against_absent_passes() {
+        // B4: absent key defaults to create_revision = 0.
+        let store = MvccStore::open(fresh_backend()).expect("open");
+        let cmp = Compare::CreateRevision {
+            key: b"absent".to_vec(),
+            op: CompareOp::Equal,
+            target: 0,
+        };
+        let outcomes = store.evaluate_compares(&[cmp]).expect("evaluate");
+        assert!(all_passed(&outcomes));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn evaluate_compare_mod_revision_against_recently_tombstoned_returns_zero() {
+        // M2: a key tombstoned at current is "absent" — its
+        // mod_revision compares to 0.
+        let store = MvccStore::open(fresh_backend()).expect("open");
+        let _ = store.put(b"k", b"v").await.expect("put");
+        let _ = store.delete_range(b"k", b"").await.expect("delete");
+        let cmp_eq_zero = Compare::ModRevision {
+            key: b"k".to_vec(),
+            op: CompareOp::Equal,
+            target: 0,
+        };
+        let outcomes = store.evaluate_compares(&[cmp_eq_zero]).expect("evaluate");
+        assert!(all_passed(&outcomes));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn evaluate_compare_value_eq_uses_current_value() {
+        // M1: value compare reads from the live snapshot, not
+        // from any branch RequestOp.
+        let store = MvccStore::open(fresh_backend()).expect("open");
+        let _ = store.put(b"k", b"hello").await.expect("put");
+        let cmp = Compare::Value {
+            key: b"k".to_vec(),
+            op: CompareOp::Equal,
+            target: b"hello".to_vec(),
+        };
+        let outcomes = store.evaluate_compares(&[cmp]).expect("evaluate");
+        assert!(all_passed(&outcomes));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn evaluate_compare_value_eq_empty_against_absent_passes() {
+        // B4: absent key defaults to value = b"".
+        let store = MvccStore::open(fresh_backend()).expect("open");
+        let cmp = Compare::Value {
+            key: b"absent".to_vec(),
+            op: CompareOp::Equal,
+            target: b"".to_vec(),
+        };
+        let outcomes = store.evaluate_compares(&[cmp]).expect("evaluate");
+        assert!(all_passed(&outcomes));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn evaluate_compare_value_eq_nonempty_against_absent_fails() {
+        let store = MvccStore::open(fresh_backend()).expect("open");
+        let cmp = Compare::Value {
+            key: b"absent".to_vec(),
+            op: CompareOp::Equal,
+            target: b"v".to_vec(),
+        };
+        let outcomes = store.evaluate_compares(&[cmp]).expect("evaluate");
+        assert!(!all_passed(&outcomes));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn evaluate_compare_value_lex_greater() {
+        // Value compares apply lex order for Greater/Less.
+        let store = MvccStore::open(fresh_backend()).expect("open");
+        let _ = store.put(b"k", b"hello").await.expect("put");
+        let greater_than_alpha = Compare::Value {
+            key: b"k".to_vec(),
+            op: CompareOp::Greater,
+            target: b"alpha".to_vec(),
+        };
+        let less_than_zebra = Compare::Value {
+            key: b"k".to_vec(),
+            op: CompareOp::Less,
+            target: b"zebra".to_vec(),
+        };
+        let outcomes = store
+            .evaluate_compares(&[greater_than_alpha, less_than_zebra])
+            .expect("evaluate");
+        assert!(all_passed(&outcomes));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn evaluate_compares_short_circuits_on_first_failure_in_outcomes() {
+        // Per-compare outcomes are returned index-aligned; a
+        // failing compare leaves a `false` at its slot but later
+        // compares are still evaluated. (Caller can inspect.)
+        let store = MvccStore::open(fresh_backend()).expect("open");
+        let _ = store.put(b"k", b"v").await.expect("put");
+        let cmp_pass = Compare::Version {
+            key: b"k".to_vec(),
+            op: CompareOp::Equal,
+            target: 1,
+        };
+        let cmp_fail = Compare::Version {
+            key: b"k".to_vec(),
+            op: CompareOp::Equal,
+            target: 99,
+        };
+        let cmp_pass2 = Compare::CreateRevision {
+            key: b"k".to_vec(),
+            op: CompareOp::Greater,
+            target: 0,
+        };
+        let outcomes = store
+            .evaluate_compares(&[cmp_pass, cmp_fail, cmp_pass2])
+            .expect("evaluate");
+        assert_eq!(outcomes, vec![true, false, true]);
+        assert!(!all_passed(&outcomes));
     }
 }
