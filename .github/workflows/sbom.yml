@@ -362,8 +362,28 @@ jobs:
               mv "$f" "$run2/$(basename "$f")"
           done < <(find crates benches -maxdepth 2 -name '*.cdx.json')
 
+          # Restore run1 SBOMs to each crate's manifest dir so the
+          # downstream artifact-upload steps find them at their
+          # cargo-cyclonedx-emitted paths. Workspace members live
+          # under either `crates/<name>/` or `benches/<dir>/`, so we
+          # derive the dir from `cargo metadata` rather than assuming
+          # `crates/<name>/`.
+          declare -A crate_dir
+          while IFS=$'\t' read -r name manifest; do
+              crate_dir["$name"]="$(dirname "$manifest")"
+          done < <(
+              cargo metadata --no-deps --format-version=1 \
+                  | jq -r '.packages[] | select(.source == null)
+                           | "\(.name)\t\(.manifest_path)"'
+          )
           for f in "${RUNNER_TEMP}/sbom-run1"/*.cdx.json; do
-              cp "$f" "crates/$(basename "$f" .cdx.json)/$(basename "$f")"
+              base="$(basename "$f" .cdx.json)"
+              dir="${crate_dir[$base]:-}"
+              if [ -z "$dir" ]; then
+                  echo "error: no manifest dir for crate $base" >&2
+                  exit 1
+              fi
+              cp "$f" "$dir/$(basename "$f")"
           done
 
           strip='del(.serialNumber, .metadata.timestamp)'
