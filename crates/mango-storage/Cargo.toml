@@ -121,6 +121,23 @@ proptest = "1.5"
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# ROADMAP:822 recovery-time test: `nix::sys::statvfs::statvfs` for a
+# pre-flight free-disk check (the 8 GiB scenario soft-skips on
+# runners that physically cannot run it). `set_len` ENOSPC probing
+# is unreliable on ext4/apfs/tmpfs (lazy allocation); statvfs is the
+# correct primitive.
+#
+# Why nix and not libc + a manual unsafe FFI: the workspace policy
+# is `unsafe_code = "forbid"` (Cargo.toml line 201), and lifting
+# that for the test target would require a per-package override
+# that also lifts it for the lib target. nix wraps the same syscall
+# in a `unsafe`-free API surface; its 0.26.4 vendored version is
+# already exempted in supply-chain/config.toml as a raft-engine
+# transitive, so this adds zero new audit surface.
+#
+# `default-features = false` drops `aio`, `term`, `process`, etc.
+# `features = ["fs"]` is the minimal set that exposes `statvfs`.
+nix = { version = "0.26", default-features = false, features = ["fs"] }
 
 [lints]
 workspace = true

@@ -119,6 +119,45 @@ jobs:
             --run-ignored all \
             --locked \
             --profile ci
+      - name: cargo nextest run (recovery-time 1 GiB, --run-ignored)
+        # ROADMAP:822: recovery-time measurement at 1/4/8 GiB. Only the
+        # 1 GiB scenario runs in CI — GitHub Actions runners have
+        # ~14 GiB free disk, and the 4/8 GiB scenarios soft-skip with
+        # `MANGO_RECOVERY_TIME scenario=NGiB skipped=insufficient_disk`.
+        # The 30s/8GiB ADR 0002 §W8 budget is therefore a manual-cert
+        # gate today; the bench-rig integration follow-up
+        # (ROADMAP:829) makes it automated. This step's job is to
+        # certify the harness still runs (write → abort → recover →
+        # verify samples) and the line shape is intact for the
+        # parse-recovery-time scraper. `--no-capture` is required to
+        # surface the `MANGO_RECOVERY_TIME ...` line; libtest captures
+        # stdout per-test by default.
+        run: |
+          mkdir -p target
+          cargo nextest run \
+            -p mango-storage \
+            --test recovery_time \
+            --run-ignored all \
+            --no-capture \
+            --locked \
+            --profile ci \
+            -- recovery_time_1gib 2>&1 | tee target/recovery-time.log
+      - name: parse recovery-time output
+        # Scrapes the MANGO_RECOVERY_TIME line into a JSON artifact for
+        # trend tracking. Always runs — even if the test step failed —
+        # so a budget overrun still produces the artifact for the bug
+        # report. `if: always()` is the GitHub Actions idiom.
+        if: always()
+        run: bash scripts/parse-recovery-time.sh target/recovery-time.log target/recovery-time.json
+      - name: upload recovery-time artifact
+        if: always()
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882  # v4.4.3
+        env:
+          RUN_ID: ${{ github.run_id }}
+        with:
+          name: recovery-time-${{ env.RUN_ID }}
+          path: target/recovery-time.json
+          if-no-files-found: warn
       - name: cargo test --doc
         # nextest does NOT run doctests; this step covers them.
         # Placed after nextest so the workspace dep cache is warm and
