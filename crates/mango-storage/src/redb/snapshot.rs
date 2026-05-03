@@ -22,6 +22,7 @@ use bytes::Bytes;
 
 use crate::backend::{BackendError, BucketId, RangeIter, ReadSnapshot};
 use crate::redb::registry::physical_table_name;
+use crate::redb::value_compression;
 use crate::redb::{map_storage_error, map_table_error, Inner};
 
 /// Point-in-time read snapshot. Produced by
@@ -55,7 +56,11 @@ impl ReadSnapshot for RedbSnapshot {
             Err(e) => return Err(map_table_error(e)),
         };
         match table.get(key).map_err(map_storage_error)? {
-            Some(v) => Ok(Some(Bytes::copy_from_slice(v.value()))),
+            // ROADMAP:830: stored bytes carry a 1-byte compression
+            // tag prefix; decode is config-blind (dispatches on the
+            // tag), so a database written under any mode is readable
+            // here. Errors here surface as `BackendError::Corruption`.
+            Some(v) => Ok(Some(value_compression::decode(v.value())?)),
             None => Ok(None),
         }
     }
@@ -108,7 +113,14 @@ impl Iterator for RedbRangeIter {
         match self.inner.next()? {
             Ok((k, v)) => {
                 let kb = Bytes::copy_from_slice(k.value());
-                let vb = Bytes::copy_from_slice(v.value());
+                // ROADMAP:830: see the matching comment in
+                // `RedbSnapshot::get`. Codec corruption surfaces here
+                // as `BackendError::Corruption` and ends iteration on
+                // the caller side as soon as they handle the `Err`.
+                let vb = match value_compression::decode(v.value()) {
+                    Ok(b) => b,
+                    Err(e) => return Some(Err(e)),
+                };
                 Some(Ok((kb, vb)))
             }
             Err(e) => Some(Err(map_storage_error(e))),

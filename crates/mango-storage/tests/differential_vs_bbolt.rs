@@ -654,8 +654,16 @@ impl Case {
 
         let mut oracle =
             GoOracle::spawn(binary, &db_path, fsync).map_err(|e| format!("oracle spawn: {e}"))?;
-        let redb = RedbBackend::open(BackendConfig::new(redb_dir.path().to_path_buf(), false))
-            .map_err(|e| format!("redb open: {e}"))?;
+        // ROADMAP:830: pin compression OFF for cross-engine parity.
+        // The differential oracle compares raw bytes through bbolt
+        // (which has no value-compression layer). Flipping the
+        // constructor default would silently break this test, so the
+        // bind is explicit.
+        let redb = RedbBackend::open(
+            BackendConfig::new(redb_dir.path().to_path_buf(), false)
+                .with_compression(mango_storage::CompressionMode::None),
+        )
+        .map_err(|e| format!("redb open: {e}"))?;
 
         for (idx, name) in BUCKET_NAMES.iter().enumerate() {
             let id = BucketId::new((idx + 1) as u16);

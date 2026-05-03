@@ -34,6 +34,16 @@ thiserror.workspace = true
 # ROADMAP:817 (Backend impl): parking_lot for the Database RwLock.
 # See Cargo.toml workspace entry for the ban-override rationale.
 parking_lot.workspace = true
+# ROADMAP:830: pure-Rust LZ4 for value-level block compression in
+# the redb backend. See workspace Cargo.toml `lz4_flex` entry for
+# the feature-set rationale (`safe-encode` + `safe-decode` for the
+# unsafe-free path; `checked-decode` for adversarial disk bytes;
+# no `frame` ⇒ no `twox-hash` transitive). Local features MUST
+# stay empty: `features = [...]` would ADD to the workspace set.
+# ADR 0002 §3 (lz4_flex on the Raft-log path) is extended here to
+# the user-data path; ADR 0002 §W5 bans the lz4-sys C FFI
+# alternative.
+lz4_flex.workspace = true
 # ROADMAP:817: tokio::task::spawn_blocking is required so async commit
 # methods do NOT block tokio worker threads with redb's synchronous
 # fsync. `rt` alone covers spawn_blocking — `rt-multi-thread` is

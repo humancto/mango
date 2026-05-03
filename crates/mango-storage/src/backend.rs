@@ -12,9 +12,12 @@
 //! # Example
 //!
 //! ```no_run
-//! use mango_storage::{Backend, BackendConfig, BackendError, BucketId};
+//! use mango_storage::{Backend, BackendConfig, BackendError, BucketId, CompressionMode};
 //! # fn example<B: Backend>() -> Result<(), BackendError> {
-//! let cfg = BackendConfig::new("/tmp/mango".into(), false);
+//! // Constructor default is `CompressionMode::None`; opt into LZ4
+//! // explicitly via `with_compression` (ROADMAP:828, ROADMAP:830).
+//! let cfg = BackendConfig::new("/tmp/mango".into(), false)
+//!     .with_compression(CompressionMode::Lz4);
 //! let backend = B::open(cfg)?;
 //! backend.register_bucket("kv", BucketId::new(1))?;
 //! let _snap = backend.snapshot()?;
@@ -152,6 +155,38 @@ impl CommitStamp {
     }
 }
 
+/// Block-level value compression mode for [`Backend`] impls
+/// (ROADMAP:830). Carried on [`BackendConfig`] and consumed by the
+/// engine's write path; reads are config-blind (the on-disk tag
+/// dictates decoding).
+///
+/// Default is [`Self::None`] — the parity-bench setting (ROADMAP:828
+/// and ROADMAP:829). Production callers per ROADMAP:828's "default
+/// compression on" opt into [`Self::Lz4`] explicitly via
+/// [`BackendConfig::with_compression`]. Keeping the **constructor**
+/// default at `None` preserves the existing parity-bench and
+/// differential-test surface; the deployment-time default is a
+/// caller-side choice.
+///
+/// `#[non_exhaustive]` per workspace policy
+/// (`docs/api-stability.md`) and to leave room for a future `Zstd`
+/// variant (deferred — pure-Rust zstd encoder is not widely
+/// available; `zstd-safe` is C FFI and banned by ADR 0002 §W5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum CompressionMode {
+    /// Store values verbatim with a 1-byte `0x00` tag prefix.
+    /// Constructor default; the parity-bench setting (ROADMAP:828,
+    /// ROADMAP:829).
+    #[default]
+    None,
+    /// Compress values with LZ4 above a length and ratio threshold.
+    /// Values that fail either check are stored verbatim with a
+    /// `0x00` tag prefix — the encoder never inflates a value just
+    /// because LZ4 was requested.
+    Lz4,
+}
+
 /// Configuration for [`Backend::open`]. Engine-specific knobs belong
 /// on the impl type, not here; this struct carries only the
 /// portable configuration every backend needs. `#[non_exhaustive]`
@@ -168,18 +203,43 @@ pub struct BackendConfig {
     /// supported")` until the MVCC layer lands. Kept on the struct
     /// so the API is frozen now.
     pub read_only: bool,
+    /// Block-level value compression mode (ROADMAP:830). Default
+    /// [`CompressionMode::None`] — opt into compression via
+    /// [`BackendConfig::with_compression`]. Read paths ignore this
+    /// field (decoding is dispatched on the on-disk tag byte), so
+    /// reopening a database under a different mode does not lose
+    /// data.
+    pub compression: CompressionMode,
 }
 
 impl BackendConfig {
     /// Construct a [`BackendConfig`]. Required because
     /// `#[non_exhaustive]` blocks struct-literal construction from
     /// outside the defining crate.
+    ///
+    /// Two-arg shape preserved for source-compatibility with every
+    /// existing call site; opt into compression via
+    /// [`Self::with_compression`].
     #[must_use]
     pub fn new(data_dir: std::path::PathBuf, read_only: bool) -> Self {
         Self {
             data_dir,
             read_only,
+            compression: CompressionMode::None,
         }
+    }
+
+    /// Set [`Self::compression`] to `mode`. Builder-style override
+    /// of the default; chainable from [`Self::new`].
+    ///
+    /// `#[must_use]` because discarding the returned [`BackendConfig`]
+    /// is almost certainly a bug — the typical site is
+    /// `BackendConfig::new(p, false).with_compression(...)`, and
+    /// dropping the chain would silently revert to the default.
+    #[must_use]
+    pub fn with_compression(mut self, mode: CompressionMode) -> Self {
+        self.compression = mode;
+        self
     }
 }
 
