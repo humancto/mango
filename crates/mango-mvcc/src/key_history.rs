@@ -25,7 +25,11 @@
 //! k.put(Revision::new(4, 0))?;
 //! k.tombstone(Revision::new(5, 0))?;
 //!
-//! // Three generations: {empty} (trailing), {4,5(t)}, {1,2,3(t)}.
+//! // Three generations. Stack order: `generations[0]` is oldest;
+//! // the trailing empty generation is `generations.last()`.
+//! //   [0] {1,2,3(t)}
+//! //   [1] {4,5(t)}
+//! //   [2] {empty}
 //! assert_eq!(k.generations_len(), 3);
 //!
 //! // get(4) returns the version visible at rev 4 — the put at (4,0).
@@ -329,8 +333,8 @@ impl KeyHistory {
     /// `since_rev` is treated as `Revision { main: since_rev, sub: 0 }`,
     /// matching etcd `key_index.go::keyIndex.since` (`v3.5.16`).
     ///
-    /// Allocates a fresh `Vec`. Use [`KeyHistory::since_into`] for
-    /// the allocation-amortized variant.
+    /// Allocates a fresh `Vec`. Use [`KeyHistory::since_into`] when
+    /// the caller already owns a buffer (the L859 watch hub).
     #[must_use]
     pub fn since(&self, since_rev: i64) -> Vec<Revision> {
         let mut out = Vec::new();
@@ -338,10 +342,17 @@ impl KeyHistory {
         out
     }
 
-    /// Allocation-amortized companion to [`KeyHistory::since`].
-    /// Appends matching revisions to `out`. The watch hub (L859) will
-    /// call this in a hot loop.
-    pub fn since_into<E: Extend<Revision>>(&self, since_rev: i64, out: &mut E) {
+    /// Append matching revisions to a caller-owned `Vec`. Writes
+    /// directly into `out` with no internal allocation, so the L859
+    /// watch hub can reuse one `Vec` across many calls.
+    ///
+    /// Dedup-by-main keeps the largest sub per main (etcd
+    /// `key_index.go::keyIndex.since` semantics): when the next rev's
+    /// main equals `out.last().main`, the last slot is overwritten in
+    /// place rather than pushed. Dedup operates only on the suffix
+    /// this call appends; pre-existing entries in `out` are not
+    /// touched.
+    pub fn since_into(&self, since_rev: i64, out: &mut Vec<Revision>) {
         let since = Revision::new(since_rev, 0);
 
         // Find the starting generation: walk backwards from the last
@@ -366,25 +377,30 @@ impl KeyHistory {
             gi = v;
         }
 
-        // Walk forward from gi, applying dedup-by-main.
+        // Walk forward from gi, applying dedup-by-main on the suffix
+        // this call writes (anchored at `start`).
+        let start = out.len();
         let mut last_main: Option<i64> = None;
-        let mut buf: Vec<Revision> = Vec::new();
         for g in self.generations.iter().skip(gi) {
             for r in &g.revs {
                 if since > *r {
                     continue;
                 }
                 if last_main == Some(r.main()) {
-                    if let Some(slot) = buf.last_mut() {
-                        *slot = *r;
+                    // Replace the last-written slot — in our suffix.
+                    if out.len() > start {
+                        if let Some(slot) = out.last_mut() {
+                            *slot = *r;
+                        }
+                    } else {
+                        out.push(*r);
                     }
                     continue;
                 }
-                buf.push(*r);
+                out.push(*r);
                 last_main = Some(r.main());
             }
         }
-        out.extend(buf);
     }
 
     /// Compact: remove revisions with `main <= at_rev` except the
@@ -409,7 +425,7 @@ impl KeyHistory {
             return true;
         }
 
-        let (gen_idx, rev_index) = self.do_compact(at_rev, available);
+        let (gen_idx, rev_index) = self.do_compact_readonly(at_rev, available);
 
         // Truncate the chosen generation's revs to start at rev_index.
         if let Some(g) = self.generations.get_mut(gen_idx) {
@@ -471,19 +487,11 @@ impl KeyHistory {
         }
     }
 
-    /// Shared inner of `compact` (mutates `available`, returns
-    /// `(gen_idx, rev_index)`).
-    fn do_compact<S: BuildHasher>(
-        &self,
-        at_rev: i64,
-        available: &mut HashSet<Revision, S>,
-    ) -> (usize, Option<usize>) {
-        self.do_compact_readonly(at_rev, available)
-    }
-
-    /// Same as `do_compact` but takes `&self` only (used by `keep`).
-    /// Both variants populate `available`; mutation of `self.revs`
-    /// happens in `compact` after this returns.
+    /// Read-only inner of `compact` and `keep`: walks generations,
+    /// populates `available`, returns the (`gen_idx`, `rev_index`)
+    /// split point. Mutation of `self.revs` happens in `compact`
+    /// after this returns; `keep` uses the return value to decide
+    /// the trailing-tombstone removal.
     fn do_compact_readonly<S: BuildHasher>(
         &self,
         at_rev: i64,
@@ -624,6 +632,7 @@ fn generation_version_at(g: &Generation, n: usize) -> Result<i64, KeyHistoryErro
 /// Mirrors etcd's `keyIndex.get` return shape
 /// (`server/mvcc/key_index.go`, `v3.5.16`).
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
+#[non_exhaustive]
 pub struct KeyAtRev {
     /// Revision at which the visible version was modified.
     pub modified: Revision,
@@ -888,7 +897,10 @@ mod tests {
     }
 
     #[test]
-    fn since_into_amortizes_allocation() {
+    fn since_into_writes_directly_into_caller_buffer() {
+        // since_into must not allocate when the caller-owned buffer
+        // already has sufficient capacity. Watch hub (L859) reuses
+        // one Vec across calls and depends on this.
         let k = doc_fixture();
         let mut buf: Vec<Revision> = Vec::with_capacity(8);
         let cap_before = buf.capacity();
@@ -897,8 +909,20 @@ mod tests {
         assert_eq!(
             buf.capacity(),
             cap_before,
-            "since_into should not reallocate"
+            "since_into must not reallocate when capacity is sufficient"
         );
+    }
+
+    #[test]
+    fn since_into_appends_to_existing_buffer_without_clobbering() {
+        let k = doc_fixture();
+        let sentinel = Revision::new(999, 999);
+        let mut buf: Vec<Revision> = vec![sentinel];
+        k.since_into(2, &mut buf);
+        assert_eq!(buf.len(), 5);
+        assert_eq!(buf[0], sentinel, "pre-existing entry must be preserved");
+        assert_eq!(buf[1], Revision::new(2, 0));
+        assert_eq!(buf[4], Revision::new(5, 0));
     }
 
     #[test]
@@ -978,13 +1002,10 @@ mod tests {
 
     #[test]
     fn compact_vs_keep_diverge_on_trailing_tombstone() {
-        // compact(2): visits gen 0 (tomb=3 >= 2). Walk descending,
-        // finds (2,0) main<=2 first, adds to available. Tombstone
-        // (3,0) is NOT added (its main 3 > 2). Hmm — let's pick an
-        // at_rev that lands on a trailing tombstone of a non-final
-        // generation: at_rev = 3.
-        let k_compact = doc_fixture();
-        let mut k_compact = k_compact.clone();
+        // at_rev=3 lands on the trailing tombstone of gen 0 (a
+        // non-final generation). etcd compact retains it in
+        // `available` for hash stability; etcd keep removes it.
+        let mut k_compact = doc_fixture();
         let k_keep = doc_fixture();
 
         let mut a_compact: HashSet<Revision> = HashSet::new();
@@ -1004,6 +1025,18 @@ mod tests {
     fn restore_constructs_single_generation() {
         let k = KeyHistory::restore(Revision::new(1, 0), Revision::new(7, 2), 3).unwrap();
         let at = k.get(7).unwrap();
+        assert_eq!(at.modified, Revision::new(7, 2));
+        assert_eq!(at.created, Revision::new(1, 0));
+        assert_eq!(at.version, 3);
+    }
+
+    #[test]
+    fn restore_get_at_rev_after_modified_returns_modified_version() {
+        // Post-restore exception: `g.ver` exceeds `revs.len()`. The
+        // `g.ver - (len-n-1)` formula must still hold for queries
+        // beyond `modified.main`.
+        let k = KeyHistory::restore(Revision::new(1, 0), Revision::new(7, 2), 3).unwrap();
+        let at = k.get(20).unwrap();
         assert_eq!(at.modified, Revision::new(7, 2));
         assert_eq!(at.created, Revision::new(1, 0));
         assert_eq!(at.version, 3);
