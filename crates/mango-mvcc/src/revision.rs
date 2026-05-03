@@ -83,8 +83,28 @@ impl fmt::Display for Revision {
     }
 }
 
+/// A `proptest` `Strategy` adapter for [`Revision`] that produces
+/// only the values the decoder will accept (`main >= 0 && sub >= 0`).
+///
+/// Available under the `proptest` feature so downstream property
+/// tests (notably L851's MVCC model proptest) can reuse it without
+/// re-deriving the strategy or accidentally generating invalid
+/// revisions.
+#[cfg(feature = "proptest")]
+pub fn arb_revision() -> impl proptest::strategy::Strategy<Value = Revision> {
+    use proptest::strategy::Strategy;
+    (0_i64..=i64::MAX, 0_i64..=i64::MAX).prop_map(|(main, sub)| Revision::new(main, sub))
+}
+
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )]
+
     use super::*;
 
     #[test]
