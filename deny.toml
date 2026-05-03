@@ -100,6 +100,14 @@ skip = [
 ]
 skip-tree = []
 wildcards = "deny"
+# Allow path-only dependencies inside the workspace (no `version =`
+# field). cargo-deny 0.19.x flags these as wildcards by default,
+# but for a workspace-internal `path = "../foo"` dep there is no
+# version to pin — the version is whatever the sibling crate
+# carries. Without this, every `mango-storage = { path = "..." }`
+# style dep would be a deny error. Wildcard public/registry deps
+# are still denied.
+allow-wildcard-paths = true
 # Crate-level bans. Security axis mandates rustls — no OpenSSL path.
 # Belt-and-suspenders: ban every common entrypoint that can pull
 # OpenSSL into the graph, because a transitive ban produces a

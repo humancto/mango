@@ -1,7 +1,7 @@
 //! Per-key revision tree (`KeyHistory`).
 //!
 //! Each user key in the MVCC store maps to one [`KeyHistory`] — an
-//! append-only stack of [`Generation`]s, where each generation is a
+//! append-only stack of `Generation`s, where each generation is a
 //! contiguous run of revisions from one creation up to (and
 //! including) one tombstone. Tombstoning a key closes the current
 //! generation and opens a new empty trailing generation.
