@@ -1,0 +1,101 @@
+# Phase 1 parity bench harness — frozen workload (ROADMAP:829).
+#
+# This file is the bench protocol's source of truth: the harness
+# computes sha256 of these bytes verbatim and records it in the
+# result JSON. Two runs with different sha256 cannot be gated
+# against each other.
+#
+# Bumping ANY value here MUST bump `version = 2`. The gate at
+# `benches/storage/src/bin/gate.rs` refuses to compare files with
+# different `format_version` or `workload_version`.
+#
+# Schema lives in `benches/storage/src/workload.rs` and is
+# documented in `.planning/parity-bench-harness.plan.md`
+# §"Workload spec — benches/workloads/storage.toml (B3 fix)".
+
+version = 1
+
+# Master RNG seed. Hex 0x1ba_dc0ff_ee_45 — recognizable in seed
+# dumps. The read-order seed for each run is derived from this
+# value mixed with the run index, so a re-run with the same
+# `seed` and same `runs` reproduces the bench end-to-end.
+seed = 7782220267274245
+
+[keys]
+# One million distinct keys — large enough that the working set
+# overflows page cache on Tier-1 hardware (1M × 1 KiB ≈ 1 GiB),
+# small enough that load + read finishes inside a per-run budget.
+total = 1_000_000
+# 32-byte keys: SHA-256-shaped, the realistic case.
+size_bytes = 32
+
+[values]
+# 1 KiB values — Phase 1 anchor. The bench is a storage benchmark,
+# not a payload-size sweep; payload sweeps belong in Phase 2.
+size_bytes = 1024
+# Incompressible bytes. Keeps the L830 lz4 path honest and
+# prevents the workload from degenerating into a compression
+# benchmark.
+fill = "random"
+
+[write]
+# Batched put: 64 ops per commit. This is the realistic write
+# path — batching is how clients amortize fsync.
+batched_size = 64
+# Unbatched: one op per commit. Stresses the per-commit fsync
+# overhead, which is where bbolt's mmap path historically wins.
+unbatched_ops = 10_000
+# Batched: same op total, batched in groups of 64. Compares
+# the amortized-fsync path.
+batched_ops = 10_000
+
+[read.hot]
+# Hot-cache reads: warm the cache, then read. Measures the steady-
+# state read throughput once the working set is resident.
+ops = 50_000
+distribution = "uniform"
+
+[read.cold]
+# Cold-cache reads: drop the page cache (Linux Tier-1 only via
+# fadvise + drop_caches), then read. Measures the
+# operator-pain-case "first read after restart". The metric
+# verdict is `incomplete` on platforms that cannot drop the
+# cache; L829 cannot be satisfied on those platforms.
+ops = 5_000
+distribution = "uniform"
+
+[read.zipfian]
+# Zipfian-skewed reads. The hot-set / cold-set ratio is the
+# realistic distribution for KV stores: a few keys are read very
+# frequently, most are read rarely.
+ops = 50_000
+distribution = "zipfian"
+# theta = 0.99 is the standard YCSB-like skew (Jim Gray's
+# original paper, the YCSB workloads A/B). Higher = more skewed.
+theta = 0.99
+# Generator is pinned to `ycsb_scrambled` — YCSB's
+# ScrambledZipfianGenerator semantics, ported to Rust in
+# `benches/storage/src/zipfian.rs`. `rand_distr::Zipf` is
+# explicitly forbidden (different tail mass; not the YCSB
+# distribution).
+generator = "ycsb_scrambled"
+
+[range]
+# Range-scan sweep. Three sizes catch different IO patterns:
+# 100 = small cursor, 10k = medium scan, 100k = sustained scan.
+# Per-row work is pinned symmetric across engines via the S3
+# force-copy + xor-checksum (see plan §"bbolt mmap fairness — S3"
+# and `range_throughput.fairness = "symmetric_copy"` in the
+# result JSON).
+sizes = [100, 10_000, 100_000]
+ops_per_size = 100
+
+[size]
+# On-disk size measured after the full workload — load + writes +
+# reads + ranges all complete. `defragment_before_measure = true`
+# applies the engine's compact / defragment step (`db.Compact()`
+# for bbolt, redb's compaction for mango) so the comparison is
+# steady-state size, not "size with whatever fragmentation the
+# load order happened to produce".
+measure_after = "all"
+defragment_before_measure = true

@@ -444,4 +444,69 @@ defragment_before_measure = true
             assert_eq!(parsed, *b, "byte index {i}");
         }
     }
+
+    /// The canonical on-disk workload at `benches/workloads/storage.toml`
+    /// MUST parse with the schema this crate ships and MUST agree with
+    /// the frozen Phase-1 field set. The file is `include_bytes!`-ed at
+    /// compile time, so any edit invalidates the test binary and
+    /// surfaces here. This is the wall against silently desyncing the
+    /// human-readable comment-laden file from the schema.
+    #[test]
+    fn canonical_phase_1_storage_toml_loads_and_pins_critical_fields() {
+        // Path is relative to this source file — `src/workload.rs`
+        // sits two hops below the workspace root, the toml lives at
+        // `benches/workloads/storage.toml`.
+        let bytes: &[u8] = include_bytes!("../../workloads/storage.toml");
+        let loaded = parse(bytes).expect("canonical storage.toml must parse");
+        let s = &loaded.spec;
+
+        // Schema version + master seed are the bench protocol's
+        // identity. Bumping either is a breaking change and MUST go
+        // through a `format_version` bump in the result JSON too.
+        assert_eq!(s.version, 1, "workload version");
+        assert_eq!(s.seed, 7_782_220_267_274_245, "master seed");
+
+        // Workload shape. Each of these is the frozen Phase-1 value
+        // documented in `.planning/parity-bench-harness.plan.md`.
+        assert_eq!(s.keys.total, 1_000_000);
+        assert_eq!(s.keys.size_bytes, 32);
+        assert_eq!(s.values.size_bytes, 1024);
+        assert_eq!(s.values.fill, ValueFill::Random);
+        assert_eq!(s.write.batched_size, 64);
+        assert_eq!(s.write.unbatched_ops, 10_000);
+        assert_eq!(s.write.batched_ops, 10_000);
+        assert_eq!(s.read.hot.ops, 50_000);
+        assert_eq!(s.read.cold.ops, 5_000);
+        assert_eq!(s.read.zipfian.ops, 50_000);
+        assert_eq!(s.read.zipfian.distribution, Distribution::Zipfian);
+        // theta is f64 — compare with an epsilon to satisfy
+        // workspace `clippy::float_cmp`. 0.99 is the YCSB-A pin;
+        // an exact match comes back through the toml parser since
+        // 0.99 is representable to within one ULP, but the lint is
+        // policy: never `==` on float, period.
+        let theta = s.read.zipfian.theta.expect("zipfian theta required");
+        assert!(
+            (theta - 0.99).abs() < 1e-12,
+            "zipfian theta must be 0.99, got {theta}"
+        );
+        assert_eq!(s.read.zipfian.generator, Some(Generator::YcsbScrambled));
+        assert_eq!(s.range.sizes, vec![100, 10_000, 100_000]);
+        assert_eq!(s.range.ops_per_size, 100);
+        assert_eq!(s.size.measure_after, "all");
+        assert!(s.size.defragment_before_measure);
+
+        // Hash sanity: 64 lowercase hex chars (the gate compares
+        // sha256_hex byte-for-byte). The exact value is *not*
+        // pinned here — file edits are expected; the test asserts
+        // shape and that the verbatim hashing works.
+        assert_eq!(loaded.sha256_hex.len(), 64);
+        assert!(
+            loaded
+                .sha256_hex
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "sha256_hex must be lowercase hex: {}",
+            loaded.sha256_hex
+        );
+    }
 }
