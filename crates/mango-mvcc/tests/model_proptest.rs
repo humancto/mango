@@ -1118,6 +1118,11 @@ fn op_vec_max() -> usize {
     }
 }
 
+// `cfg(not(miri))`: proptest's case enumeration would never
+// finish under Miri's interpreter (rust-expert PR review R-2).
+// The Miri smoke at the bottom of this file runs the three
+// hand-written sequences instead.
+#[cfg(not(miri))]
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: case_count(),
