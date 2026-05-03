@@ -135,10 +135,22 @@ impl ShardedKeyIndex {
     #[cfg(any(test, feature = "test-seed"))]
     #[must_use]
     pub fn with_seed(seed: [u8; 32]) -> Self {
-        let s0 = u64::from_le_bytes(seed[0..8].try_into().unwrap_or([0; 8]));
-        let s1 = u64::from_le_bytes(seed[8..16].try_into().unwrap_or([0; 8]));
-        let s2 = u64::from_le_bytes(seed[16..24].try_into().unwrap_or([0; 8]));
-        let s3 = u64::from_le_bytes(seed[24..32].try_into().unwrap_or([0; 8]));
+        // Each `seed[a..a+8]` is structurally an 8-byte slice; the
+        // `try_into::<[u8; 8]>` conversion cannot fail. The
+        // `unreachable!` is a hard floor matching the rest of the
+        // module's style — silent fallback to a zero seed would
+        // mask a real invariant violation.
+        let chunk = |start: usize, end: usize| -> [u8; 8] {
+            seed.get(start..end)
+                .and_then(|s| s.try_into().ok())
+                .unwrap_or_else(|| {
+                    unreachable!("seed[{start}..{end}] must be 8 bytes by construction");
+                })
+        };
+        let s0 = u64::from_le_bytes(chunk(0, 8));
+        let s1 = u64::from_le_bytes(chunk(8, 16));
+        let s2 = u64::from_le_bytes(chunk(16, 24));
+        let s3 = u64::from_le_bytes(chunk(24, 32));
         Self::from_hasher(RandomState::with_seeds(s0, s1, s2, s3))
     }
 
@@ -208,10 +220,11 @@ impl ShardedKeyIndex {
 
     /// Append revisions of `key` since `since_rev` into `out`.
     ///
-    /// Returns silently with no writes to `out` if `key` has no
-    /// entry — the watch hub treats both "no key" and "no revs since"
-    /// the same. See [`KeyHistory::since_into`] for the dedup-by-main
-    /// semantics.
+    /// Appends zero or more revisions; never truncates or rewrites
+    /// pre-existing entries in `out`. If `key` has no entry, returns
+    /// silently with no writes — the watch hub treats both "no key"
+    /// and "no revs since" the same. See [`KeyHistory::since_into`]
+    /// for the dedup-by-main semantics on the appended suffix.
     pub fn since(&self, key: &[u8], since_rev: i64, out: &mut Vec<Revision>) {
         let shard = self.shard_for(key);
         let lock = self.shard(shard);
@@ -660,6 +673,14 @@ mod tests {
         );
     }
 
+    /// Distribution sanity for production seeding. 1000 balls into
+    /// 64 bins concentrates around mean=15.6 with the max-bin
+    /// distribution centered near `n/m + sqrt(2·n/m·log m)` ≈ 24.
+    /// The `max ≤ 3 × mean = 45` threshold has a Chernoff bound of
+    /// roughly `64·exp(-(45-15.6)²/(2·15.6))` ≈ 1e-10 against a
+    /// uniform hasher — effectively zero flake risk. Do not tighten
+    /// without re-running the math; a tighter bound (e.g. `2 ×
+    /// mean`) would flake.
     #[test]
     fn production_new_distributes_keys() {
         let idx = ShardedKeyIndex::new();
