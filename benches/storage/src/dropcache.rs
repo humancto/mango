@@ -175,23 +175,25 @@ fn linux_drop_for_files(paths: &[PathBuf], drop_caches_writable: bool) -> ColdCa
     if drop_caches_writable {
         if let Err(err) = std::fs::write("/proc/sys/vm/drop_caches", "3\n") {
             // Stage 2 failed despite passing the probe (race or
-            // sysctl tightening). Stage 1 already evicted per-file
-            // pages, so still `Pass`-eligible — but log via the
-            // verdict-message path so the operator sees it. We
-            // attach the error to a `Pass` by leaving the
-            // standard `Pass` variant; the runner records that
-            // Stage 2 was attempted in the run JSON's
-            // `cold_cache_verdict` string. (We deliberately don't
-            // promote this to `Fail`: the per-file fadvise is the
-            // primary primitive.)
+            // sysctl tightening between probe and write). Stage 1
+            // already evicted the per-file pages we care about, so
+            // we don't promote to `Fail`. But Stage 2 was *expected*
+            // to run on this platform (the probe said the file was
+            // writable), and silently swallowing the failure would
+            // produce a numerically optimistic cold-cache result
+            // with no operator-visible trace. The honest verdict is
+            // `Incomplete`: Stage 1 worked, but the contract of the
+            // cold-cache primitive on Linux Tier-1 is "both stages
+            // run", and we couldn't deliver the second.
             //
-            // We surface the slip via a debug-eprintln-equivalent
-            // by routing through `ColdCacheVerdict::Incomplete`
-            // would be wrong — Stage 1 worked. Instead we accept
-            // the `Pass` and rely on the per-run record's
-            // `cold_cache_stage2_skipped` field (added by the
-            // runner, not here) to track this.
-            let _ = err;
+            // Cost: any operator who hits a sysctl race produces an
+            // `Incomplete` instead of a `Pass`. The gate fails the
+            // run, the operator re-runs, the bench is honest. The
+            // alternative — silent `Pass` — is the bug the rust-
+            // expert PR-#68 review (Risk #4) flagged.
+            return ColdCacheVerdict::Incomplete(format!(
+                "drop_caches write failed after probe succeeded: {err}"
+            ));
         }
     }
 

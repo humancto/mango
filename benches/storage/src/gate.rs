@@ -952,6 +952,35 @@ mod tests {
         );
     }
 
+    /// Symlink axis of the co-residency check (N9 §3): a contributor
+    /// MUST NOT be able to reach a non-co-resident signature by
+    /// dropping a symlink inside `json_dir` that points at a sibling
+    /// directory's signature file. `Path::canonicalize` resolves the
+    /// link, the resolved parent diverges from `json_dir`, and the
+    /// gate refuses with `SignatureNotCoResident`.
+    #[cfg(unix)]
+    #[test]
+    fn read_signature_rejects_symlink_to_sibling_dir() {
+        use std::os::unix::fs::symlink;
+
+        let json_dir = tempfile::tempdir().unwrap();
+        let sig_dir = tempfile::tempdir().unwrap();
+        let real_sig = sig_dir.path().join("signature.txt");
+        fs::write(&real_sig, linux_tier1_sig()).unwrap();
+
+        // Drop a symlink at `json_dir/signature.txt` → real_sig.
+        let link_in_json = json_dir.path().join("signature.txt");
+        symlink(&real_sig, &link_in_json).unwrap();
+
+        // The signature_path is a co-resident-looking *string*, but
+        // canonicalize resolves the link to the sibling tempdir.
+        let err = read_signature(json_dir.path(), "signature.txt", "mango").unwrap_err();
+        assert!(
+            matches!(err, GateError::SignatureNotCoResident { .. }),
+            "expected NotCoResident on symlinked signature, got {err:?}"
+        );
+    }
+
     /// Helper: build mango+bbolt result files that should pass.
     /// Mango wins clearly on `write_throughput_unbatched`, ties on
     /// the others — meets "≥ 1 Win, 0 Loss".
