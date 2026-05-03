@@ -1,4 +1,4 @@
-//! Immutable read-side view of [`crate::MvccStore`] (L846).
+//! Immutable read-side view of [`crate::store::MvccStore`] (L846).
 //!
 //! [`Snapshot`] is the type published via [`arc_swap::ArcSwap`] on
 //! every successful writer commit. Readers acquire the latest
@@ -24,14 +24,13 @@
 //!
 //! - Puts only **add** revisions to a key's history; an older
 //!   `snap.rev` cannot see a put it wasn't published with — the
-//!   per-key version walk in
-//!   [`crate::ShardedKeyIndex::get`]`(k, snap.rev)` filters by
-//!   `version_main <= snap.rev`.
+//!   per-key version walk in [`crate::ShardedKeyIndex::get`]
+//!   filters by `version_main <= snap.rev`.
 //! - Compacts only **drop** revisions `<= floor`; observing the
 //!   older `compacted` floor is conservative — the reader sees
 //!   slightly more history than strictly necessary, which is safe.
 //! - The pair `(rev, compacted)` is published atomically via
-//!   `ArcSwap`, so the [`crate::MvccStore::range`] entry-point
+//!   `ArcSwap`, so the [`crate::store::MvccStore::range`] entry-point
 //!   sees a consistent floor for its rev.
 //!
 //! Subsequent ROADMAP items may add fields (lease epoch, watcher
@@ -61,15 +60,15 @@
 //! - One-shot field reads → `load()` is fine; the `Guard` drops
 //!   immediately.
 
-/// Immutable read-side view of [`crate::MvccStore`].
+/// Immutable read-side view of [`crate::store::MvccStore`].
 ///
 /// See module-level docs for the publication protocol and the
 /// rationale for what is (and isn't) in the snapshot.
 ///
 /// `#[non_exhaustive]` blocks struct-expression init from outside
 /// the crate. To construct one for testing inside the crate, use
-/// [`Snapshot::empty`] or build through the writer paths in
-/// [`crate::MvccStore`].
+/// the crate-private `Snapshot::empty` constructor or build
+/// through the writer paths in [`crate::store::MvccStore`].
 ///
 /// **No `Copy`**: future fields (e.g. `Arc<KeyIndex>`) will be
 /// non-`Copy`; deriving `Copy` today would silently break every
@@ -89,7 +88,7 @@ impl Snapshot {
     /// Construct the initial snapshot for a fresh store: rev = 0,
     /// compacted = 0. `pub(crate)` because user code never builds
     /// snapshots directly — they observe them via
-    /// [`crate::MvccStore::current_snapshot`].
+    /// [`crate::store::MvccStore::current_snapshot`].
     #[must_use]
     pub(crate) fn empty() -> Self {
         Self {
@@ -101,7 +100,12 @@ impl Snapshot {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )]
 
     use super::*;
 

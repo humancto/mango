@@ -80,6 +80,11 @@ version = "1.0.102"
 criteria = "safe-to-deploy"
 notes = "review-by: 2026-10-23 — error-handling, dtolnay, audit pending"
 
+[[exemptions.arc-swap]]
+version = "1.9.1"
+criteria = "safe-to-deploy"
+notes = "review-by: 2026-11-03 — direct workspace dep for L846 snapshot publication primitive (ROADMAP.md:846) on the mango-mvcc read path. vorner/arc-swap is the canonical Rust atomic-Arc-swap library; widely deployed (tikv, sled). Internal unsafe is concentrated in the slot-pool fast-path and audited upstream against loom. cargo-vet exemption pending audit; retire when in-house review completes."
+
 [[exemptions.async-channel]]
 version = "2.5.0"
 criteria = "safe-to-deploy"

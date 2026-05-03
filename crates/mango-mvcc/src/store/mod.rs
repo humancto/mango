@@ -162,8 +162,11 @@ pub struct MvccStore<B: Backend> {
     /// Per-key revision history. Point-lookup; sharded.
     index: ShardedKeyIndex,
     /// Ordered live-key set, used by `Range`. The L846 substrate
-    /// (will be wrapped in `arc_swap::ArcSwap<Arc<...>>` then),
-    /// not a stopgap. Map (not Set) so the watch cache can extend
+    /// (a future commit may wrap the ordered key set in
+    /// `arc_swap::ArcSwap<...>` — note: `ArcSwap<T>` already wraps
+    /// `Arc<T>`, so the spelling is `ArcSwap<...>`, not
+    /// `ArcSwap<Arc<...>>`), not a stopgap. Map (not Set) so the
+    /// watch cache can extend
     /// the value side without a re-typing migration. The
     /// `zero_sized_map_values` clippy lint flags the `()` value
     /// type — silenced here because the type is forward-design
@@ -305,7 +308,9 @@ impl<B: Backend> MvccStore<B> {
     ///    writer-lock invariant; surfaces as
     ///    [`MvccError::Internal`] if violated).
     /// 6. Bump `next_main` (checked).
-    /// 7. Release-store `current_main` so readers see the new head.
+    /// 7. Publish a fresh `Arc<Snapshot>` via
+    ///    [`arc_swap::ArcSwap::store`] so readers observe the new
+    ///    head with the existing compaction floor (L846).
     ///
     /// # Errors
     ///
@@ -330,8 +335,8 @@ impl<B: Backend> MvccStore<B> {
         // No `.await` is held under either of the in-memory locks
         // below. Ordering is **index first, then `keys_in_order`**
         // (rust-expert PR #75 review R1): a concurrent reader
-        // observing the new `current_main` (Release-stored at the
-        // end of this fn) can scan `keys_in_order` and probe the
+        // observing the new `Snapshot` (published via `ArcSwap` at
+        // the end of this fn) can scan `keys_in_order` and probe the
         // index. If we set `keys_in_order` first, there is a
         // sub-microsecond window where a reader sees the new key
         // in the ordered set but `index.get` returns
@@ -419,7 +424,7 @@ impl<B: Backend> MvccStore<B> {
     /// - [`MvccError::Compacted`] if `rev < compacted_floor`
     ///   (strict `<`; the floor itself remains readable per etcd
     ///   parity, plan review item B1).
-    /// - [`MvccError::FutureRevision`] if `rev > current_main`.
+    /// - [`MvccError::FutureRevision`] if `rev > snap.rev`.
     /// - [`MvccError::InvalidRange`] if `req.end` is non-empty
     ///   and `req.end < req.key`. Equal bounds are allowed (yield
     ///   an empty result).
@@ -724,8 +729,8 @@ impl<B: Backend> MvccStore<B> {
     ///
     /// `Range` responses inside a mutating branch see the
     /// **post-commit** state — they are evaluated after the
-    /// batch commits and `current_main` advances (plan §5.5
-    /// step 11).
+    /// batch commits and the snapshot is republished with the
+    /// new `rev` (plan §5.5 step 11).
     ///
     /// # Intra-branch visibility caveat
     ///
@@ -787,7 +792,7 @@ impl<B: Backend> MvccStore<B> {
         }
 
         // Mutating: allocate the single main, commit the batch,
-        // apply in-mem updates, then advance current_main.
+        // apply in-mem updates, then republish the snapshot.
         let head_rev = Revision::new(txn_main, 0);
         self.commit_txn_batch(&plan).await?;
         self.apply_txn_in_mem(&plan)?;
@@ -1071,7 +1076,7 @@ impl<B: Backend> MvccStore<B> {
     ///
     /// # Errors
     ///
-    /// - [`MvccError::FutureRevision`] if `rev > current_main`.
+    /// - [`MvccError::FutureRevision`] if `rev > snap.rev`.
     /// - [`MvccError::Backend`] from snapshot acquisition,
     ///   `begin_batch`, `commit_batch`, or range iteration.
     /// - [`MvccError::KeyDecode`] if an on-disk encoded key
