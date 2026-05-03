@@ -25,10 +25,11 @@ struct Input {
     /// 2. Smaller inputs let libfuzzer's mutator find any
     ///    round-trip violation faster.
     /// 3. The full `0..=i64::MAX` typed range is already covered
-    ///    by the proptest at
-    ///    `crates/mango-mvcc/src/encoding.rs#round_trip_proptest`.
+    ///    by the proptest `proptest_roundtrip_decoder_legal` at
+    ///    `crates/mango-mvcc/src/encoding.rs:471`.
     /// The negative-rejection invariant is covered by the proptest
-    /// at `crates/mango-mvcc/src/encoding.rs#decode_rejects_negative_proptest`.
+    /// `proptest_decoder_rejects_negatives` at
+    /// `crates/mango-mvcc/src/encoding.rs:485`.
     main: u32,
     sub: u32,
     is_tombstone: bool,
