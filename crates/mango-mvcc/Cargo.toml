@@ -59,6 +59,13 @@ tempfile = "3"
 # remain loom-free.
 [target.'cfg(loom)'.dependencies]
 loom.workspace = true
+# Transitive tokio (mango-storage → madsim-tokio → real tokio)
+# requires the `sync` feature under `--cfg loom` for `AtomicWaker`
+# (`tokio/src/sync/mod.rs`'s `cfg(loom)` arm). mango-mvcc does not
+# use tokio directly; declaring it here triggers cargo feature
+# unification on the transitive copy. Scoped to `cfg(loom)` so the
+# default build's tokio feature set is unchanged.
+tokio = { workspace = true, features = ["sync"] }
 
 [lints]
 workspace = true

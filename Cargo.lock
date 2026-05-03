@@ -785,6 +785,7 @@ version = "0.1.0"
 dependencies = [
  "ahash",
  "loom",
+ "madsim-tokio",
  "mango-storage",
  "parking_lot",
  "proptest",
