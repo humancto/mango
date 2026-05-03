@@ -222,6 +222,17 @@ pub struct MetricRecord {
     /// `None` on a single-engine record.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verdict: Option<Verdict>,
+
+    /// Per-metric fairness flag (S3): `Some("asymmetric")` excludes
+    /// the metric from the gate's win/loss aggregation per plan §B4
+    /// "Mango loses on a metric that S3 marked `asymmetric`."
+    /// `Some("symmetric_copy")` is the affirmative version of the
+    /// flag; either is accepted, the gate's only behaviour is to
+    /// **skip** when the value is exactly `"asymmetric"`. `None` on
+    /// metrics without a fairness annotation (everything except
+    /// `range_throughput` today).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fairness: Option<String>,
 }
 
 /// JSON: per-run record (one per run index). Carries the
@@ -471,6 +482,7 @@ mod tests {
                 ratio_lower_95: None,
                 ratio_upper_95: None,
                 verdict: None,
+                fairness: None,
             }],
         };
         let json = serde_json::to_string(&result).unwrap();
