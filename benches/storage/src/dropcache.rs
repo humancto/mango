@@ -6,9 +6,16 @@
 //!    open DB file. Per-file, no root required, both engines pay
 //!    the same primitive symmetrically.
 //! 2. **Stage 2 — `echo 3 > /proc/sys/vm/drop_caches`**. Best-
-//!    effort, root only. If Stage 2 fails with `EACCES`, Stage 1
-//!    has already evicted the per-file pages and the verdict is
-//!    still `Pass`-eligible.
+//!    effort, root only. Two distinct failure modes:
+//!    - **Probed unwritable at startup** (no root, sysctl off): the
+//!      capability probe records this and Stage 2 is skipped at
+//!      run time; Stage 1 alone yields `Pass`.
+//!    - **Probed writable but the actual write fails** (sysctl
+//!      tightening or race between probe and write): the verdict
+//!      is `Incomplete`. Stage 1 already evicted the per-file
+//!      pages, but the contract on Linux Tier-1 is "both stages
+//!      run", and the operator-honest signal is to fail the gate
+//!      so the run is repeated.
 //!
 //! On macOS / other platforms there is no reliable userspace API
 //! to evict already-cached file pages, so the verdict is
@@ -113,8 +120,15 @@ pub fn probe_capability() -> DropCacheCapability {
 /// - [`DropCacheCapability::Linux`] — runs `posix_fadvise(...,
 ///   POSIX_FADV_DONTNEED)` on every path. If `drop_caches_writable`
 ///   was true at probe time, additionally writes `"3\n"` to
-///   `/proc/sys/vm/drop_caches`. If Stage 1 succeeds and Stage 2
-///   is unavailable, the verdict is still `Pass`.
+///   `/proc/sys/vm/drop_caches`. Failure modes:
+///   - Stage 1 errors (e.g., `EBADF` on a closed handle, fadvise
+///     refused on tmpfs / overlayfs) → `Incomplete`.
+///   - Stage 2 was *probed unwritable* at startup → skipped; Stage 1
+///     alone yields `Pass`.
+///   - Stage 2 was *probed writable* but the run-time write fails
+///     (sysctl tightening / race) → `Incomplete`. Stage 1 evicted
+///     per-file pages, but the contract is "both stages run", so
+///     the operator-honest signal is to fail the gate.
 /// - [`DropCacheCapability::Macos`] / [`DropCacheCapability::Other`]
 ///   → `Incomplete` with a platform-specific message.
 ///
