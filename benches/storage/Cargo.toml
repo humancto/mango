@@ -59,6 +59,16 @@ nix = { version = "0.26", default-features = false, features = ["fs"] }
 # base64 for the HdrHistogram V2 wire encoding (B1).
 base64 = "0.22"
 
+# tokio (workspace-renamed to madsim-tokio) is needed solely to drive
+# `RedbBackend::commit_batch` / `commit_group` from the synchronous
+# bench harness. Same `features = ["rt"]` set the storage crate uses
+# for its commit path; `spawn_blocking` lives behind `rt` and the
+# runtime is built `current_thread` (no timers required). The
+# differential test in `crates/mango-storage/tests/differential_vs_bbolt.rs`
+# uses the same pattern. Workspace rename takes care of the
+# `--cfg madsim` substitution at link time.
+tokio = { workspace = true, features = ["rt"] }
+
 [dev-dependencies]
 # Used in tests; harness binaries do not depend on these directly.
 proptest = "1.5"

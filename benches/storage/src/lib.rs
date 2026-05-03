@@ -22,6 +22,7 @@
 
 pub mod bbolt_runner;
 pub mod dropcache;
+pub mod mango_runner;
 pub mod measure;
 pub mod stats;
 pub mod workload;

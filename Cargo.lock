@@ -749,6 +749,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "hdrhistogram",
+ "madsim-tokio",
  "mango-storage",
  "nix",
  "parking_lot",
