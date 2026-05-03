@@ -109,7 +109,7 @@ func main() {
 	case "diff":
 		runDiff()
 	case "bench":
-		log.Fatal("mode=bench unimplemented; tracked in ROADMAP:829")
+		runBench()
 	default:
 		log.Fatalf("unknown mode %q; expected diff | bench", *mode)
 	}

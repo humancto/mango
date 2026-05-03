@@ -7,6 +7,25 @@ members = [
     "crates/mango-loom-demo",
     "crates/mango-madsim-demo",
     "crates/xtask-vet-ttl",
+    # ROADMAP:829 — Phase 1 parity bench harness. NOT in
+    # default-members (see below): `cargo build` / `cargo test`
+    # from the workspace root skips it. Build explicitly with
+    # `cargo build -p mango-bench-storage --release`.
+    "benches/storage",
+]
+
+# Crates that `cargo build`, `cargo test`, `cargo clippy` operate on
+# when no `-p` flag is given. The bench harness is deliberately
+# excluded so the default workspace operations remain fast and the
+# harness's heavy dep graph (hdrhistogram, base64, etc.) does not
+# pollute every CI lane. Explicit `-p mango-bench-storage` opts in.
+default-members = [
+    "crates/mango",
+    "crates/mango-proto",
+    "crates/mango-storage",
+    "crates/mango-loom-demo",
+    "crates/mango-madsim-demo",
+    "crates/xtask-vet-ttl",
 ]
 # tests/fixtures/geiger-toy-workspace is a self-contained workspace
 # used by scripts/geiger-scripts-test.sh as a real-cargo-geiger

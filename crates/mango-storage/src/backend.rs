@@ -210,6 +210,15 @@ pub struct BackendConfig {
     /// reopening a database under a different mode does not lose
     /// data.
     pub compression: CompressionMode,
+    /// Engine-side page-cache budget in bytes. `None` = engine
+    /// default (redb 4.x defaults to ≈ 1 GiB). Threaded into
+    /// [`redb::Builder::set_cache_size`] when the redb backend
+    /// opens. The parity bench harness (ROADMAP:829) sets this
+    /// explicitly so a fair shot is given to redb against bbolt's
+    /// mmap. Other backends MAY ignore this hint.
+    ///
+    /// Set via [`BackendConfig::with_cache_size`].
+    pub cache_size_bytes: Option<usize>,
 }
 
 impl BackendConfig {
@@ -226,6 +235,7 @@ impl BackendConfig {
             data_dir,
             read_only,
             compression: CompressionMode::None,
+            cache_size_bytes: None,
         }
     }
 
@@ -239,6 +249,18 @@ impl BackendConfig {
     #[must_use]
     pub fn with_compression(mut self, mode: CompressionMode) -> Self {
         self.compression = mode;
+        self
+    }
+
+    /// Set [`Self::cache_size_bytes`] to `bytes`. Builder-style
+    /// override; `None`-equivalent is to skip this call entirely
+    /// (the field defaults to `None` in [`Self::new`]).
+    ///
+    /// `#[must_use]` for the same reason as
+    /// [`Self::with_compression`].
+    #[must_use]
+    pub fn with_cache_size(mut self, bytes: usize) -> Self {
+        self.cache_size_bytes = Some(bytes);
         self
     }
 }

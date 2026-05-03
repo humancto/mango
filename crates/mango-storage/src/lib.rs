@@ -230,4 +230,41 @@ mod tests {
         assert_eq!(cloned.compression, CompressionMode::Lz4);
         assert_eq!(cloned.data_dir, std::path::PathBuf::from("/tmp/x"));
     }
+
+    #[test]
+    fn backend_config_constructor_default_cache_size_is_none() {
+        // Pins the engine-default cache-size posture — calling
+        // `BackendConfig::new` without `with_cache_size` MUST yield
+        // `None`, which the redb backend interprets as "let redb use
+        // its built-in default" (≈ 1 GiB in 4.x). The parity bench
+        // harness (ROADMAP:829) sets this explicitly; every other
+        // call site keeps the default.
+        let cfg = BackendConfig::new(std::path::PathBuf::from("/tmp/x"), false);
+        assert!(cfg.cache_size_bytes.is_none());
+    }
+
+    #[test]
+    fn backend_config_with_cache_size_overrides_default() {
+        let cfg =
+            BackendConfig::new(std::path::PathBuf::from("/tmp/x"), false).with_cache_size(64 << 20);
+        assert_eq!(cfg.cache_size_bytes, Some(64 << 20));
+    }
+
+    #[test]
+    fn backend_config_with_cache_size_is_chainable_with_compression() {
+        let cfg = BackendConfig::new(std::path::PathBuf::from("/tmp/x"), false)
+            .with_compression(CompressionMode::Lz4)
+            .with_cache_size(128 << 20);
+        assert_eq!(cfg.compression, CompressionMode::Lz4);
+        assert_eq!(cfg.cache_size_bytes, Some(128 << 20));
+    }
+
+    #[test]
+    fn backend_config_with_cache_size_clone_round_trips() {
+        let cfg =
+            BackendConfig::new(std::path::PathBuf::from("/tmp/x"), true).with_cache_size(256 << 20);
+        let cloned = cfg.clone();
+        assert!(cloned.read_only);
+        assert_eq!(cloned.cache_size_bytes, Some(256 << 20));
+    }
 }

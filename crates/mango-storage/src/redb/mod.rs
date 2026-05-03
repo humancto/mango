@@ -376,7 +376,11 @@ impl Backend for RedbBackend {
         }
         std::fs::create_dir_all(&config.data_dir).map_err(BackendError::Io)?;
         let db_path: PathBuf = config.data_dir.join(DB_FILENAME);
-        let db = ::redb::Database::create(&db_path).map_err(map_database_error)?;
+        let mut builder = ::redb::Builder::new();
+        if let Some(bytes) = config.cache_size_bytes {
+            builder.set_cache_size(bytes);
+        }
+        let db = builder.create(&db_path).map_err(map_database_error)?;
 
         let mut registry = Registry::default();
         hydrate_registry(&db, &mut registry)?;
