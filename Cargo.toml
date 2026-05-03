@@ -189,6 +189,46 @@ thiserror = "2"
 # exemption already present (parking_lot@0.12.5, parking_lot_core@0.9.12).
 parking_lot = "0.12"
 
+# Phase 1 user-data block compression (ROADMAP:830).
+#
+# lz4_flex: pure-Rust LZ4. ADR 0002 §3 names lz4_flex as the
+# workspace's LZ4 library on the Raft-log path; this entry extends
+# that choice to the user-data backend (mango-storage encodes/decodes
+# at the value boundary in the redb backend). ADR 0002 §W5 bans
+# lz4-sys (C FFI), so this is the only library satisfying both
+# pure-Rust and `unsafe_code = "forbid"` for mango's own crates.
+#
+# Pin shape: `=0.13.0` exact (matches redb posture, line 104). A
+# bump to 0.14+ requires refreshing the cargo-vet exemption AND
+# re-audit; Dependabot does NOT auto-bump exact pins.
+#
+# Features:
+# - `default-features = false` drops `frame` (dragging in
+#   `twox-hash`) and `nightly` (no nightly toolchain in CI).
+# - `safe-encode` / `safe-decode` keep the codec on the
+#   `unsafe`-free path. Workspace policy is `unsafe_code = "forbid"`
+#   for mango's own crates; for deps the same posture is enforced
+#   via `cargo-geiger` (ROADMAP:823 baseline). Without these
+#   features, lz4_flex falls back to pointer-arith hot loops with
+#   `unsafe`.
+# - `checked-decode` is the decoder-side bounds-check layer that
+#   lz4_flex's manifest documents as "remove only on trusted
+#   input". Disk bytes are NOT trusted (corruption, partial-write,
+#   future bug) — the decoder must remain robust to adversarial
+#   payloads.
+# - `std` is required for the `Vec<u8>` allocator path.
+#
+# Verify post-add: `cargo tree -e no-dev -p mango-storage |
+# grep -E 'lz4|twox-hash'` must show only `lz4_flex 0.13.0` (no
+# `twox-hash`, no other lz4 crate). cargo-vet exemption recorded
+# in supply-chain/config.toml with a review-by date.
+lz4_flex = { version = "=0.13.0", default-features = false, features = [
+    "safe-encode",
+    "safe-decode",
+    "checked-decode",
+    "std",
+] }
+
 [workspace.package]
 version = "0.1.0"
 edition = "2021"

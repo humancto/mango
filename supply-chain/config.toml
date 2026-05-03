@@ -335,6 +335,11 @@ version = "0.7.2"
 criteria = "safe-to-deploy"
 notes = "review-by: 2026-10-23 — tokio-rs, exact-pinned for determinism"
 
+[[exemptions.lz4_flex]]
+version = "0.13.0"
+criteria = "safe-to-deploy"
+notes = "review-by: 2026-11-03 — pseitz/lz4_flex pure-Rust LZ4 implementation. Direct workspace dep for ROADMAP:830 user-data block compression in mango-storage. ADR 0002 §3 names lz4_flex as the workspace's pure-Rust LZ4 library (vs. lz4-sys C FFI banned by §W5). Consumed with `default-features = false, features = [\"safe-encode\", \"safe-decode\", \"checked-decode\", \"std\"]` — `safe-*` keeps the codec on the unsafe-free path (cargo-geiger ROADMAP:823 baseline ⇒ 0); `checked-decode` is the decoder-side bounds-check layer for adversarial disk bytes; no `frame` feature ⇒ no `twox-hash` transitive. Verify post-add: `cargo tree -e no-dev | grep -E 'lz4|twox-hash'` shows only `lz4_flex 0.13.0`. Exact-version pin (`=0.13.0`) — bump requires this exemption refresh + re-audit; Dependabot does not auto-bump exact pins."
+
 [[exemptions.madsim]]
 version = "0.2.30"
 criteria = "safe-to-deploy"
