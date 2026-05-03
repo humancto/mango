@@ -203,11 +203,21 @@ jobs:
         # pkg:cargo/<name>@<ver> corresponds to a (name, version)
         # in Cargo.lock. Proves the SBOM is derived from the
         # lockfile, not fabricated.
+        #
+        # No `source` filter: Cargo.lock contains both registry/git
+        # packages AND workspace-internal members. Once any workspace
+        # crate depends on a sibling (e.g. mango-mvcc → mango-storage,
+        # mango-bench-storage → mango-storage), cargo-cyclonedx emits
+        # the sibling as a pkg:cargo/<name>@<ver> component in the
+        # SBOM. Filtering metadata on `source != null` would drop the
+        # corresponding lock row and falsely flag a "fabricated" purl.
+        # Per docs/sbom-policy.md §8 the oracle is Cargo.lock, which
+        # does include workspace members — this query matches.
         run: |
           set -euo pipefail
           lock_pairs="$(
               cargo metadata --format-version=1 --locked \
-                  | jq -r '.packages[] | select(.source != null) | "\(.name) \(.version)"' \
+                  | jq -r '.packages[] | "\(.name) \(.version)"' \
                   | sort -u
           )"
 
