@@ -13,17 +13,17 @@
 //!
 //! # Send-ness
 //!
-//! [`InMemBatch`] is deliberately `!Send + !Sync` via a
-//! `PhantomData<*const ()>` marker, mirroring `RedbBatch`. The
-//! trait contract in `mango_storage::WriteBatch` permits this.
-//! The `compile_fail` doctest below pins the invariant.
-//!
-//! ```compile_fail
-//! fn needs_send<T: Send>() {}
-//! needs_send::<mango_storage::InMemBatch>();
-//! ```
-
-use std::marker::PhantomData;
+//! [`InMemBatch`] is `Send + Sync` (it carries only `Vec<StagedOp>`,
+//! a pure-data type). The earlier design used a
+//! `PhantomData<*const ()>` `!Send + !Sync` marker to express
+//! "single logical writer" at the type system level, but that
+//! propagated up through `MvccStore::{put, delete_range, txn,
+//! compact}` and made every writer future `!Send`, blocking
+//! `tokio::spawn` in L854's gRPC server (rust-expert PR #75
+//! review S2). The "single logical writer" invariant is enforced
+//! more cheaply by `&mut self` on `WriteBatch::{put, delete,
+//! delete_range}` and by single-ownership move into
+//! `commit_batch`; cross-thread move is sound and is now allowed.
 
 use crate::backend::{BackendError, BucketId, WriteBatch};
 use crate::redb::batch::{EMPTY_KEY_ERROR, EMPTY_VALUE_ERROR};
@@ -74,9 +74,6 @@ pub(super) enum StagedOp {
 #[derive(Debug, Default)]
 pub struct InMemBatch {
     pub(super) staged: Vec<StagedOp>,
-    /// `PhantomData<*const ()>` is the canonical `!Send + !Sync`
-    /// marker. Same shape as `RedbBatch`.
-    _not_send_sync: PhantomData<*const ()>,
 }
 
 impl InMemBatch {
@@ -84,10 +81,7 @@ impl InMemBatch {
     /// [`crate::Backend::begin_batch`].
     #[must_use]
     pub(super) fn new() -> Self {
-        Self {
-            staged: Vec::new(),
-            _not_send_sync: PhantomData,
-        }
+        Self { staged: Vec::new() }
     }
 
     /// Consume the batch and return its staged ops. Called by the

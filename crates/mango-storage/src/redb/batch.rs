@@ -16,24 +16,18 @@
 //!
 //! # Send-ness
 //!
-//! [`RedbBatch`] is deliberately `!Send` and `!Sync` (carries a
-//! `PhantomData<*const ()>` marker). The trait contract in
-//! `mango_storage::WriteBatch` explicitly permits `!Send`; making
-//! the batch non-shareable documents the invariant "one batch per
-//! logical writer" at the type system level. A `compile_fail`
-//! doctest below pins this invariant against accidental removal.
-//!
-//! ```compile_fail
-//! fn needs_send<T: Send>() {}
-//! needs_send::<mango_storage::RedbBatch>();
-//! ```
-//!
-//! Downstream commit paths extract the staging `Vec<StagedOp>` (which
-//! *is* `Send`) synchronously before constructing any `Future`, so
-//! the `!Send` marker on the batch never blocks the `Future + Send`
-//! trait return type.
-
-use std::marker::PhantomData;
+//! [`RedbBatch`] is `Send + Sync` — it carries only a
+//! `Vec<StagedOp>` (pure data, no thread-local handles). The
+//! earlier design used a `PhantomData<*const ()>` `!Send + !Sync`
+//! marker to express "one batch per logical writer" at the type
+//! system level, but that propagated up through
+//! `MvccStore::{put, delete_range, txn, compact}` and made every
+//! writer future `!Send`, blocking `tokio::spawn` in L854's gRPC
+//! server (rust-expert PR #75 review S2). The "one logical writer"
+//! invariant is enforced more cheaply by `&mut self` on
+//! `WriteBatch::{put, delete, delete_range}` and by single-
+//! ownership move into `commit_batch`; cross-thread move is sound
+//! and is now allowed.
 
 use crate::backend::{BackendError, BucketId, WriteBatch};
 
@@ -81,11 +75,6 @@ pub(super) enum StagedOp {
 #[derive(Debug, Default)]
 pub struct RedbBatch {
     staged: Vec<StagedOp>,
-    /// `PhantomData<*const ()>` is the canonical `!Send + !Sync`
-    /// marker: raw pointers are neither `Send` nor `Sync`, and
-    /// `PhantomData` inherits those auto-trait bounds without any
-    /// runtime footprint.
-    _not_send_sync: PhantomData<*const ()>,
 }
 
 impl RedbBatch {
@@ -94,10 +83,7 @@ impl RedbBatch {
     /// construct batches directly.
     #[must_use]
     pub(super) fn new() -> Self {
-        Self {
-            staged: Vec::new(),
-            _not_send_sync: PhantomData,
-        }
+        Self { staged: Vec::new() }
     }
 
     /// Consume the batch and return its staged ops. Called by the
