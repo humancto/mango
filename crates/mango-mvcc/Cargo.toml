@@ -69,3 +69,19 @@ tokio = { workspace = true, features = ["sync"] }
 
 [lints]
 workspace = true
+
+# L842 hostile-key DoS test. Lives under `tests/` (Cargo
+# integration-test convention) but compiles only when the
+# `test-seed` feature is on — the test imports
+# `ShardedKeyIndex::with_seed` and `shard_for_test` which are
+# `cfg(any(test, feature = "test-seed"))`-gated. Without
+# `required-features`, default `cargo nextest --workspace
+# --all-targets` would try to compile this target and fail on
+# the gated symbols. Same pattern is exercised by the
+# `--features mango-mvcc/test-seed --test
+# security_keyindex_dos` step in `.github/workflows/ci.yml`,
+# and by `cargo test --all-features` (alternate trigger).
+[[test]]
+name = "security_keyindex_dos"
+path = "tests/security_keyindex_dos.rs"
+required-features = ["test-seed"]

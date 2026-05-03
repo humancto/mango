@@ -158,6 +158,24 @@ jobs:
           name: recovery-time-${{ env.RUN_ID }}
           path: target/recovery-time.json
           if-no-files-found: warn
+      - name: cargo nextest run (security suite, mango-mvcc)
+        # ROADMAP:842 hostile-key DoS test in
+        # `crates/mango-mvcc/tests/security_keyindex_dos.rs`.
+        # Compile-gated by the `test-seed` Cargo feature on two
+        # layers: the `[[test]] required-features` declaration in
+        # `crates/mango-mvcc/Cargo.toml` skips the target from the
+        # workspace nextest step above, and the test file's
+        # `#![cfg(feature = "test-seed")]` is the file-level
+        # belt-and-suspenders. This step is the explicit opt-in
+        # that runs the suite. Same additive-step pattern as
+        # `crash_recovery_panic` and `recovery_time` above.
+        run: |
+          cargo nextest run \
+            -p mango-mvcc \
+            --features mango-mvcc/test-seed \
+            --test security_keyindex_dos \
+            --locked \
+            --profile ci
       - name: cargo test --doc
         # nextest does NOT run doctests; this step covers them.
         # Placed after nextest so the workspace dep cache is warm and
