@@ -81,6 +81,17 @@ const NON_EMPTY_PROBE_CAP: u64 = 1024;
 /// explicit upper bound the probe would be empty.
 const NON_EMPTY_PROBE_END: &[u8] = &[0xFF; 32];
 
+/// On-disk value bytes written for a tombstone entry.
+///
+/// Tombstones are identified entirely by the `KeyKind::Tombstone`
+/// marker byte at the end of the encoded **key**; the value is
+/// inert. The backend rejects empty values
+/// (`mango_storage::redb::batch::EMPTY_VALUE_ERROR`, parity with
+/// bbolt's `ErrValueNil`) so we write a single zero byte. The
+/// constant is documented here so a future Range-on-tombstone path
+/// or a dump tool can recognise the sentinel.
+const TOMBSTONE_VALUE: &[u8] = &[0u8];
+
 /// User-facing MVCC store.
 ///
 /// See module docs for locking model and lock ordering.
@@ -451,6 +462,135 @@ impl<B: Backend> MvccStore<B> {
             count,
             header_revision: current,
         })
+    }
+
+    /// Tombstone every live key in `[key, end)`.
+    ///
+    /// Allocates **at most one** `main` revision: the empty match
+    /// set is a no-op and does not advance the head (plan §5.4
+    /// review item S3 — etcd parity with `mvcc/kvstore_txn.go`'s
+    /// `DeleteRange` returning early on zero matches). When matches
+    /// are present, every tombstone shares the allocated `main` and
+    /// is assigned a unique sub starting at `0`, in `keys_in_order`
+    /// iteration order.
+    ///
+    /// # Semantics
+    ///
+    /// - `end.is_empty()` → single-key delete (etcd parity).
+    /// - Already-tombstoned-at-`current` keys are filtered out
+    ///   before allocation; they are not counted, do not consume a
+    ///   sub, and do not appear on disk.
+    /// - Tombstoned keys remain in `keys_in_order` until
+    ///   `Compact` reaps them — etcd retains them so a `Range` at
+    ///   a pre-tombstone revision still sees the key (plan §5.4
+    ///   review item R3).
+    ///
+    /// # Errors
+    ///
+    /// - [`MvccError::Backend`] from `begin_batch` /
+    ///   `WriteBatch::put` / `commit_batch`.
+    /// - [`MvccError::Internal`] if `next_main` would overflow,
+    ///   if the per-key sub allocator overflows, or if
+    ///   `index.tombstone` rejects a call that the writer-lock
+    ///   invariant says it must accept.
+    pub async fn delete_range(&self, key: &[u8], end: &[u8]) -> Result<(u64, Revision), MvccError> {
+        let mut state = self.writer.lock().await;
+        let current = self.current_main.load(Ordering::Acquire);
+
+        // Step 3: candidate match set under the read lock; drop
+        // the guard before any further work.
+        let candidates: Vec<Box<[u8]>> = {
+            let keys = self.keys_in_order.read();
+            if end.is_empty() {
+                if keys.contains_key(key) {
+                    vec![key.into()]
+                } else {
+                    Vec::new()
+                }
+            } else {
+                keys.range::<[u8], _>((Bound::Included(key), Bound::Excluded(end)))
+                    .map(|(k, ())| k.clone())
+                    .collect()
+            }
+        };
+
+        // Step 4: filter to keys live at `current` — already-
+        // tombstoned keys must not consume a sub or appear on disk
+        // a second time.
+        let mut matched: Vec<Box<[u8]>> = Vec::with_capacity(candidates.len());
+        for k in candidates {
+            match self.index.get(&k, current) {
+                Ok(_) => matched.push(k),
+                // Already tombstoned at `current` (or before).
+                Err(KeyIndexError::History(KeyHistoryError::RevisionNotFound)) => {}
+                Err(KeyIndexError::KeyNotFound) => {
+                    // `keys_in_order` and `index` are kept in sync
+                    // under the writer lock; this would indicate a
+                    // writer-invariant violation. Surface as
+                    // Internal rather than silently undercounting.
+                    return Err(MvccError::Internal {
+                        context: "index/keys_in_order disagree on key presence",
+                    });
+                }
+                Err(e) => return Err(MvccError::KeyIndex(e)),
+            }
+        }
+
+        // Step 6: zero matches → no allocation, no advance.
+        if matched.is_empty() {
+            return Ok((0, Revision::new(current, 0)));
+        }
+
+        // Step 7+: allocate a single main; sub increments per
+        // physical write.
+        let rev = Revision::new(state.next_main, 0);
+
+        let mut batch = self.backend.begin_batch()?;
+        let mut sub: i64 = 0;
+        // Pair each key with the rev it gets tombstoned at, so the
+        // post-commit `index.tombstone` calls reuse the on-disk
+        // assignments verbatim.
+        let mut tombstones: Vec<(Box<[u8]>, Revision)> = Vec::with_capacity(matched.len());
+        for k in matched {
+            let key_rev = Revision::new(rev.main(), sub);
+            let encoded = encode_key(key_rev, KeyKind::Tombstone);
+            batch.put(KEY_BUCKET_ID, encoded.as_bytes(), TOMBSTONE_VALUE)?;
+            sub = sub.checked_add(1).ok_or(MvccError::Internal {
+                context: "delete_range sub overflow",
+            })?;
+            tombstones.push((k, key_rev));
+        }
+        // No fsync — Raft's WAL above us owns durability (parity
+        // with `Put`).
+        let _ = self.backend.commit_batch(batch, false).await?;
+
+        // Step 11: in-mem tombstones. Holding only the writer lock
+        // here; `keys_in_order` is intentionally NOT modified
+        // (review item R3). `index.tombstone` returning `Err` would
+        // indicate the writer-lock invariant is broken (plan
+        // §5.4 review item S3).
+        for (k, key_rev) in &tombstones {
+            if let Err(_e) = self.index.tombstone(k, *key_rev) {
+                return Err(MvccError::Internal {
+                    context: "index.tombstone failed under writer-lock invariant",
+                });
+            }
+        }
+
+        let deleted = u64::try_from(tombstones.len()).map_err(|_| MvccError::Internal {
+            context: "delete_range count exceeds u64",
+        })?;
+
+        let next = state.next_main.checked_add(1).ok_or(MvccError::Internal {
+            context: "next_main overflow",
+        })?;
+        state.next_main = next;
+
+        // Release-store: pairs with the Acquire-load in `Range` /
+        // `current_revision`.
+        self.current_main.store(rev.main(), Ordering::Release);
+
+        Ok((deleted, rev))
     }
 }
 
@@ -867,5 +1007,120 @@ mod tests {
         let r = store.range(req).expect("range");
         assert!(r.kvs.is_empty(), "tombstoned key must not appear");
         assert_eq!(r.count, 0);
+    }
+
+    // === DeleteRange (plan §5.4) ===
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn delete_range_returns_count_and_rev() {
+        let store = MvccStore::open(fresh_backend()).expect("open");
+        let _ = store.put(b"a", b"1").await.expect("a");
+        let _ = store.put(b"b", b"2").await.expect("b");
+        let _ = store.put(b"c", b"3").await.expect("c");
+        // Delete [a, c) — covers a and b.
+        let (n, rev) = store.delete_range(b"a", b"c").await.expect("delete");
+        assert_eq!(n, 2);
+        // current was 3 before delete; one main allocated -> 4.
+        assert_eq!(rev.main(), 4);
+        assert_eq!(rev.sub(), 0);
+        assert_eq!(store.current_revision(), 4);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn delete_range_tombstones_each_key_with_ascending_sub() {
+        // S3 of plan §5.4: each tombstoned key consumes one sub,
+        // assigned in `keys_in_order` traversal order starting at 0.
+        let store = MvccStore::open(fresh_backend()).expect("open");
+        let _ = store.put(b"a", b"1").await.expect("a");
+        let _ = store.put(b"b", b"2").await.expect("b");
+        let _ = store.put(b"c", b"3").await.expect("c");
+        let (n, rev) = store.delete_range(b"a", b"d").await.expect("delete");
+        assert_eq!(n, 3);
+        // Confirm each tombstone is present on disk at
+        // (rev.main, sub) for sub in 0..3.
+        let snap = store.backend().snapshot().expect("snapshot");
+        for sub in 0_i64..3 {
+            let key_rev = crate::Revision::new(rev.main(), sub);
+            let enc = crate::encoding::encode_key(key_rev, crate::encoding::KeyKind::Tombstone);
+            let got = snap
+                .get(crate::bucket::KEY_BUCKET_ID, enc.as_bytes())
+                .expect("get");
+            assert_eq!(
+                got.as_deref(),
+                Some(&[0u8][..]),
+                "missing tombstone sentinel at sub {sub}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn delete_range_then_range_at_post_rev_returns_empty() {
+        let store = MvccStore::open(fresh_backend()).expect("open");
+        let _ = store.put(b"k", b"v").await.expect("put");
+        let (n, _) = store.delete_range(b"k", b"").await.expect("delete");
+        assert_eq!(n, 1);
+        // At head (post-tombstone) the key is gone.
+        let r = store.range(req_point(b"k")).expect("range head");
+        assert!(r.kvs.is_empty());
+        assert_eq!(r.count, 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn delete_range_then_range_at_pre_rev_still_returns_value() {
+        // MVCC invariant: a Range at the pre-delete revision still
+        // sees the key. The tombstone applies only at-and-after
+        // the delete's main rev.
+        let store = MvccStore::open(fresh_backend()).expect("open");
+        let put_rev = store.put(b"k", b"v").await.expect("put");
+        let (_, _) = store.delete_range(b"k", b"").await.expect("delete");
+        let req = RangeRequest {
+            key: b"k".to_vec(),
+            revision: Some(put_rev.main()),
+            ..RangeRequest::default()
+        };
+        let r = store.range(req).expect("range pre");
+        assert_eq!(r.kvs.len(), 1);
+        assert_eq!(r.kvs[0].value.as_ref(), b"v");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn delete_range_already_tombstoned_key_excluded_from_count() {
+        let store = MvccStore::open(fresh_backend()).expect("open");
+        let _ = store.put(b"k", b"v").await.expect("put");
+        let (n1, r1) = store.delete_range(b"k", b"").await.expect("delete 1");
+        assert_eq!(n1, 1);
+        // Second delete on the now-tombstoned key matches nothing.
+        let (n2, r2) = store.delete_range(b"k", b"").await.expect("delete 2");
+        assert_eq!(n2, 0);
+        // Zero-match path returns the current head, no main advance.
+        assert_eq!(r2.main(), r1.main());
+        assert_eq!(store.current_revision(), r1.main());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn delete_range_with_empty_end_treats_as_single_key() {
+        let store = MvccStore::open(fresh_backend()).expect("open");
+        let _ = store.put(b"a", b"1").await.expect("a");
+        let _ = store.put(b"b", b"2").await.expect("b");
+        // Empty `end` -> single-key delete of "a" only.
+        let (n, _) = store.delete_range(b"a", b"").await.expect("delete");
+        assert_eq!(n, 1);
+        // "b" is still live.
+        let r = store.range(req_point(b"b")).expect("range b");
+        assert_eq!(r.kvs.len(), 1);
+        assert_eq!(r.kvs[0].value.as_ref(), b"2");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn delete_range_no_match_returns_zero_and_does_not_advance_main() {
+        // S3: empty match set must not allocate a revision.
+        let store = MvccStore::open(fresh_backend()).expect("open");
+        let put_rev = store.put(b"x", b"v").await.expect("put");
+        // Delete [a, c) — no overlap with "x".
+        let (n, rev) = store.delete_range(b"a", b"c").await.expect("delete");
+        assert_eq!(n, 0);
+        assert_eq!(rev.main(), put_rev.main(), "no main advance on zero match");
+        assert_eq!(rev.sub(), 0);
+        assert_eq!(store.current_revision(), put_rev.main());
     }
 }
