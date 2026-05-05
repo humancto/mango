@@ -1,9 +1,11 @@
 //! Writer-serialized state behind the [`super::MvccStore`] writer
 //! lock.
 //!
-//! Holds the monotonic `next_main` allocator. A single instance
-//! lives behind a `tokio::sync::Mutex` on [`super::MvccStore`]; only
-//! the lock holder may read/write the field, so no further
+//! Holds the monotonic `next_main` allocator and the per-write
+//! `emit_buf` watch-event scratch (Phase 3 plan §4.2,
+//! ROADMAP.md:862). A single instance lives behind a
+//! `tokio::sync::Mutex` on [`super::MvccStore`]; only the lock
+//! holder may read/write the fields, so no further
 //! synchronization is required here.
 //!
 //! Sub allocation does not live on `WriterState` because subs
@@ -28,12 +30,24 @@
 pub(crate) struct WriterState {
     /// Next `main` revision to allocate. Monotone; never resets.
     pub(crate) next_main: i64,
+    /// Per-write watch-event scratch buffer. Phase 3 plan §4.2
+    /// (ROADMAP.md:862). Each writer (`put` / `delete_range` /
+    /// `txn`) populates this during the op, then dispatches to the
+    /// observer (if attached) **after** `snapshot.store()` and
+    /// before releasing the writer lock. The buffer is cleared at
+    /// the end of every dispatch so allocations carry across
+    /// writes — the no-observer hot path costs one branch on
+    /// `is_empty()` and one `Vec::clear` on a small Vec.
+    pub(crate) emit_buf: Vec<crate::watchable_store::WatchEvent>,
 }
 
 impl WriterState {
     /// Construct the allocator for a fresh store. `next_main = 1`.
-    pub(crate) const fn new() -> Self {
-        Self { next_main: 1 }
+    pub(crate) fn new() -> Self {
+        Self {
+            next_main: 1,
+            emit_buf: Vec::new(),
+        }
     }
 }
 
@@ -52,5 +66,6 @@ mod tests {
     fn new_starts_at_one() {
         let s = WriterState::new();
         assert_eq!(s.next_main, 1);
+        assert!(s.emit_buf.is_empty(), "fresh emit_buf is empty");
     }
 }

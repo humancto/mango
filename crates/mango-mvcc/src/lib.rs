@@ -34,16 +34,21 @@ pub mod key_history;
 pub mod revision;
 pub mod sharded_key_index;
 pub mod store;
+pub mod watchable_store;
 
 pub use bucket::{
     register, KEY_BUCKET_ID, KEY_BUCKET_NAME, KEY_INDEX_BUCKET_ID, KEY_INDEX_BUCKET_NAME,
 };
 pub use encoding::{decode_key, encode_key, EncodedKey, KeyDecodeError, KeyKind};
-pub use error::{MvccError, OpenError};
+pub use error::{MvccError, OpenError, UnsupportedFeature};
 pub use key_history::{KeyAtRev, KeyHistory, KeyHistoryError, RestoreInvalidReason};
 pub use revision::Revision;
 pub use sharded_key_index::{KeyIndexError, ShardedKeyIndex};
 pub use store::{
     Compare, CompareOp, KeyValue, LeaseId, RangeRequest, RangeResult, RequestOp, ResponseOp,
     Snapshot, TxnRequest, TxnResponse,
+};
+pub use watchable_store::{
+    DisconnectReason, WatchError, WatchEvent, WatchEventKind, WatchStream, WatchableStore,
+    WriteObserver,
 };

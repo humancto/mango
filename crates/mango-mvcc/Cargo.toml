@@ -38,6 +38,17 @@ tokio = { workspace = true, features = ["sync"] }
 # `arc_swap::ArcSwap<Snapshot>` for L846 lock-free snapshot
 # publication. Workspace-blessed; rationale in workspace Cargo.toml.
 arc-swap = { workspace = true }
+# `futures_core::Stream` trait — implemented by `WatchStream` for the
+# Phase 3 watch surface (ROADMAP.md:862, plan §3 / §6). The trait
+# only; we do NOT pull `futures` (executors / utils). Already
+# supply-chain-exempted at supply-chain/config.toml:268.
+futures-core = "0.3"
+# `pin_project_lite::pin_project!` macro for sound projection through
+# `WatchStream` without any user `unsafe`. The macro contains a
+# small, vetted `unsafe` impl invisible to consumers and respects the
+# workspace's `unsafe_code = "forbid"`. Already supply-chain-exempted
+# at supply-chain/config.toml:463.
+pin-project-lite = "0.2"
 # Optional `proptest::Arbitrary`-style strategies for `Revision` and
 # `KeyKind`. Gated so the dep is invisible in default builds. L851's
 # model proptest will turn this on as a dev-dep feature.
