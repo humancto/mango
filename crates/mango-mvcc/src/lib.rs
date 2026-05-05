@@ -34,6 +34,7 @@ pub mod key_history;
 pub mod revision;
 pub mod sharded_key_index;
 pub mod store;
+pub mod watchable_store;
 
 pub use bucket::{
     register, KEY_BUCKET_ID, KEY_BUCKET_NAME, KEY_INDEX_BUCKET_ID, KEY_INDEX_BUCKET_NAME,
@@ -47,3 +48,4 @@ pub use store::{
     Compare, CompareOp, KeyValue, LeaseId, RangeRequest, RangeResult, RequestOp, ResponseOp,
     Snapshot, TxnRequest, TxnResponse,
 };
+pub use watchable_store::{WatchEvent, WatchEventKind, WriteObserver};

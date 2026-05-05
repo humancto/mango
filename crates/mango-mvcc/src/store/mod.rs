@@ -54,6 +54,7 @@ pub use txn::{Compare, CompareOp, RequestOp, ResponseOp, TxnRequest, TxnResponse
 
 use std::collections::{BTreeMap, HashSet};
 use std::ops::Bound;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
@@ -66,6 +67,7 @@ use crate::error::{MvccError, OpenError};
 use crate::key_history::KeyHistoryError;
 use crate::revision::Revision;
 use crate::sharded_key_index::{KeyIndexError, ShardedKeyIndex};
+use crate::watchable_store::WriteObserver;
 
 use self::writer::WriterState;
 
@@ -186,6 +188,34 @@ pub struct MvccStore<B: Backend> {
     /// `load_full -> mutate -> store` pattern is a CAS in spirit
     /// even though `ArcSwap::store` itself is not.
     snapshot: ArcSwap<Snapshot>,
+    /// Single-occupancy observer slot for the Phase 3 Watch
+    /// surface (ROADMAP.md:862). Empty by default (`Arc::new(None)`
+    /// at `open` time); callers attach via
+    /// [`Self::attach_observer`]. The writer hot path will
+    /// dispatch to this observer in commit 2 of the Phase 3 plan;
+    /// this commit lands the slot and the trait only — `put` /
+    /// `delete_range` / `txn` are unchanged.
+    ///
+    /// **Why the `Option<Arc<dyn …>>` wrapper.** `arc_swap`'s
+    /// `RefCnt` impls require the inner type to be `Sized`, so
+    /// `ArcSwapOption<dyn WriteObserver>` does not compile (the
+    /// trait object is unsized). Wrapping in `Option<Arc<…>>`
+    /// behind a single `Arc` keeps the slot `Sized` (an
+    /// `Option<Arc<…>>` is two pointer-sized words) and gives
+    /// readers one `ArcSwap::load` plus a single `match` to test
+    /// presence. The writer hot path's no-observer cost is one
+    /// uncontended atomic load + one branch — bench-validated
+    /// 5 ns range per Phase 3 plan §5.
+    observer: ArcSwap<Option<Arc<dyn WriteObserver>>>,
+    /// CAS gate guarding [`Self::observer`] against double-attach.
+    /// `attach_observer` performs an `AcqRel` `compare_exchange`
+    /// on this flag; only the winning thread proceeds to
+    /// [`ArcSwapOption::store`]. Avoids a TOCTOU window across
+    /// concurrent `attach_observer` calls — single-shot
+    /// callers (the typical `WatchableStore::new` path) pay one
+    /// uncontended atomic, contended callers see deterministic
+    /// `Err`.
+    observer_attached: AtomicBool,
 }
 
 impl<B: Backend> std::fmt::Debug for MvccStore<B> {
@@ -245,7 +275,54 @@ impl<B: Backend> MvccStore<B> {
             keys_in_order,
             writer: tokio::sync::Mutex::new(WriterState::new()),
             snapshot: ArcSwap::from_pointee(Snapshot::empty()),
+            observer: ArcSwap::new(Arc::new(None)),
+            observer_attached: AtomicBool::new(false),
         })
+    }
+
+    /// Attach a [`WriteObserver`] to the store. Single-occupancy:
+    /// the second call returns
+    /// [`MvccError::Internal`] without replacing the existing
+    /// observer.
+    ///
+    /// # Concurrency
+    ///
+    /// The slot is gated by an [`AtomicBool`] CAS
+    /// (`compare_exchange` with `AcqRel` on success / `Acquire` on
+    /// failure). The CAS wins **before** the `ArcSwap::store`, so
+    /// concurrent callers see deterministic outcomes:
+    ///
+    /// - First caller: CAS swings `false → true`, store proceeds.
+    /// - All later callers: CAS observes `true`, returns `Err`
+    ///   without touching the slot.
+    ///
+    /// The `Acquire` on failure ensures the failing caller's read
+    /// of `observer_attached` happens-after the winner's
+    /// `Release` store, which in turn happens-before the
+    /// winner's `ArcSwap::store`. Anyone observing `Err(...)`
+    /// therefore also sees a fully-published observer in the slot.
+    ///
+    /// # Errors
+    ///
+    /// - [`MvccError::Internal`] if the slot is already occupied
+    ///   (`context: "observer slot already occupied"`).
+    pub fn attach_observer(&self, obs: Arc<dyn WriteObserver>) -> Result<(), MvccError> {
+        self.observer_attached
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| MvccError::Internal {
+                context: "observer slot already occupied",
+            })?;
+        self.observer.store(Arc::new(Some(obs)));
+        Ok(())
+    }
+
+    /// Test-only accessor for the observer slot. Used by the
+    /// `attach_observer` smoke test in this module and by the
+    /// commit-2 dispatch tests; does not appear in the public API
+    /// surface.
+    #[cfg(test)]
+    pub(crate) fn observer_is_attached(&self) -> bool {
+        self.observer.load().is_some()
     }
 
     /// Highest fully-published revision. Returns `0` on a fresh
@@ -1456,6 +1533,44 @@ mod tests {
         assert_eq!(store.current_revision(), 0);
         // Multiple loads are stable.
         assert_eq!(store.current_revision(), 0);
+    }
+
+    // === Observer slot (Phase 3 plan §4.1, ROADMAP.md:862) ===
+
+    /// Phase 3 plan §11 test #14. The observer slot is single-
+    /// occupancy; the second `attach_observer` call returns
+    /// `MvccError::Internal` and does NOT replace the existing
+    /// observer.
+    #[test]
+    fn observer_double_attach_rejects() {
+        use crate::error::MvccError;
+        use crate::watchable_store::{WatchEvent, WriteObserver};
+
+        struct Noop;
+        impl WriteObserver for Noop {
+            fn on_apply(&self, _events: &[WatchEvent], _at_main: i64) {}
+        }
+
+        let store = MvccStore::open(fresh_backend()).expect("open");
+        assert!(!store.observer_is_attached(), "fresh store has no observer");
+
+        let first: Arc<dyn WriteObserver> = Arc::new(Noop);
+        store.attach_observer(first).expect("first attach succeeds");
+        assert!(store.observer_is_attached(), "first attach lit the slot");
+
+        let second: Arc<dyn WriteObserver> = Arc::new(Noop);
+        let err = store
+            .attach_observer(second)
+            .expect_err("second attach must reject");
+        match err {
+            MvccError::Internal { context } => {
+                assert_eq!(context, "observer slot already occupied");
+            }
+            other => panic!("expected Internal, got {other:?}"),
+        }
+        // Slot still holds the first observer (not the rejected
+        // second one).
+        assert!(store.observer_is_attached());
     }
 
     // === Put (plan §5.2) ===
