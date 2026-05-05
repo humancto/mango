@@ -42,7 +42,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use mango_mvcc::store::range::RangeRequest;
 use mango_mvcc::store::MvccStore;
-use mango_mvcc::{DisconnectReason, MvccError, WatchError, WatchEventKind, WatchableStore};
+use mango_mvcc::{DisconnectReason, WatchError, WatchEventKind, WatchableStore};
 use mango_storage::{Backend, BackendConfig, InMemBackend};
 use tokio::time::timeout;
 
@@ -378,19 +378,28 @@ async fn range_query_after_event_delivery_is_consistent() {
     assert_eq!(res.kvs[0].mod_revision.main(), 1);
 }
 
-/// Phase 3 plan §11 test #7 redux at integration level — the unit
-/// test exercises the same path but goes through the public API
-/// surface here for completeness.
+/// L863 integration smoke. `start_rev <= current_revision()` is now
+/// accepted: the watcher is registered into the unsynced group and
+/// the catch-up driver delivers the prior write before any new
+/// events. The full catch-up matrix lives in `tests/watch_catchup.rs`;
+/// this test stays in `watch_basic` as a quick regression guard.
 #[tokio::test(flavor = "current_thread")]
-async fn start_rev_below_current_returns_unsupported_integration() {
+async fn start_rev_below_current_registers_unsynced_integration() {
     let store = open();
     store.put(b"a", b"v").await.expect("seed");
     let ws = WatchableStore::new(Arc::clone(&store)).expect("new");
     // current_revision() is 1; start_rev = 1 satisfies `<= current`.
-    let err = ws
+    let mut s = ws
         .watch(Bytes::from_static(b"a"), Bytes::new(), 1)
-        .expect_err("rejected");
-    assert!(matches!(err, MvccError::Unsupported(_)), "got {err:?}");
+        .expect("unsynced watcher accepted");
+    let ev = timeout(Duration::from_millis(500), s.recv())
+        .await
+        .expect("catch-up event delivered before timeout")
+        .expect("channel open")
+        .expect("Ok event");
+    assert_eq!(ev.kind, WatchEventKind::Put);
+    assert_eq!(ev.key, Bytes::from_static(b"a"));
+    assert_eq!(ev.revision.main(), 1);
 }
 
 /// Phase 3 plan §11 test #12 (`slow_consumer_disconnect_emits_signal`).

@@ -52,7 +52,7 @@ pub use range::{KeyValue, RangeRequest, RangeResult};
 pub use snapshot::Snapshot;
 pub use txn::{Compare, CompareOp, RequestOp, ResponseOp, TxnRequest, TxnResponse};
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Bound;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -64,7 +64,7 @@ use mango_storage::{Backend, ReadSnapshot, WriteBatch};
 use crate::bucket::{register, KEY_BUCKET_ID};
 use crate::encoding::{decode_key, encode_key, KeyKind};
 use crate::error::{MvccError, OpenError};
-use crate::key_history::KeyHistoryError;
+use crate::key_history::{KeyAtRev, KeyEventKind, KeyHistoryError};
 use crate::revision::Revision;
 use crate::sharded_key_index::{KeyIndexError, ShardedKeyIndex};
 use crate::watchable_store::{WatchEvent, WatchEventKind, WriteObserver};
@@ -118,19 +118,66 @@ enum OpPlan {
         value: Vec<u8>,
         /// Allocated revision for this put.
         rev: Revision,
+        /// Pre-mutation prev-kv for this put: the live version of
+        /// `key` immediately before this op runs (or `None` if
+        /// the key was absent / tombstoned). Captured BEFORE any
+        /// in-flight or persisted index mutation, so emit-side
+        /// consumers see the right value even when an earlier op
+        /// in the same txn already overwrote `key`.
+        ///
+        /// Phase 3 plan §4.6 (ROADMAP.md:863): emitted as-is by
+        /// [`emit_txn_events`].
+        prev: Option<KeyValue>,
     },
     /// Zero or more sub-allocated tombstones for a single
     /// [`RequestOp::DeleteRange`]. Empty when no live keys
     /// matched (the op contributes no physical writes).
     Delete {
-        /// `(matched_key, allocated_rev)` pairs in match order.
+        /// One [`Tombstone`] per matched key, in match order.
         tombs: Vec<Tombstone>,
     },
 }
 
-/// One matched-key / allocated-revision pair inside an
-/// [`OpPlan::Delete`] entry.
-type Tombstone = (Box<[u8]>, Revision);
+/// One matched key inside an [`OpPlan::Delete`] entry.
+///
+/// Phase 3 plan §4.6 (ROADMAP.md:863): carries the pre-mutation
+/// `prev` [`KeyValue`] so the watch emit path can publish a
+/// `WatchEvent::Delete { prev: Some(...) }` without re-querying a
+/// post-mutation index. Tombstones are only emitted for live keys,
+/// so `prev` is unconditionally present.
+struct Tombstone {
+    /// Matched user key.
+    key: Box<[u8]>,
+    /// Allocated revision for this tombstone (`(txn_main, sub)`).
+    rev: Revision,
+    /// Pre-mutation prev-kv: the live version of `key`
+    /// immediately before this tombstone runs. Captured BEFORE
+    /// any index mutation by [`MvccStore::delete_range`] /
+    /// [`MvccStore::build_txn_plan`] and emitted **as-is** by
+    /// [`emit_txn_events`] — no second snapshot or index lookup
+    /// runs on the writer hot path.
+    prev: KeyValue,
+}
+
+/// In-flight per-txn key state used by [`MvccStore::build_txn_plan`]
+/// to resolve `prev_kv` against the most-recent in-flight op rather
+/// than the (post-mutation) index. Phase 3 plan §4.6.
+///
+/// - `Some(Some(kv))` — the key is live with this in-flight value
+///   (a same-txn `Put` overwrote the prior version).
+/// - `Some(None)` — the key was tombstoned earlier in this txn.
+/// - absent — the key has not been touched by any prior op in this
+///   txn; resolve `prev` against the pre-txn index via
+///   [`MvccStore::compute_prev_kv_strict`].
+///
+/// Consulted **only** for `prev_kv` resolution. The `DeleteRange`
+/// match-set is computed against the pre-txn `keys_in_order`
+/// snapshot, exactly as before — same-branch put-then-delete-of-
+/// new-key continues to be a no-op on the second op (existing
+/// documented contract; see [`MvccStore::txn`]).
+struct TentativeState {
+    live: HashMap<Box<[u8]>, Option<KeyValue>>,
+}
 
 /// Increment a per-txn `sub` allocator with overflow surfaced as
 /// [`MvccError::Internal`]. Workspace `arithmetic_side_effects`
@@ -156,33 +203,46 @@ fn checked_add_total(total: usize) -> Result<usize, MvccError> {
 ///
 /// - [`OpPlan::Read`] — no event (read-only ops are not observable).
 /// - [`OpPlan::Put`] — one [`WatchEventKind::Put`] event with
-///   `revision = rev` from the plan entry.
+///   `revision = rev` from the plan entry. `prev` is the captured
+///   pre-mutation [`KeyValue`] (see [`OpPlan::Put.prev`]) — `None`
+///   if the key was absent or tombstoned at the moment the plan was
+///   built.
 /// - [`OpPlan::Delete`] — one [`WatchEventKind::Delete`] event per
-///   `(key, rev)` pair in `tombs`, in match order; `value` is empty.
+///   [`Tombstone`] in `tombs`, in match order; `value` is empty.
+///   `prev` is the tombstone's captured pre-mutation [`KeyValue`]
+///   wrapped in `Some` — tombstones are only emitted for live keys,
+///   so the prev-kv is unconditionally present.
 ///
-/// `prev` is `None` on every event in this PR (populated in
-/// ROADMAP.md:863).
+/// Phase 3 plan §4.6 / §6 (ROADMAP.md:863): the captured prev-kvs
+/// are emitted *as-is* — no second backend or index lookup runs on
+/// the writer's hot path. INVARIANT X is asserted at the call site
+/// in [`MvccStore::commit_txn_batch`].
 fn emit_txn_events(plan: &[OpPlan], buf: &mut Vec<WatchEvent>) {
     for entry in plan {
         match entry {
             OpPlan::Read => {}
-            OpPlan::Put { key, value, rev } => {
+            OpPlan::Put {
+                key,
+                value,
+                rev,
+                prev,
+            } => {
                 buf.push(WatchEvent {
                     kind: WatchEventKind::Put,
                     key: Bytes::copy_from_slice(key),
                     value: Bytes::copy_from_slice(value),
-                    prev: None,
+                    prev: prev.clone(),
                     revision: *rev,
                 });
             }
             OpPlan::Delete { tombs } => {
-                for (k, key_rev) in tombs {
+                for tomb in tombs {
                     buf.push(WatchEvent {
                         kind: WatchEventKind::Delete,
-                        key: Bytes::copy_from_slice(k),
+                        key: Bytes::copy_from_slice(&tomb.key),
                         value: Bytes::new(),
-                        prev: None,
-                        revision: *key_rev,
+                        prev: Some(tomb.prev.clone()),
+                        revision: tomb.rev,
                     });
                 }
             }
@@ -383,6 +443,18 @@ impl<B: Backend> MvccStore<B> {
     /// allocation amortizes across writes. The no-observer hot
     /// path is one `Vec::is_empty()` branch + one `ArcSwap::load`
     /// + one `match` + one `Vec::clear`.
+    ///
+    /// INVARIANT W (load-bearing — see `watchable_store.rs` §4.4
+    /// catch-up race proof, ROADMAP.md:863):
+    /// `snapshot.store(new_snap)` and the `obs.on_apply(...)`
+    /// call below MUST run under the same writer-mutex
+    /// acquisition with NO `.await` point between them. The
+    /// catch-up `promote_to_synced` race-proof depends on this
+    /// sequencing. Splitting these calls (e.g. by adding an
+    /// `.await` between them, or by moving `snapshot.store` out
+    /// of the writer-mutex critical section) BREAKS the
+    /// catch-up correctness proof. If you must change this,
+    /// re-derive the proof.
     fn dispatch_observer(&self, emit_buf: &mut Vec<WatchEvent>, at_main: i64) {
         if !emit_buf.is_empty() {
             let observer = self.observer.load();
@@ -434,6 +506,214 @@ impl<B: Backend> MvccStore<B> {
         &self.backend
     }
 
+    /// Acquire a coherent `(mvcc_snap, backend_snap)` pair under
+    /// the writer mutex.
+    ///
+    /// Phase 3 plan §4.5 (ROADMAP.md:863). Both snapshots observe
+    /// the same point in time with respect to concurrent writes —
+    /// most importantly [`Self::compact`], whose on-disk delete
+    /// (`commit_batch`) and `snapshot.store(new_floor)` happen
+    /// inside its own writer-lock hold. Acquiring the writer lock
+    /// here means the catch-up driver either sees the pre-compact
+    /// state or the post-compact state, never a torn pair.
+    ///
+    /// The Mvcc snapshot's `rev` is the upper bound for the
+    /// catch-up scan; `compacted` is the floor. Caller reads both
+    /// from this single returned `Arc<Snapshot>` (rust-expert nit
+    /// 3 of v3 review: don't re-load `self.snapshot` after the
+    /// pair is taken).
+    ///
+    /// Cost: one `tokio::sync::Mutex` acquisition + one
+    /// [`ArcSwap::load_full`] + one [`Backend::snapshot`]. The
+    /// writer is stalled for the duration of those three steps;
+    /// on redb the backend snapshot is a single `begin_read()` in
+    /// the µs range, so the stall is bounded. Catch-up driver
+    /// caps total scan attempts at `MAX_CATCHUP_ATTEMPTS` so the
+    /// total stall budget per watcher is bounded.
+    ///
+    /// # Errors
+    ///
+    /// - [`MvccError::Backend`] if `Backend::snapshot()` fails.
+    pub(crate) async fn snapshot_pair_under_writer(
+        &self,
+    ) -> Result<(Arc<Snapshot>, B::Snapshot), MvccError> {
+        let _guard = self.writer.lock().await;
+        let mvcc = self.snapshot.load_full();
+        let be = self.backend.snapshot()?;
+        Ok((mvcc, be))
+    }
+
+    /// Pre-mutation prev-kv lookup: the live version of `key`
+    /// strictly before `at_rev`, materialised as a [`KeyValue`]
+    /// against the on-disk snapshot `snap_be`.
+    ///
+    /// Phase 3 plan §3.4 / §4.6 (ROADMAP.md:863). Walks the index
+    /// via [`ShardedKeyIndex::get_strict_lt`] (which crosses
+    /// generations, skipping the closing tombstone), then
+    /// resolves the value bytes from `snap_be`. Returns `None` if
+    /// no prior live revision exists in any generation.
+    ///
+    /// This is the building block for `prev_kv` population on the
+    /// writer hot path (`put`, `delete_range`, `txn`) and on the
+    /// catch-up scan path. The caller threads ONE
+    /// [`Backend::snapshot`] through every prev-kv computation in
+    /// a single writer call, amortising the snapshot cost across
+    /// `N` matched keys.
+    ///
+    /// # Errors
+    ///
+    /// - [`MvccError::KeyIndex`] if the index lookup fails for a
+    ///   reason other than `KeyNotFound` /
+    ///   `History(RevisionNotFound)` (those two are the absent
+    ///   path — not errors here).
+    /// - [`MvccError::Backend`] if the on-disk value fetch fails.
+    pub(crate) fn compute_prev_kv_strict(
+        &self,
+        key: &[u8],
+        at_rev: Revision,
+        snap_be: &B::Snapshot,
+    ) -> Result<Option<KeyValue>, MvccError> {
+        let at = match self.index.get_strict_lt(key, at_rev) {
+            Ok(Some(at)) => at,
+            // Both "no entry" and "no strict-lt predecessor" are
+            // the absent path — return None, not Err.
+            Ok(None)
+            | Err(
+                KeyIndexError::KeyNotFound
+                | KeyIndexError::History(KeyHistoryError::RevisionNotFound),
+            ) => return Ok(None),
+            Err(e) => return Err(MvccError::KeyIndex(e)),
+        };
+        let enc = encode_key(at.modified, KeyKind::Put);
+        let value = snap_be
+            .get(KEY_BUCKET_ID, enc.as_bytes())?
+            .unwrap_or_default();
+        Ok(Some(KeyValue {
+            key: Bytes::copy_from_slice(key),
+            create_revision: at.created,
+            mod_revision: at.modified,
+            version: at.version,
+            value,
+            lease: None,
+        }))
+    }
+
+    /// Catch-up scan over `[range_start, range_end)` for revisions
+    /// `rev.main() in [lo, hi]`, against the writer-locked
+    /// `(mvcc_snap, snap_be)` pair.
+    ///
+    /// Phase 3 plan §4.5 (ROADMAP.md:863). Used by the unsynced
+    /// watcher's catch-up driver to replay history events between
+    /// `start_rev` (the watcher's requested floor) and `mvcc_snap.rev`
+    /// (the upper bound captured under the writer mutex).
+    ///
+    /// `range_end.is_empty()` selects the single-key case.
+    ///
+    /// Events are emitted in `(rev.main, rev.sub)` ascending order
+    /// across the matched key set — etcd parity. Within one key the
+    /// per-key history walk already yields revs in ascending order
+    /// (`ShardedKeyIndex::events_in_range`); across keys we sort the
+    /// merged list once at the end.
+    ///
+    /// `prev_kv` is computed for every event via
+    /// [`Self::compute_prev_kv_strict`] against the same `snap_be`,
+    /// matching the writer hot path's contract: `Put` events carry
+    /// `Some(...)` only when a strictly-prior live version exists in
+    /// any generation; `Delete` events always carry `Some(...)`
+    /// (tombstones close a live generation).
+    ///
+    /// # Compaction guard
+    ///
+    /// Returns [`MvccError::Compacted`] when `mvcc_snap.compacted >= lo`.
+    /// The driver maps this to a terminal
+    /// `DisconnectReason::Compacted { floor }`.
+    ///
+    /// # Empty / inverted range
+    ///
+    /// Returns `Ok(Vec::new())` when `lo > hi`. The caller treats
+    /// this as "no events to send this iteration; check for promote".
+    ///
+    /// # Errors
+    ///
+    /// - [`MvccError::Compacted`] if the floor advanced past `lo`.
+    /// - [`MvccError::KeyIndex`] / [`MvccError::Backend`] surfaced
+    ///   verbatim — the driver maps these to a terminal
+    ///   `DisconnectReason::Internal` so the watcher sees a typed
+    ///   reason rather than a silent abort.
+    pub(crate) fn catchup_scan(
+        &self,
+        range_start: &[u8],
+        range_end: &[u8],
+        lo: i64,
+        hi: i64,
+        mvcc_snap: &Snapshot,
+        snap_be: &B::Snapshot,
+    ) -> Result<Vec<WatchEvent>, MvccError> {
+        if lo > hi {
+            return Ok(Vec::new());
+        }
+        if mvcc_snap.compacted >= lo {
+            return Err(MvccError::Compacted {
+                requested: lo,
+                floor: mvcc_snap.compacted,
+            });
+        }
+
+        // Snapshot the matched-keys list. Drop the read lock before
+        // any backend / index work so writers are not blocked across
+        // the per-key event walk.
+        let matched: Vec<Box<[u8]>> = {
+            let keys = self.keys_in_order.read();
+            if range_end.is_empty() {
+                if keys.contains_key(range_start) {
+                    vec![range_start.into()]
+                } else {
+                    Vec::new()
+                }
+            } else {
+                keys.range::<[u8], _>((Bound::Included(range_start), Bound::Excluded(range_end)))
+                    .map(|(k, ())| k.clone())
+                    .collect()
+            }
+        };
+
+        let mut events: Vec<WatchEvent> = Vec::new();
+        for key in &matched {
+            let key_events = self.index.events_in_range(key, lo, hi);
+            for (rev, kind) in key_events {
+                let watch_kind = match kind {
+                    KeyEventKind::Put => WatchEventKind::Put,
+                    KeyEventKind::Tombstone => WatchEventKind::Delete,
+                };
+                let value = match watch_kind {
+                    WatchEventKind::Put => {
+                        let enc = encode_key(rev, KeyKind::Put);
+                        snap_be
+                            .get(KEY_BUCKET_ID, enc.as_bytes())?
+                            .unwrap_or_default()
+                    }
+                    WatchEventKind::Delete => Bytes::new(),
+                };
+                let prev = self.compute_prev_kv_strict(key, rev, snap_be)?;
+                events.push(WatchEvent {
+                    kind: watch_kind,
+                    key: Bytes::copy_from_slice(key),
+                    value,
+                    prev,
+                    revision: rev,
+                });
+            }
+        }
+
+        // Cross-key merge: ascending by (main, sub). Within one key
+        // the per-key walk already produces this order; across keys
+        // we resort the combined list. `sort_by` is stable so equal
+        // revisions (impossible by construction — a single rev maps
+        // to one key) keep their input order.
+        events.sort_by(|a, b| a.revision.cmp(&b.revision));
+        Ok(events)
+    }
+
     /// Single-key put.
     ///
     /// Allocates one `main` revision (sub = 0) and persists the
@@ -469,6 +749,15 @@ impl<B: Backend> MvccStore<B> {
     pub async fn put(&self, key: &[u8], value: &[u8]) -> Result<Revision, MvccError> {
         let mut state = self.writer.lock().await;
         let rev = Revision::new(state.next_main, 0);
+
+        // Phase 3 plan §4.6 (ROADMAP.md:863): capture pre-mutation
+        // prev-kv BEFORE `index.put` runs. ONE backend snapshot is
+        // taken per writer call; cost amortises over the read-then-
+        // emit path. `None` if the key was absent or tombstoned.
+        let prev_kv = {
+            let snap_be = self.backend.snapshot()?;
+            self.compute_prev_kv_strict(key, rev, &snap_be)?
+        };
 
         let mut batch = self.backend.begin_batch()?;
         let encoded = encode_key(rev, KeyKind::Put);
@@ -519,13 +808,17 @@ impl<B: Backend> MvccStore<B> {
 
         // Phase 3 plan §4.2 (ROADMAP.md:862): synthesize the watch
         // event before snapshot publication so the buffer is ready
-        // to dispatch immediately after `snapshot.store()`. `prev`
-        // is `None` here — populated in ROADMAP.md:863.
+        // to dispatch immediately after `snapshot.store()`.
+        //
+        // INVARIANT X (Phase 3 plan §4.6 / §6, ROADMAP.md:863):
+        // `prev_kv` was resolved above against a `Backend::snapshot`
+        // taken before any index mutation; no second backend or
+        // index lookup runs on the emit path.
         state.emit_buf.push(WatchEvent {
             kind: WatchEventKind::Put,
             key: Bytes::copy_from_slice(key),
             value: Bytes::copy_from_slice(value),
-            prev: None,
+            prev: prev_kv,
             revision: rev,
         });
 
@@ -783,13 +1076,15 @@ impl<B: Backend> MvccStore<B> {
             }
         };
 
-        // Step 4: filter to keys live at `current` — already-
-        // tombstoned keys must not consume a sub or appear on disk
-        // a second time.
-        let mut matched: Vec<Box<[u8]>> = Vec::with_capacity(candidates.len());
+        // Step 4: filter to keys live at `current` and CAPTURE
+        // their pre-mutation `KeyAtRev` so prev-kv resolution does
+        // not have to re-query a post-mutation index. Phase 3
+        // plan §4.6 (ROADMAP.md:863). Already-tombstoned keys
+        // must not consume a sub or appear on disk a second time.
+        let mut matched: Vec<(Box<[u8]>, KeyAtRev)> = Vec::with_capacity(candidates.len());
         for k in candidates {
             match self.index.get(&k, current) {
-                Ok(_) => matched.push(k),
+                Ok(at) => matched.push((k, at)),
                 // Already tombstoned at `current` (or before).
                 Err(KeyIndexError::History(KeyHistoryError::RevisionNotFound)) => {}
                 Err(KeyIndexError::KeyNotFound) => {
@@ -810,6 +1105,31 @@ impl<B: Backend> MvccStore<B> {
             return Ok((0, Revision::new(current, 0)));
         }
 
+        // Phase 3 plan §4.6 (ROADMAP.md:863): capture `prev` from
+        // a pre-mutation backend snapshot BEFORE any index update.
+        // Tombstones target live keys only, so every match has a
+        // prev value. ONE snapshot per writer call amortises the
+        // cost across N matches. The captured prev is plumbed onto
+        // each `Tombstone` for commit 3 of the L863 series to
+        // surface on the watch path; this commit only captures.
+        let snap_be = self.backend.snapshot()?;
+        let mut prev_kvs: Vec<KeyValue> = Vec::with_capacity(matched.len());
+        for (k, at) in &matched {
+            let enc = encode_key(at.modified, KeyKind::Put);
+            let value = snap_be
+                .get(KEY_BUCKET_ID, enc.as_bytes())?
+                .unwrap_or_default();
+            prev_kvs.push(KeyValue {
+                key: Bytes::copy_from_slice(k),
+                create_revision: at.created,
+                mod_revision: at.modified,
+                version: at.version,
+                value,
+                lease: None,
+            });
+        }
+        drop(snap_be);
+
         // Step 7+: allocate a single main; sub increments per
         // physical write.
         let rev = Revision::new(state.next_main, 0);
@@ -818,16 +1138,21 @@ impl<B: Backend> MvccStore<B> {
         let mut sub: i64 = 0;
         // Pair each key with the rev it gets tombstoned at, so the
         // post-commit `index.tombstone` calls reuse the on-disk
-        // assignments verbatim.
+        // assignments verbatim. `prev` rides along on each
+        // [`Tombstone`] for the L863 emit-side wiring (commit 3).
         let mut tombstones: Vec<Tombstone> = Vec::with_capacity(matched.len());
-        for k in matched {
+        for ((k, _at), prev) in matched.into_iter().zip(prev_kvs.into_iter()) {
             let key_rev = Revision::new(rev.main(), sub);
             let encoded = encode_key(key_rev, KeyKind::Tombstone);
             batch.put(KEY_BUCKET_ID, encoded.as_bytes(), TOMBSTONE_VALUE)?;
             sub = sub.checked_add(1).ok_or(MvccError::Internal {
                 context: "delete_range sub overflow",
             })?;
-            tombstones.push((k, key_rev));
+            tombstones.push(Tombstone {
+                key: k,
+                rev: key_rev,
+                prev,
+            });
         }
         // No fsync — Raft's WAL above us owns durability (parity
         // with `Put`).
@@ -838,8 +1163,8 @@ impl<B: Backend> MvccStore<B> {
         // (review item R3). `index.tombstone` returning `Err` would
         // indicate the writer-lock invariant is broken (plan
         // §5.4 review item S3).
-        for (k, key_rev) in &tombstones {
-            if let Err(_e) = self.index.tombstone(k, *key_rev) {
+        for tomb in &tombstones {
+            if let Err(_e) = self.index.tombstone(&tomb.key, tomb.rev) {
                 return Err(MvccError::Internal {
                     context: "index.tombstone failed under writer-lock invariant",
                 });
@@ -858,14 +1183,23 @@ impl<B: Backend> MvccStore<B> {
         // Phase 3 plan §4.2 (ROADMAP.md:862): one Delete event per
         // tombstoned key, in match order, sub-revision matching the
         // on-disk assignment. `value` is empty for Delete; `prev`
-        // is `None` (populated in ROADMAP.md:863).
-        for (k, key_rev) in &tombstones {
+        // rides through verbatim from the capture above.
+        //
+        // INVARIANT X (Phase 3 plan §4.6 / §6, ROADMAP.md:863):
+        // every `prev` here was resolved against the single
+        // pre-mutation `Backend::snapshot` taken upstream, before
+        // `index.tombstone` mutated the index. The emit path
+        // performs no second backend or index lookup. Holds because
+        // the snapshot was dropped before the index mutation, and
+        // no path between capture and emit mutates the captured
+        // KeyValues.
+        for tomb in &tombstones {
             state.emit_buf.push(WatchEvent {
                 kind: WatchEventKind::Delete,
-                key: Bytes::copy_from_slice(k),
+                key: Bytes::copy_from_slice(&tomb.key),
                 value: Bytes::new(),
-                prev: None,
-                revision: *key_rev,
+                prev: Some(tomb.prev.clone()),
+                revision: tomb.rev,
             });
         }
 
@@ -983,6 +1317,20 @@ impl<B: Backend> MvccStore<B> {
         // contributes nothing). Sub-revisions match the on-disk
         // assignments inside `OpPlan::Put.rev` / the `tombs`
         // pairs, so commit-revision ordering is preserved.
+        //
+        // INVARIANT X (Phase 3 plan §4.6 / §6, ROADMAP.md:863):
+        // every WatchEvent appended here carries the prev-kv that
+        // was captured by `delete_range` / `build_txn_plan` BEFORE
+        // any index mutation ran. The emit path performs no second
+        // backend or index lookup — `prev` is read straight off the
+        // OpPlan / Tombstone. Holds because `apply_txn_in_mem` (the
+        // step that mutates the index and `keys_in_order`) ran
+        // above on this committed plan; the captured prevs were
+        // resolved before that, against the snapshot taken inside
+        // `build_txn_plan`'s single `Backend::snapshot` call (or
+        // the in-flight `TentativeState` for same-branch
+        // overwrites). No call site between capture and emit
+        // mutates the captured KeyValues.
         emit_txn_events(&plan, &mut state.emit_buf);
 
         let next = state.next_main.checked_add(1).ok_or(MvccError::Internal {
@@ -1018,6 +1366,23 @@ impl<B: Backend> MvccStore<B> {
     /// `DeleteRange`'s match set is computed against the pre-txn
     /// `keys_in_order` snapshot (see `txn` doc, intra-branch
     /// visibility caveat).
+    ///
+    /// Phase 3 plan §4.6 (ROADMAP.md:863): the pass also captures
+    /// `prev_kv` for each physical write into the [`OpPlan`]
+    /// entries. A [`TentativeState`] map threads in-flight
+    /// updates across ops within the same branch so a `Put`
+    /// following an earlier `Put` of the same key sees the
+    /// in-flight value (NOT the post-mutation index) as its
+    /// `prev`. The map is consulted **only** for prev-kv
+    /// resolution; the `DeleteRange` match-set continues to be
+    /// computed against pre-txn `keys_in_order` exactly as
+    /// before. ONE [`Backend::snapshot`] per call amortises
+    /// snapshot cost across N matched keys.
+    ///
+    /// Captured `prev`s are plumbed onto [`OpPlan::Put`] /
+    /// [`Tombstone`] but not yet wired into emitted
+    /// [`WatchEvent`]s — that ride lands in commit 3 of the L863
+    /// series.
     fn build_txn_plan(
         &self,
         branch: &[RequestOp],
@@ -1027,22 +1392,55 @@ impl<B: Backend> MvccStore<B> {
         let mut plan: Vec<OpPlan> = Vec::with_capacity(branch.len());
         let mut sub: i64 = 0;
         let mut total: usize = 0;
+        let mut tentative = TentativeState {
+            live: HashMap::with_capacity(branch.len()),
+        };
+        // Acquire the prev-kv snapshot lazily so the read-only
+        // path (no Puts, no live DeleteRange matches) does not pay
+        // the snapshot cost. Constructed on first need.
+        let mut snap_be: Option<B::Snapshot> = None;
         for op in branch {
             match op {
                 RequestOp::Range(_) => plan.push(OpPlan::Read),
                 RequestOp::Put { key, value } => {
                     let rev = Revision::new(txn_main, sub);
+                    let prev =
+                        self.compute_txn_op_prev_for_put(key, rev, &tentative, &mut snap_be)?;
+                    // Tentative state: the just-pushed Put makes
+                    // the key live with `value` (the in-flight
+                    // version). Build a synthetic `KeyValue` so a
+                    // later op in the same txn that wants `prev`
+                    // resolves against this in-flight write
+                    // instead of the post-mutation index.
+                    let new_kv = KeyValue {
+                        key: Bytes::copy_from_slice(key),
+                        create_revision: prev.as_ref().map_or(rev, |p| p.create_revision),
+                        mod_revision: rev,
+                        version: prev.as_ref().map_or(1, |p| p.version.saturating_add(1)),
+                        value: Bytes::copy_from_slice(value),
+                        lease: None,
+                    };
+                    let _ = tentative.live.insert(key.as_slice().into(), Some(new_kv));
                     sub = checked_add_sub(sub)?;
                     total = checked_add_total(total)?;
                     plan.push(OpPlan::Put {
                         key: key.clone(),
                         value: value.clone(),
                         rev,
+                        prev,
                     });
                 }
                 RequestOp::DeleteRange { key, end } => {
-                    let tombs =
-                        self.plan_delete_range(key, end, current, txn_main, &mut sub, &mut total)?;
+                    let tombs = self.plan_delete_range(
+                        key,
+                        end,
+                        current,
+                        txn_main,
+                        &mut sub,
+                        &mut total,
+                        &mut tentative,
+                        &mut snap_be,
+                    )?;
                     plan.push(OpPlan::Delete { tombs });
                 }
             }
@@ -1050,11 +1448,51 @@ impl<B: Backend> MvccStore<B> {
         Ok((plan, total))
     }
 
+    /// Resolve `prev` for a single `Put` op inside
+    /// [`Self::build_txn_plan`]: prefer the in-flight tentative
+    /// state, fall back to the pre-txn index via
+    /// [`Self::compute_prev_kv_strict`]. Lazily builds `snap_be`
+    /// on first use so a Range-only branch never acquires a
+    /// backend snapshot.
+    fn compute_txn_op_prev_for_put(
+        &self,
+        key: &[u8],
+        at_rev: Revision,
+        tentative: &TentativeState,
+        snap_be: &mut Option<B::Snapshot>,
+    ) -> Result<Option<KeyValue>, MvccError> {
+        match tentative.live.get(key) {
+            Some(Some(prior)) => Ok(Some(prior.clone())),
+            Some(None) => Ok(None),
+            None => {
+                if snap_be.is_none() {
+                    *snap_be = Some(self.backend.snapshot()?);
+                }
+                let snap_ref = snap_be.as_ref().ok_or(MvccError::Internal {
+                    context: "txn snap_be construction logic inconsistency",
+                })?;
+                self.compute_prev_kv_strict(key, at_rev, snap_ref)
+            }
+        }
+    }
+
     /// Compute the matched-key/sub list for a single
     /// [`RequestOp::DeleteRange`] under the writer lock. Filters
     /// already-tombstoned keys (review item S3); allocates one
     /// sub per surviving match and bumps the running sub /
     /// total counters.
+    ///
+    /// Phase 3 plan §4.6 (ROADMAP.md:863): also resolves `prev`
+    /// per match via the supplied [`TentativeState`] (in-flight
+    /// state from earlier ops in the same txn) and falls back to
+    /// the pre-txn index when a match was not touched. A match
+    /// whose tentative state is `Some(None)` (already deleted
+    /// in-flight by a prior op in this txn) is skipped — the
+    /// second tombstone of an already-tombstoned key would
+    /// previously have been rejected by `index.tombstone` at
+    /// apply time as `TombstoneOnEmpty`, so the new path also
+    /// fixes that latent error case.
+    #[allow(clippy::too_many_arguments)]
     fn plan_delete_range(
         &self,
         key: &[u8],
@@ -1063,6 +1501,8 @@ impl<B: Backend> MvccStore<B> {
         txn_main: i64,
         sub: &mut i64,
         total: &mut usize,
+        tentative: &mut TentativeState,
+        snap_be: &mut Option<B::Snapshot>,
     ) -> Result<Vec<Tombstone>, MvccError> {
         let candidates: Vec<Box<[u8]>> = {
             let keys = self.keys_in_order.read();
@@ -1081,13 +1521,54 @@ impl<B: Backend> MvccStore<B> {
         let mut tombs: Vec<Tombstone> = Vec::with_capacity(candidates.len());
         for k in candidates {
             match self.index.get(&k, current) {
-                Ok(_) => {
+                Ok(at) => {
+                    let prev = match tentative.live.get(k.as_ref()) {
+                        Some(Some(prior)) => prior.clone(),
+                        Some(None) => {
+                            // Already deleted in-flight earlier
+                            // in this txn — skip the second
+                            // tombstone (would otherwise hit
+                            // `KeyHistory::TombstoneOnEmpty` at
+                            // apply time).
+                            continue;
+                        }
+                        None => {
+                            // Resolve from pre-txn state via the
+                            // shared backend snapshot. Lazy on
+                            // first need.
+                            if snap_be.is_none() {
+                                *snap_be = Some(self.backend.snapshot()?);
+                            }
+                            let snap_ref = snap_be.as_ref().ok_or(MvccError::Internal {
+                                context: "txn snap_be construction logic inconsistency",
+                            })?;
+                            let enc = encode_key(at.modified, KeyKind::Put);
+                            let value = snap_ref
+                                .get(KEY_BUCKET_ID, enc.as_bytes())?
+                                .unwrap_or_default();
+                            KeyValue {
+                                key: Bytes::copy_from_slice(&k),
+                                create_revision: at.created,
+                                mod_revision: at.modified,
+                                version: at.version,
+                                value,
+                                lease: None,
+                            }
+                        }
+                    };
                     let rev = Revision::new(txn_main, *sub);
                     *sub = checked_add_sub(*sub)?;
                     *total = checked_add_total(*total)?;
-                    tombs.push((k, rev));
+                    let _ = tentative.live.insert(k.clone(), None);
+                    tombs.push(Tombstone { key: k, rev, prev });
                 }
-                Err(KeyIndexError::History(KeyHistoryError::RevisionNotFound)) => {}
+                Err(KeyIndexError::History(KeyHistoryError::RevisionNotFound)) => {
+                    // Already tombstoned at `current` (or before)
+                    // by some PRIOR txn — silently skip exactly
+                    // as `delete_range` does. We do NOT update
+                    // tentative state: the key was never live in
+                    // this txn's branch.
+                }
                 Err(KeyIndexError::KeyNotFound) => {
                     return Err(MvccError::Internal {
                         context: "index/keys_in_order disagree on key presence",
@@ -1111,8 +1592,8 @@ impl<B: Backend> MvccStore<B> {
                     batch.put(KEY_BUCKET_ID, encoded.as_bytes(), value)?;
                 }
                 OpPlan::Delete { tombs } => {
-                    for (_, rev) in tombs {
-                        let encoded = encode_key(*rev, KeyKind::Tombstone);
+                    for tomb in tombs {
+                        let encoded = encode_key(tomb.rev, KeyKind::Tombstone);
                         batch.put(KEY_BUCKET_ID, encoded.as_bytes(), TOMBSTONE_VALUE)?;
                     }
                 }
@@ -1146,8 +1627,8 @@ impl<B: Backend> MvccStore<B> {
                     }
                 }
                 OpPlan::Delete { tombs } => {
-                    for (k, rev) in tombs {
-                        if let Err(_e) = self.index.tombstone(k, *rev) {
+                    for tomb in tombs {
+                        if let Err(_e) = self.index.tombstone(&tomb.key, tomb.rev) {
                             return Err(MvccError::Internal {
                                 context: "index.tombstone failed under txn writer-lock invariant",
                             });

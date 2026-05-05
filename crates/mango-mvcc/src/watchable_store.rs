@@ -42,7 +42,7 @@
 
 use std::collections::HashMap;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Weak};
 use std::task::{Context, Poll};
 
@@ -53,8 +53,9 @@ use parking_lot::{Mutex as PlMutex, RwLock};
 use pin_project_lite::pin_project;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::{self, OwnedPermit};
+use tokio::task::AbortHandle;
 
-use crate::error::{MvccError, UnsupportedFeature};
+use crate::error::MvccError;
 use crate::revision::Revision;
 use crate::store::{KeyValue, MvccStore};
 
@@ -101,8 +102,14 @@ pub struct WatchEvent {
     pub key: Bytes,
     /// User value. Empty for [`WatchEventKind::Delete`].
     pub value: Bytes,
-    /// Previous key/value at `revision - 1`, if available. Always
-    /// `None` in this PR; populated in ROADMAP.md:863.
+    /// Previous key/value at `revision - 1`, if available.
+    /// Captured by the writer hot path (single-key `put` /
+    /// `delete_range` and the txn first pass) BEFORE any index
+    /// mutation, against a single `Backend::snapshot` per writer
+    /// call. `None` for `Put` when the key was absent or tombstoned
+    /// at the moment the writer ran; always `Some` for `Delete`
+    /// since tombstones target live keys only. Phase 3 plan §4.6
+    /// (ROADMAP.md:863).
     pub prev: Option<KeyValue>,
     /// Revision at which the event was produced. The dispatch
     /// eligibility filter compares
@@ -158,13 +165,36 @@ pub trait WriteObserver: Send + Sync + 'static {
 #[derive(Clone, Copy, Eq, PartialEq, Debug)]
 #[allow(
     clippy::exhaustive_enums,
-    reason = "shape committed in Phase 3; future reasons are item 866's call and would be additive — a non_exhaustive marker would forfeit the compile-time exhaustiveness checks the watcher-side match needs to detect a missed reason on update"
+    reason = "shape committed in Phase 3 + ROADMAP.md:863; reasons map 1:1 to terminal disconnect causes the watcher-side match must handle exhaustively. Adding a reason should be a deliberate visible API change."
 )]
 pub enum DisconnectReason {
     /// The per-watcher channel could not accept an event.
     SlowConsumer,
     /// The owning [`WatchableStore`] (and its dispatch path) was dropped.
     StoreDropped,
+    /// Catch-up scan tried to replay events from a revision the
+    /// store has already compacted away. `floor` is the
+    /// post-compaction floor — the watcher cannot recover this range.
+    /// Phase 3 plan §4.5 (ROADMAP.md:863).
+    Compacted {
+        /// Lowest revision still retained on disk.
+        floor: i64,
+    },
+    /// Catch-up driver hit `MAX_CATCHUP_ATTEMPTS` without converging
+    /// (sustained writer outpaced the scan rate). Terminal —
+    /// caller must re-watch with a fresh `start_rev`. Phase 3 plan §4.3.
+    CatchupConvergenceFailed {
+        /// Number of catch-up loop iterations attempted.
+        attempts: u32,
+    },
+    /// Internal error inside the catch-up driver (e.g. backend I/O
+    /// during the scan). Carries a static context string so the
+    /// reason is typed and observable without scraping a side
+    /// channel. Terminal.
+    Internal {
+        /// Short, static description of the failure site.
+        context: &'static str,
+    },
 }
 
 /// Watcher-side error variants. Surfaced as `Stream::Item =
@@ -205,6 +235,20 @@ const EVENT_CAPACITY: usize = 1024;
 
 /// Monotonic id for a registered watcher.
 type WatcherId = u64;
+
+/// Catch-up driver retry cap. After this many trips through
+/// [`catchup_drive_inner`]'s scan loop without converging, the
+/// watcher receives a terminal
+/// [`DisconnectReason::CatchupConvergenceFailed`].
+///
+/// Phase 3 plan §4.3 (ROADMAP.md:863). The cap exists because a
+/// watcher whose scan rate cannot keep up with the writer rate would
+/// otherwise spin forever, holding a registry slot and a backend
+/// snapshot per attempt. 256 attempts is etcd-flavored — sustained
+/// outpacing of a several-thousand-events scan budget per attempt
+/// implies the watcher is structurally unable to catch up; failing
+/// fast lets the caller re-watch with a fresh `start_rev`.
+const MAX_CATCHUP_ATTEMPTS: u32 = 256;
 
 /// Half-open key range `[start, end)`. `end.is_empty()` denotes a
 /// single-key watch (etcd parity — etcd uses `end_key.is_empty()` to
@@ -269,6 +313,117 @@ impl Watcher {
     }
 }
 
+/// Watcher under active catch-up. Held in [`Registry::unsynced`]
+/// while the [`catchup_drive`] task replays historical events from
+/// `start_rev` to the writer-locked snapshot revision; promoted to
+/// the [`Watcher`] form (and moved to `synced`) when caught up.
+///
+/// The id is the [`Registry::unsynced`] `HashMap` key; not duplicated
+/// here (unlike [`Watcher`], where `id` is needed because the
+/// dispatch loop iterates `values()` rather than `iter()`).
+///
+/// Phase 3 plan §4.1 / §4.3 (ROADMAP.md:863).
+struct CatchupWatcher {
+    range: WatcherRange,
+    /// Producer-side clone the catch-up driver uses for
+    /// `tx.send().await`. Constructed via `tx.clone()` at watcher
+    /// build time.
+    tx: mpsc::Sender<Result<WatchEvent, WatchError>>,
+    /// Reserved disconnect slot; same shape and idempotency
+    /// contract as [`Watcher::disconnect_permit`].
+    disconnect_permit: PlMutex<Option<OwnedPermit<Result<WatchEvent, WatchError>>>>,
+    /// Highest `rev.main()` already delivered on this watcher.
+    /// Initialised to `start_rev - 1`. Updated by the catch-up
+    /// driver after each scan iteration succeeds; read by
+    /// [`promote_to_synced`] under `registry.write()` to gate the
+    /// retry-vs-promote decision.
+    ///
+    /// Stored as `Arc<AtomicI64>` (NOT inside the registry RwLock):
+    /// the driver task owns writes; `promote_to_synced` reads it
+    /// via `load(Acquire)`. `AtomicI64` is the right primitive —
+    /// single writer, occasional reader, no need to serialize
+    /// against other watchers' updates.
+    last_delivered: Arc<AtomicI64>,
+    /// `AbortHandle` for the spawned driver task. Drop paths call
+    /// `.abort()` to ensure the driver does not outlive the
+    /// watcher's registration. `.abort()` is idempotent.
+    driver: AbortHandle,
+}
+
+impl CatchupWatcher {
+    /// Same idempotent permit-consume contract as
+    /// [`Watcher::consume_disconnect_permit`].
+    fn consume_disconnect_permit(&self, reason: DisconnectReason) {
+        if let Some(permit) = self.disconnect_permit.lock().take() {
+            let _sender = permit.send(Err(WatchError::Disconnected(reason)));
+        }
+    }
+}
+
+/// Outcome of [`Registry::remove`] — either the watcher was found
+/// in the synced or unsynced group, or it was already gone. The
+/// `Unsynced` arm carries the [`CatchupWatcher`] so the caller can
+/// abort its driver task; the `Synced` arm carries no payload
+/// because nothing group-specific is needed (the `Watcher` is
+/// dropped inside `Registry::remove` along with its `Sender`,
+/// which closes the channel to the consumer).
+enum RegistryRemoval {
+    Synced,
+    Unsynced(CatchupWatcher),
+    None,
+}
+
+/// Catch-up driver exit reason. The driver returns this from its
+/// inner loop (`catchup_drive_inner`); the outer `catchup_drive`
+/// fn uses the variant to decide whether to send a terminal
+/// disconnect via the reserved permit.
+///
+/// `Disconnect(_)` is the only variant that produces a terminal
+/// item on the watcher's stream — the others are silent exits
+/// (the registry entry is already gone or the consumer is gone).
+///
+/// Phase 3 plan §4.3 (ROADMAP.md:863).
+#[derive(Debug)]
+enum DriverExit {
+    /// `tx.send().await` returned `SendError` — the receiver
+    /// (`WatchStream`) was dropped. The `PinnedDrop` already removed
+    /// the registry entry; nothing more to do.
+    ReceiverGone,
+    /// `Weak::upgrade` of the [`WatchableStore`] failed. The store
+    /// dropped while we were running; its `Drop` impl already
+    /// drained both registries and emitted `StoreDropped` to every
+    /// watcher.
+    StoreGone,
+    /// The watcher's registry entry was removed (e.g. `PinnedDrop`
+    /// raced our scan, or the store-drop path drained it). Silent
+    /// exit; whoever removed the entry owns the terminal item.
+    WatcherGone,
+    /// Terminal disconnect — the outer `catchup_drive` consumes
+    /// the disconnect permit with this reason before returning.
+    Disconnect(DisconnectReason),
+}
+
+/// Outcome of `promote_to_synced`. `Done` and `WatcherGone` are
+/// terminal for the driver loop; `Retry` means the writer outpaced
+/// the catch-up scan in the time between releasing the snapshot-pair
+/// mutex and acquiring `registry.write()`, and the driver should
+/// run another scan iteration.
+enum PromoteResult {
+    Done,
+    Retry,
+    WatcherGone,
+}
+
+/// Routing decision made under `registry.write()` in
+/// [`WatchableStore::watch`]: either register as synced (resolved
+/// `start_rev` ready for the inline-dispatch eligibility filter) or
+/// register as unsynced (driver task to be spawned, scan loop to
+/// drive [`start_rev`, `current_revision()`]).
+enum WatchRoute {
+    Synced { resolved_start: i64 },
+    Unsynced { start_rev: i64 },
+}
+
 /// Watcher registry. Behind a [`parking_lot::RwLock`].
 ///
 /// `next_id` is a monotonic `u64`. At ~1B watch registrations/sec the
@@ -276,12 +431,27 @@ impl Watcher {
 /// [`WatchableStore::watch`] is paranoia-belt-suspenders rather than a
 /// realistic guard — the `Internal` arm just makes the failure mode
 /// typed instead of a panic.
+///
+/// # Synced vs unsynced split (Phase 3 plan §4.4 / ROADMAP.md:863)
+///
+/// Watchers fall into one of two disjoint groups:
+///
+/// - `synced` — caught up to `current_revision()`; receive every new
+///   event from the inline writer dispatch path.
+/// - `unsynced` — registered with `start_rev <= current_revision()`
+///   at the time of [`WatchableStore::watch`]; the catch-up driver
+///   (`catchup_drive`) replays history events
+///   `[start_rev, snap_rev]` from the MVCC store before promoting
+///   the watcher to `synced` via [`promote_to_synced`].
+///
+/// A given `WatcherId` appears in **at most one** map at any time.
 struct Registry {
     next_id: WatcherId,
-    /// Synced watchers: those whose `start_rev > current_revision()` at
-    /// registration. Phase 3 ships only this group; the unsynced
-    /// (catch-up) group lands in ROADMAP.md:863.
+    /// Synced watchers — receive events from the inline writer hot path.
     synced: HashMap<WatcherId, Watcher>,
+    /// Unsynced watchers — under catch-up. Inline dispatch SKIPS them;
+    /// `catchup_drive` is the sole producer.
+    unsynced: HashMap<WatcherId, CatchupWatcher>,
 }
 
 impl Registry {
@@ -289,7 +459,35 @@ impl Registry {
         Self {
             next_id: 0,
             synced: HashMap::new(),
+            unsynced: HashMap::new(),
         }
+    }
+
+    /// Total live watchers across both groups. Used by
+    /// [`WatchableStore::watcher_count`] so the externally-visible
+    /// count is invariant under group transitions.
+    fn total_len(&self) -> usize {
+        self.synced.len().saturating_add(self.unsynced.len())
+    }
+
+    /// Remove watcher `id` from whichever group holds it. Returns
+    /// a typed [`RegistryRemoval`] so the caller can dispatch
+    /// group-specific cleanup. The id space is shared and disjoint
+    /// across groups, so at most one removal succeeds.
+    ///
+    /// On `Synced` the removed [`Watcher`] (and its `Sender`) is
+    /// dropped inside this function — the channel closes for the
+    /// consumer immediately. On `Unsynced` the [`CatchupWatcher`] is
+    /// returned so the caller can abort its driver task before
+    /// dropping (and closing the channel).
+    fn remove(&mut self, id: WatcherId) -> RegistryRemoval {
+        if let Some(_w) = self.synced.remove(&id) {
+            return RegistryRemoval::Synced;
+        }
+        if let Some(cw) = self.unsynced.remove(&id) {
+            return RegistryRemoval::Unsynced(cw);
+        }
+        RegistryRemoval::None
     }
 }
 
@@ -399,13 +597,21 @@ impl<B: Backend> WatchableStore<B> {
     ///
     /// - `start_rev == 0` → resolved under the registry write-lock to
     ///   `current_revision() + 1`. The watcher receives every event strictly
-    ///   after the rev observable at registration time. **No race.**
+    ///   after the rev observable at registration time. Registered as
+    ///   **synced**. **No race.**
     /// - `start_rev > 0` and `start_rev > current_revision()` → registered
-    ///   verbatim. `current_revision() + 1` (the explicit synced-from-now
-    ///   case) lands here unambiguously.
-    /// - `start_rev > 0` and `start_rev <= current_revision()` →
-    ///   [`MvccError::Unsupported`]`(`[`UnsupportedFeature::UnsyncedWatcher`]`)`.
-    ///   Item 863 lifts this.
+    ///   verbatim as **synced**. `current_revision() + 1` (the explicit
+    ///   synced-from-now case) lands here unambiguously.
+    /// - `start_rev > 0` and `start_rev > compacted_floor` and
+    ///   `start_rev <= current_revision()` → registered as **unsynced** and
+    ///   a per-watcher catch-up driver task is spawned (Phase 3 plan §4.3 /
+    ///   ROADMAP.md:863). The driver replays history events in
+    ///   `[start_rev, current_revision()]` against an atomic
+    ///   `(mvcc_snap, backend_snap)` pair, then promotes the watcher to
+    ///   synced.
+    /// - `start_rev > 0` and `start_rev <= compacted_floor` →
+    ///   [`MvccError::Compacted`] (the compacted floor is the inclusive
+    ///   boundary — etcd parity).
     /// - `start_rev < 0` → [`MvccError::FutureRevision`] (`< 0` is structurally
     ///   future-of-nothing; etcd rejects the same way).
     ///
@@ -422,8 +628,8 @@ impl<B: Backend> WatchableStore<B> {
     /// # Errors
     ///
     /// - [`MvccError::FutureRevision`] when `start_rev < 0`.
-    /// - [`MvccError::Unsupported`] when `start_rev` is at or below the
-    ///   current revision (catch-up not yet supported).
+    /// - [`MvccError::Compacted`] when `start_rev` is at or below the
+    ///   compaction floor.
     /// - [`MvccError::InvalidRange`] when `range_end` is non-empty and
     ///   strictly less than `range_start`.
     /// - [`MvccError::Internal`] for `current_revision` / watcher-id
@@ -447,22 +653,36 @@ impl<B: Backend> WatchableStore<B> {
 
         // Acquire registry write-lock. The dispatch path takes registry
         // READ-lock under the writer-tokio-mutex; both cannot run
-        // concurrently. Inside this lock:
-        //   - read current_revision exactly once
-        //   - decide synced-eligibility
-        //   - assign id
-        //   - insert watcher
+        // concurrently. Inside this lock we read the published Snapshot
+        // exactly once so `(rev, compacted)` are coherent — see Phase 3
+        // plan §4.4 race proof.
         let mut reg = self.registry.write();
-        let current = self.store.current_revision();
-        let resolved_start = if start_rev == 0 {
-            current.checked_add(1).ok_or(MvccError::Internal {
+        let snap = self.store.current_snapshot();
+        let current = snap.rev;
+        let compacted_floor = snap.compacted;
+
+        // Decide synced vs unsynced.
+        let route: WatchRoute = if start_rev == 0 {
+            let resolved = current.checked_add(1).ok_or(MvccError::Internal {
                 context: "current_revision overflow",
-            })?
+            })?;
+            WatchRoute::Synced {
+                resolved_start: resolved,
+            }
         } else if start_rev > current {
-            start_rev
+            WatchRoute::Synced {
+                resolved_start: start_rev,
+            }
+        } else if start_rev <= compacted_floor {
+            return Err(MvccError::Compacted {
+                requested: start_rev,
+                floor: compacted_floor,
+            });
         } else {
-            return Err(MvccError::Unsupported(UnsupportedFeature::UnsyncedWatcher));
+            // compacted_floor < start_rev <= current — unsynced.
+            WatchRoute::Unsynced { start_rev }
         };
+
         let id = reg.next_id;
         reg.next_id = reg.next_id.checked_add(1).ok_or(MvccError::Internal {
             context: "watcher id overflow",
@@ -484,21 +704,55 @@ impl<B: Backend> WatchableStore<B> {
                     context: "reserve disconnect permit",
                 })?;
 
-        reg.synced.insert(
-            id,
-            Watcher {
-                id,
-                start_rev: resolved_start,
-                range: WatcherRange {
-                    start: range_start,
-                    end: range_end,
-                },
-                tx,
-                disconnect_permit: PlMutex::new(Some(disconnect_permit)),
-                pending_disconnect: AtomicBool::new(false),
-            },
-        );
-        drop(reg);
+        let range = WatcherRange {
+            start: range_start,
+            end: range_end,
+        };
+
+        match route {
+            WatchRoute::Synced { resolved_start } => {
+                reg.synced.insert(
+                    id,
+                    Watcher {
+                        id,
+                        start_rev: resolved_start,
+                        range,
+                        tx,
+                        disconnect_permit: PlMutex::new(Some(disconnect_permit)),
+                        pending_disconnect: AtomicBool::new(false),
+                    },
+                );
+                drop(reg);
+            }
+            WatchRoute::Unsynced { start_rev } => {
+                // Spawn the driver task BEFORE inserting into the
+                // registry — `tokio::spawn` returns a JoinHandle whose
+                // AbortHandle is what we store on the CatchupWatcher.
+                // The driver will quickly take `registry.read()` for
+                // its first iteration; that's safe because we still
+                // hold `registry.write()` here, so the driver's read
+                // queues behind us.
+                //
+                // Initial last_delivered = start_rev - 1 so the first
+                // scan iteration covers [start_rev, snap_rev].
+                let last_delivered = Arc::new(AtomicI64::new(start_rev.saturating_sub(1)));
+                let weak_self = Arc::downgrade(self);
+                let driver_handle = tokio::spawn(catchup_drive(weak_self, id));
+                let driver_abort = driver_handle.abort_handle();
+
+                reg.unsynced.insert(
+                    id,
+                    CatchupWatcher {
+                        range,
+                        tx,
+                        disconnect_permit: PlMutex::new(Some(disconnect_permit)),
+                        last_delivered,
+                        driver: driver_abort,
+                    },
+                );
+                drop(reg);
+            }
+        }
 
         Ok(WatchStream {
             rx,
@@ -514,11 +768,13 @@ impl<B: Backend> WatchableStore<B> {
         &self.store
     }
 
-    /// Number of registered watchers. Public (not test-only) so a future
-    /// `mango-server` admin / observability surface can read it.
+    /// Number of registered watchers across both `synced` and
+    /// `unsynced` groups. Invariant under catch-up promotion.
+    /// Public (not test-only) so a future `mango-server` admin /
+    /// observability surface can read it.
     #[must_use]
     pub fn watcher_count(&self) -> usize {
-        self.registry.read().synced.len()
+        self.registry.read().total_len()
     }
 }
 
@@ -581,6 +837,278 @@ impl<B: Backend> WatchableStore<B> {
             }
         }
     }
+
+    // -------- Catch-up driver helpers (Phase 3 plan §4.3 / §4.4) --------
+    //
+    // These are intentionally narrow accessors that take `registry.read()`
+    // (or `registry.write()` for `promote_to_synced`) for the minimum
+    // duration needed and never hold the lock across `.await`. They are
+    // `pub(crate)`-equivalent to the `catchup_drive` free function below
+    // — they live on `impl WatchableStore` only because they need access
+    // to `self.registry` and `self.store`.
+
+    /// Read `last_delivered` for an unsynced watcher via the
+    /// `Arc<AtomicI64>` sidecar. Returns `None` if the watcher
+    /// has been removed from the registry (e.g. `PinnedDrop` ran).
+    fn read_last_delivered(&self, id: WatcherId) -> Option<i64> {
+        let reg = self.registry.read();
+        let cw = reg.unsynced.get(&id)?;
+        Some(cw.last_delivered.load(Ordering::Acquire))
+    }
+
+    /// Update `last_delivered` for an unsynced watcher. Silently
+    /// no-ops if the watcher is gone (the driver is racing a
+    /// drop; the abort will hit shortly).
+    fn write_last_delivered(&self, id: WatcherId, value: i64) {
+        let reg = self.registry.read();
+        if let Some(cw) = reg.unsynced.get(&id) {
+            cw.last_delivered.store(value, Ordering::Release);
+        }
+    }
+
+    /// Clone the unsynced watcher's range under the registry read
+    /// lock. Returns `None` if the watcher is no longer in the
+    /// unsynced group (gone or already promoted).
+    fn unsynced_range(&self, id: WatcherId) -> Option<WatcherRange> {
+        let reg = self.registry.read();
+        reg.unsynced.get(&id).map(|cw| cw.range.clone())
+    }
+
+    /// Clone the unsynced watcher's `Sender` for an `await`-bearing
+    /// `tx.send(...).await` — caller MUST NOT hold the registry
+    /// read lock across the await. Returns `None` if the watcher
+    /// is gone.
+    fn unsynced_tx_clone(
+        &self,
+        id: WatcherId,
+    ) -> Option<mpsc::Sender<Result<WatchEvent, WatchError>>> {
+        let reg = self.registry.read();
+        reg.unsynced.get(&id).map(|cw| cw.tx.clone())
+    }
+
+    /// Idempotent terminal-disconnect for an unsynced watcher.
+    /// Consumes the reserved disconnect permit (if not already
+    /// taken) and removes the registry entry. Caller is the
+    /// catch-up driver's outer wrapper on a `Disconnect(_)` exit.
+    fn consume_unsynced_permit(&self, id: WatcherId, reason: DisconnectReason) {
+        let cw = {
+            let mut reg = self.registry.write();
+            reg.unsynced.remove(&id)
+        };
+        if let Some(cw) = cw {
+            cw.consume_disconnect_permit(reason);
+            // `cw` (and its `Sender`) drops here — channel closes
+            // for the receiver after the terminal Err is consumed.
+        }
+    }
+
+    /// Race-free synced transition for an unsynced watcher.
+    ///
+    /// Phase 3 plan §4.4 (ROADMAP.md:863). Holds `registry.write()`
+    /// for the duration: under that lock, no inline dispatch can
+    /// run (dispatch takes `registry.read()`), and no other writer
+    /// can publish a new snapshot in a way the watcher would miss
+    /// — between `snapshot.store(R)` and `dispatch(...)` the
+    /// writer holds its own `tokio::sync::Mutex` with NO `.await`
+    /// point (Invariant W, see `MvccStore::dispatch_observer`).
+    /// Therefore reading `current_revision()` here observes a
+    /// snapshot whose dispatch (if any) has either fully completed
+    /// already (events already in the channel via the catch-up
+    /// scan, or in transit through the inline path — but the
+    /// inline path skips unsynced entries) or is queued behind us
+    /// on `registry.read()`.
+    fn promote_to_synced(&self, id: WatcherId) -> PromoteResult {
+        let mut reg = self.registry.write();
+        let snap_rev = self.store.current_revision();
+        let Some(cw_ref) = reg.unsynced.get(&id) else {
+            return PromoteResult::WatcherGone;
+        };
+        let last_delivered = cw_ref.last_delivered.load(Ordering::Acquire);
+
+        if last_delivered < snap_rev {
+            return PromoteResult::Retry;
+        }
+
+        // Move the watcher across groups under the same lock
+        // acquisition. We can't unwrap-with-message since clippy
+        // denies expect_used; the Some-check above guarantees the
+        // remove succeeds, but we still surface a typed fall-through
+        // if it somehow doesn't (would mean another path mutated
+        // the registry under our write lock — impossible).
+        let Some(cw) = reg.unsynced.remove(&id) else {
+            return PromoteResult::WatcherGone;
+        };
+        // Synced eligibility filter is `event.rev.main() >=
+        // start_rev`; setting `start_rev = last_delivered + 1`
+        // gives the watcher exactly the events it has not seen
+        // yet. last_delivered = snap_rev means start_rev =
+        // snap_rev + 1, which is the rev the next writer will
+        // allocate.
+        let new_start_rev = last_delivered.saturating_add(1);
+        reg.synced.insert(
+            id,
+            Watcher {
+                id,
+                start_rev: new_start_rev,
+                range: cw.range,
+                tx: cw.tx,
+                disconnect_permit: PlMutex::new(cw.disconnect_permit.lock().take()),
+                pending_disconnect: AtomicBool::new(false),
+            },
+        );
+        // The driver's AbortHandle (`cw.driver`) drops here. That's
+        // fine — the driver task is about to return Ok(()) once
+        // promote returns Done; dropping the handle without aborting
+        // is allowed (tokio: dropping a JoinHandle/AbortHandle just
+        // detaches the task).
+        PromoteResult::Done
+    }
+}
+
+/// Catch-up driver entrypoint. Spawned by [`WatchableStore::watch`]
+/// for each watcher routed onto the unsynced path. Runs the inner
+/// scan/promote loop until convergence, then publishes a terminal
+/// disconnect via the reserved permit on `Disconnect(_)` exits.
+///
+/// Phase 3 plan §4.3 (ROADMAP.md:863).
+async fn catchup_drive<B: Backend>(ws: Weak<WatchableStore<B>>, id: WatcherId) {
+    let outcome = catchup_drive_inner(&ws, id).await;
+    if let Err(DriverExit::Disconnect(reason)) = outcome {
+        if let Some(strong) = ws.upgrade() {
+            strong.consume_unsynced_permit(id, reason);
+        }
+        // If upgrade fails, the WatchableStore is already mid-Drop;
+        // its Drop impl is what's draining the registry and emitting
+        // StoreDropped. The reason we computed here is superseded —
+        // StoreDropped wins.
+    }
+}
+
+/// Catch-up scan/promote loop. See Phase 3 plan §4.3.
+async fn catchup_drive_inner<B: Backend>(
+    ws: &Weak<WatchableStore<B>>,
+    id: WatcherId,
+) -> Result<(), DriverExit> {
+    let mut attempts: u32 = 0;
+    loop {
+        let strong = ws.upgrade().ok_or(DriverExit::StoreGone)?;
+
+        // Atomic snapshot-pair under the writer mutex. The pair
+        // observes the same point in time w.r.t. concurrent
+        // compact/put/delete_range/txn — closes the v2-flagged
+        // mid-scan compaction race (Phase 3 plan §4.5).
+        let (mvcc_snap, snap_be) =
+            strong
+                .store
+                .snapshot_pair_under_writer()
+                .await
+                .map_err(|err| match err {
+                    MvccError::Backend(_) => DriverExit::Disconnect(DisconnectReason::Internal {
+                        context: "snapshot_pair backend error",
+                    }),
+                    _ => DriverExit::Disconnect(DisconnectReason::Internal {
+                        context: "snapshot_pair internal error",
+                    }),
+                })?;
+
+        let last_delivered = strong
+            .read_last_delivered(id)
+            .ok_or(DriverExit::WatcherGone)?;
+        let from_rev = last_delivered.saturating_add(1);
+
+        // Mid-scan compaction guard. The snapshot-pair just taken
+        // includes the published `compacted` floor; if it has moved
+        // past `from_rev` we cannot recover this watcher's range.
+        if mvcc_snap.compacted >= from_rev {
+            return Err(DriverExit::Disconnect(DisconnectReason::Compacted {
+                floor: mvcc_snap.compacted,
+            }));
+        }
+
+        let to_rev = mvcc_snap.rev;
+
+        if from_rev > to_rev {
+            // Caught up. Try the synced transition.
+            // NB: at registration time we required `start_rev <=
+            // current_revision()` (or `start_rev == 0`) to route
+            // unsynced; the resolved `start_rev - 1` initial
+            // last_delivered was therefore `< current_revision()`,
+            // so on the FIRST iteration `from_rev > to_rev` cannot
+            // occur unless the snapshot's `rev` decreased between
+            // registration and the snapshot-pair read (impossible
+            // — current_revision is monotonic). On subsequent
+            // iterations it's the convergence path.
+            match strong.promote_to_synced(id) {
+                PromoteResult::Done => return Ok(()),
+                PromoteResult::Retry => { /* fall through to attempt-cap check */ }
+                PromoteResult::WatcherGone => return Err(DriverExit::WatcherGone),
+            }
+        } else {
+            // Look up the watcher's range under a brief read-lock.
+            // We don't hold the lock across the scan or the awaits
+            // below.
+            let range = strong.unsynced_range(id).ok_or(DriverExit::WatcherGone)?;
+
+            let events = match strong.store.catchup_scan(
+                range.start.as_ref(),
+                range.end.as_ref(),
+                from_rev,
+                to_rev,
+                &mvcc_snap,
+                &snap_be,
+            ) {
+                Ok(events) => events,
+                Err(MvccError::Compacted { floor, .. }) => {
+                    return Err(DriverExit::Disconnect(DisconnectReason::Compacted {
+                        floor,
+                    }));
+                }
+                Err(_other) => {
+                    return Err(DriverExit::Disconnect(DisconnectReason::Internal {
+                        context: "catchup_scan backend or index error",
+                    }));
+                }
+            };
+
+            // Drop the snapshot pair before awaiting on tx.send().
+            // `B::Snapshot` may hold a backend transaction handle
+            // (redb `ReadTransaction`); keeping it alive across an
+            // unbounded await stalls compaction reclamation.
+            drop(snap_be);
+            drop(mvcc_snap);
+
+            for ev in events {
+                let tx = strong
+                    .unsynced_tx_clone(id)
+                    .ok_or(DriverExit::WatcherGone)?;
+                // Backpressure: a slow consumer parks the driver
+                // here. Unsupported as a DoS surface — Phase 6
+                // admission control owns the hard cap on unsynced
+                // count per store.
+                tx.send(Ok(ev))
+                    .await
+                    .map_err(|_| DriverExit::ReceiverGone)?;
+            }
+            // After the batch lands in the channel, advance
+            // last_delivered to `to_rev`. Order matters: only
+            // update *after* every event in [from_rev, to_rev]
+            // has been accepted, so a promote racing the next
+            // iteration sees a sound watermark (no in-flight
+            // events not yet on the channel).
+            strong.write_last_delivered(id, to_rev);
+        }
+
+        // Drop strong ref before next iteration so the WatchableStore
+        // can drop if all user Arcs are released.
+        drop(strong);
+
+        attempts = attempts.saturating_add(1);
+        if attempts >= MAX_CATCHUP_ATTEMPTS {
+            return Err(DriverExit::Disconnect(
+                DisconnectReason::CatchupConvergenceFailed { attempts },
+            ));
+        }
+    }
 }
 
 impl<B: Backend> Drop for WatchableStore<B> {
@@ -604,15 +1132,27 @@ impl<B: Backend> Drop for WatchableStore<B> {
     ///   `Arc<WatchableStore>` exists.
     fn drop(&mut self) {
         let mut reg = self.registry.write();
-        let watchers = std::mem::take(&mut reg.synced);
+        let synced = std::mem::take(&mut reg.synced);
+        let unsynced = std::mem::take(&mut reg.unsynced);
         // Drop the lock before consuming permits — the per-watcher
         // permit consumption only touches that watcher's own
         // `disconnect_permit` slot, no cross-locking needed.
         drop(reg);
-        for (_id, w) in watchers {
+        for (_id, w) in synced {
             w.consume_disconnect_permit(DisconnectReason::StoreDropped);
             // `w` (and its `Sender`) is dropped at the end of this
             // iteration; the channel closes for the receiver.
+        }
+        for (_id, cw) in unsynced {
+            // Abort the catch-up driver task FIRST. The driver may
+            // be parked on `tx.send().await` with a slow consumer;
+            // we don't want it observing the consumed permit and
+            // racing to send a duplicate terminal item. `.abort()`
+            // is idempotent and the spawned task picks it up at the
+            // next yield point (or immediately if not yet started).
+            cw.driver.abort();
+            cw.consume_disconnect_permit(DisconnectReason::StoreDropped);
+            // `cw` (and its `Sender`) drops at end of iteration.
         }
     }
 }
@@ -653,7 +1193,23 @@ pin_project! {
                 // refactors to a deregister channel if the bench trips
                 // the T4 threshold.
                 let mut w = reg.write();
-                w.synced.remove(this.id);
+                // Watcher may live in either group depending on
+                // catch-up state; the `Registry::remove` helper
+                // tries both. Id space is disjoint across groups
+                // (Phase 3 plan §4.4 / ROADMAP.md:863).
+                let removed = w.remove(*this.id);
+                // Drop the registry lock BEFORE aborting the driver
+                // task — `AbortHandle::abort` is sync and cheap, but
+                // we don't need the lock held for it.
+                drop(w);
+                if let RegistryRemoval::Unsynced(cw) = removed {
+                    // Stream consumer is gone; the catch-up driver
+                    // would otherwise either (a) park on `tx.send().await`
+                    // until the closed channel surfaces a SendError on
+                    // its next attempt, or (b) burn CPU on the scan
+                    // loop. Abort terminates it deterministically.
+                    cw.driver.abort();
+                }
             }
             // mpsc::Receiver::Drop closes the receiver; any in-flight
             // writer try_send on this watcher's tx fails with
@@ -710,7 +1266,7 @@ mod tests {
         DisconnectReason, WatchError, WatchEvent, WatchEventKind, WatchableStore, WatcherRange,
         WriteObserver,
     };
-    use crate::error::{MvccError, UnsupportedFeature};
+    use crate::error::MvccError;
     use crate::revision::Revision;
     use crate::store::MvccStore;
     use bytes::Bytes;
@@ -893,23 +1449,41 @@ mod tests {
         assert!(!r.covers(b"\xff"));
     }
 
-    /// Phase 3 plan §11 test #7. `start_rev > 0 && start_rev <= current_revision()`
-    /// returns Unsupported(UnsyncedWatcher).
+    /// L863 unit test #C0. `start_rev > 0 && start_rev <= current_revision()`
+    /// is now accepted: the watcher is registered into the unsynced
+    /// group and a catch-up driver is spawned. We assert the
+    /// registration outcome only — the dispatched events are
+    /// asserted in the integration tests in `tests/watch_catchup.rs`.
     #[tokio::test(flavor = "current_thread")]
-    async fn start_rev_below_current_returns_unsupported() {
+    async fn start_rev_below_current_registers_unsynced_watcher() {
         let store = open();
         store.put(b"k", b"v").await.expect("put");
         assert_eq!(store.current_revision(), 1);
         let ws = WatchableStore::new(store).expect("new");
+        let _stream = ws
+            .watch(Bytes::from_static(b"k"), Bytes::new(), 1)
+            .expect("unsynced watcher accepted");
+        // total_len is 1 across synced + unsynced; the watcher may
+        // already have been promoted to synced if the driver woke
+        // before the assertion, so don't probe individual groups.
+        assert_eq!(ws.watcher_count(), 1);
+    }
+
+    /// L863 unit test #C0b. `MvccError::Compacted` is still returned
+    /// when `start_rev <= compacted_floor` — the catch-up path is
+    /// only available against revisions still on disk.
+    #[tokio::test(flavor = "current_thread")]
+    async fn start_rev_below_compacted_floor_returns_compacted() {
+        let store = open();
+        // Create a few revisions then compact past them.
+        store.put(b"k", b"v1").await.expect("put");
+        store.put(b"k", b"v2").await.expect("put");
+        store.put(b"k", b"v3").await.expect("put");
+        store.compact(2).await.expect("compact");
+        let ws = WatchableStore::new(store).expect("new");
         let err = ws
             .watch(Bytes::from_static(b"k"), Bytes::new(), 1)
-            .expect_err("catch-up rejected");
-        assert!(
-            matches!(
-                err,
-                MvccError::Unsupported(UnsupportedFeature::UnsyncedWatcher)
-            ),
-            "got {err:?}"
-        );
+            .expect_err("rejected as compacted");
+        assert!(matches!(err, MvccError::Compacted { .. }), "got {err:?}");
     }
 }
