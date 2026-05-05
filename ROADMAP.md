@@ -859,7 +859,7 @@ Streaming change notifications. Watchers subscribe to a key range from a
 revision and receive every event at or after that revision. Includes
 `watchable_store`, fragmenting, progress notifications.
 
-- [ ] `WatchableStore` wrapping the MVCC store: `watch(range, start_rev) -> stream of Events`
+- [x] `WatchableStore` wrapping the MVCC store: `watch(range, start_rev) -> stream of Events`
 - [ ] Synced vs unsynced watcher groups (catch-up path for watchers behind current revision)
 - [ ] Event coalescing per-revision per-watcher
 - [ ] Progress-notify ticker (periodic `WatchResponse` with current revision so idle watchers know they're current)
