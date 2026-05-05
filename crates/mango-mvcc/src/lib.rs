@@ -41,7 +41,7 @@ pub use bucket::{
 };
 pub use encoding::{decode_key, encode_key, EncodedKey, KeyDecodeError, KeyKind};
 pub use error::{MvccError, OpenError, UnsupportedFeature};
-pub use key_history::{KeyAtRev, KeyHistory, KeyHistoryError, RestoreInvalidReason};
+pub use key_history::{KeyAtRev, KeyEventKind, KeyHistory, KeyHistoryError, RestoreInvalidReason};
 pub use revision::Revision;
 pub use sharded_key_index::{KeyIndexError, ShardedKeyIndex};
 pub use store::{

@@ -53,6 +53,7 @@ use core::fmt;
 use std::collections::HashSet;
 use std::hash::BuildHasher;
 
+use crate::encoding::KeyKind;
 use crate::Revision;
 
 /// One generation: a contiguous run of revisions for a single key,
@@ -531,6 +532,130 @@ impl KeyHistory {
         (gen_idx, rev_index)
     }
 
+    /// All `(rev, kind)` pairs in this `KeyHistory` whose `main`
+    /// component lies in the inclusive range `[lo, hi]`, yielded in
+    /// ascending order by stored `Revision`.
+    ///
+    /// The last revision of any non-trailing generation is a
+    /// `Tombstone`; every other stored revision is a `Put`. The
+    /// trailing empty generation contributes nothing. The walk is
+    /// bounded by per-key history depth (typically `< 100` under
+    /// realistic workloads), and the caller holds the per-shard
+    /// read-lock for the duration of the walk — so per-key history
+    /// depth bounds the lock-hold time.
+    ///
+    /// The L863 catch-up scan is the sole intended caller; the
+    /// per-key history walk feeds `WatchEvent` synthesis.
+    pub fn events_in_range(
+        &self,
+        lo: i64,
+        hi: i64,
+    ) -> impl Iterator<Item = (Revision, KeyEventKind)> + '_ {
+        let last_gen_idx = self.generations.len().saturating_sub(1);
+        self.generations
+            .iter()
+            .enumerate()
+            .flat_map(move |(gi, g)| {
+                let is_final = gi == last_gen_idx;
+                let revs_len = g.revs.len();
+                g.revs.iter().copied().enumerate().map(move |(ri, r)| {
+                    // The last rev of a non-final gen is the
+                    // tombstone that closed it; every other rev
+                    // (including the only rev of the final gen) is
+                    // a Put. `revs_len.checked_sub(1)` is `None`
+                    // only on an empty gen, which the outer iter
+                    // skips structurally (no revs to walk).
+                    let is_last_in_gen = revs_len.checked_sub(1).is_some_and(|last| ri == last);
+                    let kind = if !is_final && is_last_in_gen {
+                        KeyEventKind::Tombstone
+                    } else {
+                        KeyEventKind::Put
+                    };
+                    (r, kind)
+                })
+            })
+            .filter(move |(r, _)| r.main() >= lo && r.main() <= hi)
+    }
+
+    /// The highest stored `KeyAtRev` whose stored revision is
+    /// **strictly less than** `rev` (lex order on `(main, sub)`).
+    ///
+    /// Cross-generation semantics:
+    ///
+    /// - If the strict predecessor is in the same generation as the
+    ///   anchor for `rev`, return that generation's `KeyAtRev` for
+    ///   the predecessor.
+    /// - If `rev` sits at the start of a generation (no in-gen
+    ///   predecessor) — i.e. the strict predecessor lies in an
+    ///   earlier generation — walk back to that earlier generation.
+    ///   The trailing tombstone of a non-final generation is **not**
+    ///   a live version (see [`KeyHistory::keep`]); skip it and
+    ///   return the `KeyAtRev` for the LAST LIVE rev of that
+    ///   earlier generation.
+    /// - If no prior live rev exists in any generation, return `None`.
+    ///
+    /// Load-bearing for L863's `compute_prev_kv_strict`: without the
+    /// cross-gen walk, a `Put` that opens a new generation (i.e. the
+    /// first put after a tombstone) would always get `prev = None`,
+    /// which is correct only if there is no earlier generation.
+    ///
+    /// # Errors
+    ///
+    /// [`KeyHistoryError::RevisionNotFound`] if the per-generation
+    /// `version` arithmetic underflows. Structurally impossible
+    /// under the lifecycle invariants but propagated for parity with
+    /// [`KeyHistory::get`].
+    pub fn get_strict_lt(&self, rev: Revision) -> Result<Option<KeyAtRev>, KeyHistoryError> {
+        let Some(last_gen_idx) = self.generations.len().checked_sub(1) else {
+            return Ok(None);
+        };
+        let mut gi = last_gen_idx;
+        loop {
+            let Some(g) = self.generations.get(gi) else {
+                return Ok(None);
+            };
+
+            if !g.is_empty() {
+                let is_final = gi == last_gen_idx;
+                // Largest in-gen rev strictly less than `rev`. The
+                // `walk_desc` predicate "rev >= target" returns
+                // `false` exactly at the first (descending) rev
+                // that is strictly less than `target` — its
+                // ascending index is what we want.
+                if let Some(cand_idx) = g.walk_desc(|r| r >= rev) {
+                    let target_idx = if !is_final && g.revs.len().checked_sub(1) == Some(cand_idx) {
+                        // Trailing tombstone of a non-final gen.
+                        // Lifecycle invariant: a non-final gen has
+                        // at least one Put (the put that opened it)
+                        // before the tombstone, so cand_idx >= 1.
+                        cand_idx.checked_sub(1)
+                    } else {
+                        Some(cand_idx)
+                    };
+                    if let Some(idx) = target_idx {
+                        let Some(modified) = g.revs.get(idx).copied() else {
+                            return Ok(None);
+                        };
+                        let version = generation_version_at(g, idx)?;
+                        return Ok(Some(KeyAtRev {
+                            modified,
+                            created: g.created,
+                            version,
+                        }));
+                    }
+                    // Single-rev non-final gen: lifecycle
+                    // violation in steady state. Defensive
+                    // fall-through to the previous gen.
+                }
+            }
+
+            gi = match gi.checked_sub(1) {
+                Some(v) => v,
+                None => return Ok(None),
+            };
+        }
+    }
+
     /// Reconstruct a `KeyHistory` from on-disk state — a single
     /// non-empty generation. Used by the recovery path (L852)
     /// while replaying the `key` bucket.
@@ -644,6 +769,28 @@ pub struct KeyAtRev {
     /// Version number (1-indexed) within the generation. `i64`
     /// matches etcd's wire-format `int64`.
     pub version: i64,
+}
+
+/// Kind of event yielded by [`KeyHistory::events_in_range`] —
+/// distinguishes a live revision (`Put`) from a tombstone
+/// (`Tombstone`) on a per-revision basis. Mirrors the on-disk
+/// distinction expressed by [`KeyKind`].
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
+#[non_exhaustive]
+pub enum KeyEventKind {
+    /// A live revision — the catch-up scan emits a `Put` watch event.
+    Put,
+    /// A tombstone — the catch-up scan emits a `Delete` watch event.
+    Tombstone,
+}
+
+impl From<KeyKind> for KeyEventKind {
+    fn from(kind: KeyKind) -> Self {
+        match kind {
+            KeyKind::Put => Self::Put,
+            KeyKind::Tombstone => Self::Tombstone,
+        }
+    }
 }
 
 /// Reasons a `restore` call may reject its inputs.
@@ -1192,5 +1339,150 @@ mod tests {
             k.keep(at, &mut available);
             prop_assert_eq!(k, snapshot);
         }
+    }
+
+    // === L863 catch-up primitives ===
+
+    /// U1 — `events_in_range` walks across generations in ascending
+    /// order, marking the trailing rev of every non-final generation
+    /// as `Tombstone` and every other rev as `Put`.
+    #[test]
+    fn key_history_events_in_range_walks_generations() {
+        let mut k = KeyHistory::new();
+        k.put(Revision::new(1, 0)).unwrap();
+        k.tombstone(Revision::new(2, 0)).unwrap();
+        k.put(Revision::new(3, 0)).unwrap();
+        k.tombstone(Revision::new(4, 0)).unwrap();
+        k.put(Revision::new(5, 0)).unwrap();
+
+        let all: Vec<(Revision, KeyEventKind)> = k.events_in_range(0, 100).collect();
+        assert_eq!(
+            all,
+            vec![
+                (Revision::new(1, 0), KeyEventKind::Put),
+                (Revision::new(2, 0), KeyEventKind::Tombstone),
+                (Revision::new(3, 0), KeyEventKind::Put),
+                (Revision::new(4, 0), KeyEventKind::Tombstone),
+                (Revision::new(5, 0), KeyEventKind::Put),
+            ]
+        );
+
+        let subset: Vec<(Revision, KeyEventKind)> = k.events_in_range(2, 4).collect();
+        assert_eq!(
+            subset,
+            vec![
+                (Revision::new(2, 0), KeyEventKind::Tombstone),
+                (Revision::new(3, 0), KeyEventKind::Put),
+                (Revision::new(4, 0), KeyEventKind::Tombstone),
+            ]
+        );
+    }
+
+    /// U2 — `events_in_range` filters strictly on `main`, treating
+    /// `lo` and `hi` as inclusive boundaries.
+    #[test]
+    fn key_history_events_in_range_filters_main_revision() {
+        let mut k = KeyHistory::new();
+        k.put(Revision::new(1, 0)).unwrap();
+        k.put(Revision::new(2, 0)).unwrap();
+        k.put(Revision::new(3, 0)).unwrap();
+        k.put(Revision::new(4, 0)).unwrap();
+
+        // Empty range on the low side.
+        let none: Vec<_> = k.events_in_range(10, 20).collect();
+        assert!(none.is_empty());
+
+        // Single-rev window pinned to lo == hi.
+        let one: Vec<_> = k.events_in_range(2, 2).collect();
+        assert_eq!(one, vec![(Revision::new(2, 0), KeyEventKind::Put)]);
+
+        // Hi inclusive — boundary check.
+        let mid: Vec<_> = k.events_in_range(2, 3).collect();
+        assert_eq!(
+            mid,
+            vec![
+                (Revision::new(2, 0), KeyEventKind::Put),
+                (Revision::new(3, 0), KeyEventKind::Put),
+            ]
+        );
+    }
+
+    /// U3 — `events_in_range` on `Put(1)/Tomb(2)` (with the trailing
+    /// empty generation invariant) yields `[(1,Put),(2,Tomb)]`. The
+    /// trailing empty generation contributes nothing.
+    #[test]
+    fn key_history_events_in_range_empty_trailing_generation() {
+        let mut k = KeyHistory::new();
+        k.put(Revision::new(1, 0)).unwrap();
+        k.tombstone(Revision::new(2, 0)).unwrap();
+        assert_eq!(k.generations_len(), 2);
+
+        let events: Vec<_> = k.events_in_range(0, 100).collect();
+        assert_eq!(
+            events,
+            vec![
+                (Revision::new(1, 0), KeyEventKind::Put),
+                (Revision::new(2, 0), KeyEventKind::Tombstone),
+            ]
+        );
+    }
+
+    /// U5a — `get_strict_lt` returns the same-generation predecessor
+    /// when one exists.
+    #[test]
+    fn get_strict_lt_same_generation_predecessor() {
+        let mut k = KeyHistory::new();
+        k.put(Revision::new(7, 0)).unwrap();
+        k.put(Revision::new(7, 1)).unwrap();
+
+        let pred = k.get_strict_lt(Revision::new(7, 1)).unwrap().unwrap();
+        assert_eq!(pred.modified, Revision::new(7, 0));
+        assert_eq!(pred.created, Revision::new(7, 0));
+        assert_eq!(pred.version, 1);
+
+        let none = k.get_strict_lt(Revision::new(7, 0)).unwrap();
+        assert!(none.is_none(), "no predecessor for the very first put");
+    }
+
+    /// U5b — `get_strict_lt` walks back to the previous generation
+    /// when there is no in-gen predecessor, skipping the trailing
+    /// tombstone (which is not a live version).
+    #[test]
+    fn get_strict_lt_cross_generation_predecessor_skips_tombstone() {
+        let mut k = KeyHistory::new();
+        k.put(Revision::new(1, 0)).unwrap();
+        k.tombstone(Revision::new(2, 0)).unwrap();
+        k.put(Revision::new(3, 0)).unwrap();
+
+        // (3,0) is the first rev of gen 1. Strict predecessor is in
+        // gen 0; the tombstone (2,0) is the last rev of gen 0 but is
+        // NOT a live version, so we walk past it to (1,0).
+        let pred = k.get_strict_lt(Revision::new(3, 0)).unwrap().unwrap();
+        assert_eq!(
+            pred.modified,
+            Revision::new(1, 0),
+            "must skip tombstone (2,0) and return the live (1,0)"
+        );
+        assert_eq!(pred.created, Revision::new(1, 0));
+        assert_eq!(pred.version, 1);
+
+        // (1,0) is the very first stored rev; no predecessor.
+        let none = k.get_strict_lt(Revision::new(1, 0)).unwrap();
+        assert!(none.is_none());
+    }
+
+    /// U6 — `Revision`'s `Ord` is lex on `(main, sub)`. The L863
+    /// proof relies on this ordering for `get_strict_lt`. A future
+    /// refactor of `Revision` (e.g. swapping `Ord` for a custom
+    /// impl) must preserve it; this test fails fast if it doesn't.
+    #[test]
+    fn revision_ord_is_main_then_sub() {
+        let a = Revision::new(5, 0);
+        let b = Revision::new(5, 1);
+        let c = Revision::new(6, 0);
+        assert!(a < b);
+        assert!(b < c);
+        assert!(a < c);
+        assert_eq!(a, Revision::new(5, 0));
     }
 }

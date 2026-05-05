@@ -68,7 +68,7 @@ use loom::sync::RwLock;
 #[cfg(not(loom))]
 use parking_lot::RwLock;
 
-use crate::key_history::{KeyAtRev, KeyHistory, KeyHistoryError};
+use crate::key_history::{KeyAtRev, KeyEventKind, KeyHistory, KeyHistoryError};
 use crate::revision::Revision;
 
 /// Number of shards. Power of 2 so we can use a bit-mask instead of
@@ -231,6 +231,53 @@ impl ShardedKeyIndex {
         let guard = read_lock(lock);
         if let Some(entry) = guard.get(key) {
             entry.since_into(since_rev, out);
+        }
+    }
+
+    /// All `(rev, kind)` pairs for `key` whose `main` lies in
+    /// `[lo, hi]`, in ascending order. Returns an empty `Vec` if
+    /// `key` has no entry — the catch-up scan treats "absent" and
+    /// "no events in range" the same.
+    ///
+    /// Materialized into a `Vec` so the per-shard read-lock is
+    /// released before the caller dispatches events on
+    /// `tx.send().await`. Per-key history depth is the cap on
+    /// allocation; under realistic workloads typically `< 100`.
+    #[must_use]
+    pub fn events_in_range(&self, key: &[u8], lo: i64, hi: i64) -> Vec<(Revision, KeyEventKind)> {
+        let shard = self.shard_for(key);
+        let lock = self.shard(shard);
+        let guard = read_lock(lock);
+        match guard.get(key) {
+            Some(entry) => entry.events_in_range(lo, hi).collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Highest stored `KeyAtRev` for `key` whose stored revision is
+    /// **strictly less than** `rev` in lex `(main, sub)` order.
+    ///
+    /// Cross-generation walk skips the trailing tombstone of the
+    /// previous generation — see [`KeyHistory::get_strict_lt`] for
+    /// the full semantics. Returns `Ok(None)` if `key` has no
+    /// entry, or if no prior live revision exists in any
+    /// generation.
+    ///
+    /// # Errors
+    ///
+    /// Forwards [`KeyHistoryError`] from the inner walk (only
+    /// reachable on a structurally invalid `KeyHistory`).
+    pub fn get_strict_lt(
+        &self,
+        key: &[u8],
+        rev: Revision,
+    ) -> Result<Option<KeyAtRev>, KeyIndexError> {
+        let shard = self.shard_for(key);
+        let lock = self.shard(shard);
+        let guard = read_lock(lock);
+        match guard.get(key) {
+            Some(entry) => Ok(entry.get_strict_lt(rev)?),
+            None => Ok(None),
         }
     }
 
@@ -711,6 +758,66 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(idx.len(), 10);
+    }
+
+    // === L863 catch-up primitives ===
+
+    /// U4 — `events_in_range` returns an empty `Vec` when the key
+    /// has no entry. The catch-up scan treats "no entry" and "entry
+    /// with no events in range" identically.
+    #[test]
+    fn sharded_key_index_events_in_range_returns_empty_for_missing_key() {
+        let idx = ShardedKeyIndex::new();
+        let events = idx.events_in_range(b"absent", 0, 100);
+        assert!(events.is_empty());
+    }
+
+    /// `events_in_range` round-trip on a present key — returns the
+    /// same sequence the inner `KeyHistory::events_in_range` emits.
+    #[test]
+    fn sharded_key_index_events_in_range_present_key_round_trips() {
+        let idx = ShardedKeyIndex::new();
+        idx.put(b"k", Revision::new(1, 0)).unwrap();
+        idx.put(b"k", Revision::new(2, 0)).unwrap();
+        idx.tombstone(b"k", Revision::new(3, 0)).unwrap();
+        idx.put(b"k", Revision::new(4, 0)).unwrap();
+
+        let events = idx.events_in_range(b"k", 0, 100);
+        assert_eq!(
+            events,
+            vec![
+                (Revision::new(1, 0), KeyEventKind::Put),
+                (Revision::new(2, 0), KeyEventKind::Put),
+                (Revision::new(3, 0), KeyEventKind::Tombstone),
+                (Revision::new(4, 0), KeyEventKind::Put),
+            ]
+        );
+    }
+
+    /// `get_strict_lt` returns `None` when the key has no entry —
+    /// matches the "no entry" arm in `events_in_range`.
+    #[test]
+    fn sharded_key_index_get_strict_lt_missing_key_returns_none() {
+        let idx = ShardedKeyIndex::new();
+        let pred = idx.get_strict_lt(b"absent", Revision::new(5, 0)).unwrap();
+        assert!(pred.is_none());
+    }
+
+    /// `get_strict_lt` cross-gen walk through the index surface —
+    /// pins the same property as `KeyHistory`'s U5b at the
+    /// `ShardedKeyIndex` boundary.
+    #[test]
+    fn sharded_key_index_get_strict_lt_cross_generation() {
+        let idx = ShardedKeyIndex::new();
+        idx.put(b"k", Revision::new(1, 0)).unwrap();
+        idx.tombstone(b"k", Revision::new(2, 0)).unwrap();
+        idx.put(b"k", Revision::new(3, 0)).unwrap();
+
+        let pred = idx
+            .get_strict_lt(b"k", Revision::new(3, 0))
+            .unwrap()
+            .unwrap();
+        assert_eq!(pred.modified, Revision::new(1, 0));
     }
 
     // === Class 2: sharding contract ===
