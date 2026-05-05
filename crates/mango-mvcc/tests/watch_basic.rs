@@ -7,10 +7,8 @@
 //! lifecycle) live in `crates/mango-mvcc/src/watchable_store.rs`'s
 //! `#[cfg(test)] mod tests`.
 //!
-//! Tests #12 (slow-consumer Disconnected signal) and #14 (smoke)
-//! land alongside their respective commits per the plan's §12
-//! commit sequence — #12 with commit 5 (`WatchError::Disconnected`
-//! surfacing on flood); #14 already in module tests.
+//! Test #14 (observer-double-attach smoke) lives in the module
+//! `#[cfg(test)] mod tests` block, not here.
 //!
 //! Test #5 cross-watcher fanout uses 5 watchers (not 10) and 12 puts
 //! (not 50) — the 10×50 figure in the plan was an upper-bound guide;
@@ -44,7 +42,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use mango_mvcc::store::range::RangeRequest;
 use mango_mvcc::store::MvccStore;
-use mango_mvcc::{MvccError, WatchEventKind, WatchableStore};
+use mango_mvcc::{DisconnectReason, MvccError, WatchError, WatchEventKind, WatchableStore};
 use mango_storage::{Backend, BackendConfig, InMemBackend};
 use tokio::time::timeout;
 
@@ -393,4 +391,72 @@ async fn start_rev_below_current_returns_unsupported_integration() {
         .watch(Bytes::from_static(b"a"), Bytes::new(), 1)
         .expect_err("rejected");
     assert!(matches!(err, MvccError::Unsupported(_)), "got {err:?}");
+}
+
+/// Phase 3 plan §11 test #12 (`slow_consumer_disconnect_emits_signal`).
+///
+/// A watcher that does not poll its stream while the writer floods
+/// more events than `EVENT_CAPACITY` (1024) eventually receives
+/// a terminal `Err(WatchError::Disconnected(
+/// DisconnectReason::SlowConsumer))`. The reserved permit (slot
+/// 1025 of the 1025-cap channel) makes that terminal send
+/// infallible. After the terminal item, the channel closes (the
+/// writer's registry-write deregistration drops the `Sender`)
+/// and the receiver returns `None`.
+#[tokio::test(flavor = "current_thread")]
+async fn slow_consumer_disconnect_emits_signal() {
+    let store = open();
+    let ws = WatchableStore::new(Arc::clone(&store)).expect("new");
+    let mut s = ws
+        .watch(Bytes::from_static(b"k"), Bytes::new(), 0)
+        .expect("watch");
+
+    // Each `put` produces one event. After 1024 puts the channel is
+    // full; the 1025th put trips `try_send → Full`, consumes the
+    // reserved permit (sending `Err(Disconnected(SlowConsumer))`),
+    // and removes the watcher from the registry. Subsequent puts
+    // skip dispatch entirely.
+    for _ in 0..1100u32 {
+        store.put(b"k", b"v").await.expect("put");
+    }
+
+    // Drain: 1024 `Ok(_)` events, then exactly one terminal
+    // `Err(Disconnected(SlowConsumer))`.
+    let mut ok_count = 0u32;
+    let terminal = loop {
+        let next = timeout(Duration::from_millis(500), s.recv())
+            .await
+            .expect("recv before timeout")
+            .expect("channel still open until terminal");
+        match next {
+            Ok(_) => ok_count += 1,
+            Err(e) => break e,
+        }
+    };
+
+    assert_eq!(
+        ok_count, 1024,
+        "expected EVENT_CAPACITY = 1024 Ok events before disconnect, got {ok_count}",
+    );
+    assert!(
+        matches!(
+            terminal,
+            WatchError::Disconnected(DisconnectReason::SlowConsumer),
+        ),
+        "got {terminal:?}",
+    );
+
+    // After the terminal item the Sender is dropped (registry
+    // deregistration) and the channel closes.
+    let after = timeout(Duration::from_millis(200), s.recv())
+        .await
+        .expect("recv before timeout");
+    assert!(
+        after.is_none(),
+        "expected channel close after terminal Err, got {after:?}",
+    );
+
+    // Watcher fully removed from the registry by the dispatch path
+    // (no separate user drop required).
+    assert_eq!(ws.watcher_count(), 0);
 }
