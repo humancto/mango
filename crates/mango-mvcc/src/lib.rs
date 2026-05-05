@@ -40,7 +40,7 @@ pub use bucket::{
     register, KEY_BUCKET_ID, KEY_BUCKET_NAME, KEY_INDEX_BUCKET_ID, KEY_INDEX_BUCKET_NAME,
 };
 pub use encoding::{decode_key, encode_key, EncodedKey, KeyDecodeError, KeyKind};
-pub use error::{MvccError, OpenError};
+pub use error::{MvccError, OpenError, UnsupportedFeature};
 pub use key_history::{KeyAtRev, KeyHistory, KeyHistoryError, RestoreInvalidReason};
 pub use revision::Revision;
 pub use sharded_key_index::{KeyIndexError, ShardedKeyIndex};

@@ -106,6 +106,34 @@ pub enum MvccError {
     /// `key` bucket).
     #[error(transparent)]
     KeyDecode(#[from] KeyDecodeError),
+    /// A feature the caller invoked is not yet wired in this
+    /// ROADMAP phase. Carries an [`UnsupportedFeature`] tag so
+    /// callers can branch on the specific gap rather than parsing
+    /// a string. Phase 3 plan §3 (ROADMAP.md:862).
+    ///
+    /// **Stability.** Adding a variant to [`UnsupportedFeature`]
+    /// is non-breaking (`#[non_exhaustive]`); removing one is the
+    /// desired compile-time signal that the feature has shipped.
+    #[error("unsupported feature: {0:?}")]
+    Unsupported(UnsupportedFeature),
+}
+
+/// Tag for a feature gated off at the current ROADMAP phase.
+/// Pairs with [`MvccError::Unsupported`].
+///
+/// **Intent.** Adding a variant is non-breaking; removing one is
+/// load-bearing — when the gap closes (e.g. ROADMAP.md:863 wires
+/// the unsynced/catch-up watcher path), deleting the variant
+/// makes every matchsite that handles it fail compilation, which
+/// is exactly the signal we want.
+#[derive(Clone, Copy, Eq, PartialEq, Debug)]
+#[non_exhaustive]
+pub enum UnsupportedFeature {
+    /// A `watch(start_rev)` with `start_rev <= current_revision()`
+    /// requires the unsynced/catch-up dispatch path. Phase 3 ships
+    /// only the synced (current-rev forward) path; the unsynced
+    /// path lands in ROADMAP.md:863.
+    UnsyncedWatcher,
 }
 
 #[cfg(test)]
@@ -117,7 +145,7 @@ mod tests {
         clippy::indexing_slicing
     )]
 
-    use super::{MvccError, OpenError};
+    use super::{MvccError, OpenError, UnsupportedFeature};
 
     #[test]
     fn open_error_non_empty_backend_message_includes_count() {
@@ -162,5 +190,28 @@ mod tests {
         };
         let msg = format!("{e}");
         assert!(msg.contains("next_main overflow"), "message: {msg}");
+    }
+
+    #[test]
+    fn mvcc_error_unsupported_message_includes_variant_name() {
+        let e = MvccError::Unsupported(UnsupportedFeature::UnsyncedWatcher);
+        let msg = format!("{e}");
+        assert!(
+            msg.contains("UnsyncedWatcher"),
+            "Display passes through the inner Debug-formatted variant: {msg}"
+        );
+        assert!(
+            msg.contains("unsupported feature"),
+            "Display includes the umbrella label: {msg}"
+        );
+    }
+
+    #[test]
+    fn unsupported_feature_is_copy_eq_debug() {
+        let a = UnsupportedFeature::UnsyncedWatcher;
+        let b = a;
+        assert_eq!(a, b);
+        let dbg = format!("{a:?}");
+        assert!(dbg.contains("UnsyncedWatcher"), "Debug: {dbg}");
     }
 }
