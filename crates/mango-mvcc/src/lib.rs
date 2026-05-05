@@ -48,4 +48,7 @@ pub use store::{
     Compare, CompareOp, KeyValue, LeaseId, RangeRequest, RangeResult, RequestOp, ResponseOp,
     Snapshot, TxnRequest, TxnResponse,
 };
-pub use watchable_store::{WatchEvent, WatchEventKind, WriteObserver};
+pub use watchable_store::{
+    DisconnectReason, WatchError, WatchEvent, WatchEventKind, WatchStream, WatchableStore,
+    WriteObserver,
+};
