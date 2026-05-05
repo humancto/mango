@@ -122,13 +122,11 @@ enum OpPlan {
         /// `key` immediately before this op runs (or `None` if
         /// the key was absent / tombstoned). Captured BEFORE any
         /// in-flight or persisted index mutation, so emit-side
-        /// consumers (the watch path in ROADMAP.md:863 follow-up)
-        /// see the right value even when an earlier op in the
-        /// same txn already overwrote `key`.
+        /// consumers see the right value even when an earlier op
+        /// in the same txn already overwrote `key`.
         ///
-        /// Phase 3 plan §4.6. In this commit, the field is
-        /// captured but not yet wired into the emitted
-        /// [`WatchEvent`] (commit 3 of the L863 series).
+        /// Phase 3 plan §4.6 (ROADMAP.md:863): emitted as-is by
+        /// [`emit_txn_events`].
         prev: Option<KeyValue>,
     },
     /// Zero or more sub-allocated tombstones for a single
@@ -154,17 +152,10 @@ struct Tombstone {
     rev: Revision,
     /// Pre-mutation prev-kv: the live version of `key`
     /// immediately before this tombstone runs. Captured BEFORE
-    /// any index mutation. In this commit the field is captured
-    /// but not yet wired into the emitted [`WatchEvent`] — that
-    /// lands in commit 3 of the L863 series, which lets bench
-    /// B2.5 isolate the capture-only overhead from the emit-side
-    /// change. Allow `dead_code` for one commit.
-    #[allow(
-        dead_code,
-        reason = "wired into emit in commit 3 of the L863 series; \
-                  keeping the capture isolated lets bench B2.5 measure \
-                  capture-only cost"
-    )]
+    /// any index mutation by [`MvccStore::delete_range`] /
+    /// [`MvccStore::build_txn_plan`] and emitted **as-is** by
+    /// [`emit_txn_events`] — no second snapshot or index lookup
+    /// runs on the writer hot path.
     prev: KeyValue,
 }
 
@@ -212,15 +203,20 @@ fn checked_add_total(total: usize) -> Result<usize, MvccError> {
 ///
 /// - [`OpPlan::Read`] — no event (read-only ops are not observable).
 /// - [`OpPlan::Put`] — one [`WatchEventKind::Put`] event with
-///   `revision = rev` from the plan entry.
+///   `revision = rev` from the plan entry. `prev` is the captured
+///   pre-mutation [`KeyValue`] (see [`OpPlan::Put.prev`]) — `None`
+///   if the key was absent or tombstoned at the moment the plan was
+///   built.
 /// - [`OpPlan::Delete`] — one [`WatchEventKind::Delete`] event per
 ///   [`Tombstone`] in `tombs`, in match order; `value` is empty.
+///   `prev` is the tombstone's captured pre-mutation [`KeyValue`]
+///   wrapped in `Some` — tombstones are only emitted for live keys,
+///   so the prev-kv is unconditionally present.
 ///
-/// `prev` is `None` on every event in this commit. The plan-level
-/// `prev` capture is wired into the emitted [`WatchEvent`] in
-/// commit 3 of the L863 series — keeping that change isolated
-/// lets bench B2.5 measure the capture-only overhead in isolation
-/// (Phase 3 plan §6 / §5.5).
+/// Phase 3 plan §4.6 / §6 (ROADMAP.md:863): the captured prev-kvs
+/// are emitted *as-is* — no second backend or index lookup runs on
+/// the writer's hot path. INVARIANT X is asserted at the call site
+/// in [`MvccStore::commit_txn_batch`].
 fn emit_txn_events(plan: &[OpPlan], buf: &mut Vec<WatchEvent>) {
     for entry in plan {
         match entry {
@@ -229,13 +225,13 @@ fn emit_txn_events(plan: &[OpPlan], buf: &mut Vec<WatchEvent>) {
                 key,
                 value,
                 rev,
-                prev: _captured_for_l863,
+                prev,
             } => {
                 buf.push(WatchEvent {
                     kind: WatchEventKind::Put,
                     key: Bytes::copy_from_slice(key),
                     value: Bytes::copy_from_slice(value),
-                    prev: None,
+                    prev: prev.clone(),
                     revision: *rev,
                 });
             }
@@ -245,7 +241,7 @@ fn emit_txn_events(plan: &[OpPlan], buf: &mut Vec<WatchEvent>) {
                         kind: WatchEventKind::Delete,
                         key: Bytes::copy_from_slice(&tomb.key),
                         value: Bytes::new(),
-                        prev: None,
+                        prev: Some(tomb.prev.clone()),
                         revision: tomb.rev,
                     });
                 }
@@ -589,6 +585,15 @@ impl<B: Backend> MvccStore<B> {
         let mut state = self.writer.lock().await;
         let rev = Revision::new(state.next_main, 0);
 
+        // Phase 3 plan §4.6 (ROADMAP.md:863): capture pre-mutation
+        // prev-kv BEFORE `index.put` runs. ONE backend snapshot is
+        // taken per writer call; cost amortises over the read-then-
+        // emit path. `None` if the key was absent or tombstoned.
+        let prev_kv = {
+            let snap_be = self.backend.snapshot()?;
+            self.compute_prev_kv_strict(key, rev, &snap_be)?
+        };
+
         let mut batch = self.backend.begin_batch()?;
         let encoded = encode_key(rev, KeyKind::Put);
         batch.put(KEY_BUCKET_ID, encoded.as_bytes(), value)?;
@@ -638,13 +643,17 @@ impl<B: Backend> MvccStore<B> {
 
         // Phase 3 plan §4.2 (ROADMAP.md:862): synthesize the watch
         // event before snapshot publication so the buffer is ready
-        // to dispatch immediately after `snapshot.store()`. `prev`
-        // is `None` here — populated in ROADMAP.md:863.
+        // to dispatch immediately after `snapshot.store()`.
+        //
+        // INVARIANT X (Phase 3 plan §4.6 / §6, ROADMAP.md:863):
+        // `prev_kv` was resolved above against a `Backend::snapshot`
+        // taken before any index mutation; no second backend or
+        // index lookup runs on the emit path.
         state.emit_buf.push(WatchEvent {
             kind: WatchEventKind::Put,
             key: Bytes::copy_from_slice(key),
             value: Bytes::copy_from_slice(value),
-            prev: None,
+            prev: prev_kv,
             revision: rev,
         });
 
@@ -1009,15 +1018,22 @@ impl<B: Backend> MvccStore<B> {
         // Phase 3 plan §4.2 (ROADMAP.md:862): one Delete event per
         // tombstoned key, in match order, sub-revision matching the
         // on-disk assignment. `value` is empty for Delete; `prev`
-        // is captured on each [`Tombstone`] (this commit) and
-        // wired into the emitted event in commit 3 of the L863
-        // series so bench B2.5 can isolate the capture-only cost.
+        // rides through verbatim from the capture above.
+        //
+        // INVARIANT X (Phase 3 plan §4.6 / §6, ROADMAP.md:863):
+        // every `prev` here was resolved against the single
+        // pre-mutation `Backend::snapshot` taken upstream, before
+        // `index.tombstone` mutated the index. The emit path
+        // performs no second backend or index lookup. Holds because
+        // the snapshot was dropped before the index mutation, and
+        // no path between capture and emit mutates the captured
+        // KeyValues.
         for tomb in &tombstones {
             state.emit_buf.push(WatchEvent {
                 kind: WatchEventKind::Delete,
                 key: Bytes::copy_from_slice(&tomb.key),
                 value: Bytes::new(),
-                prev: None,
+                prev: Some(tomb.prev.clone()),
                 revision: tomb.rev,
             });
         }
@@ -1136,6 +1152,20 @@ impl<B: Backend> MvccStore<B> {
         // contributes nothing). Sub-revisions match the on-disk
         // assignments inside `OpPlan::Put.rev` / the `tombs`
         // pairs, so commit-revision ordering is preserved.
+        //
+        // INVARIANT X (Phase 3 plan §4.6 / §6, ROADMAP.md:863):
+        // every WatchEvent appended here carries the prev-kv that
+        // was captured by `delete_range` / `build_txn_plan` BEFORE
+        // any index mutation ran. The emit path performs no second
+        // backend or index lookup — `prev` is read straight off the
+        // OpPlan / Tombstone. Holds because `apply_txn_in_mem` (the
+        // step that mutates the index and `keys_in_order`) ran
+        // above on this committed plan; the captured prevs were
+        // resolved before that, against the snapshot taken inside
+        // `build_txn_plan`'s single `Backend::snapshot` call (or
+        // the in-flight `TentativeState` for same-branch
+        // overwrites). No call site between capture and emit
+        // mutates the captured KeyValues.
         emit_txn_events(&plan, &mut state.emit_buf);
 
         let next = state.next_main.checked_add(1).ok_or(MvccError::Internal {

@@ -101,8 +101,14 @@ pub struct WatchEvent {
     pub key: Bytes,
     /// User value. Empty for [`WatchEventKind::Delete`].
     pub value: Bytes,
-    /// Previous key/value at `revision - 1`, if available. Always
-    /// `None` in this PR; populated in ROADMAP.md:863.
+    /// Previous key/value at `revision - 1`, if available.
+    /// Captured by the writer hot path (single-key `put` /
+    /// `delete_range` and the txn first pass) BEFORE any index
+    /// mutation, against a single `Backend::snapshot` per writer
+    /// call. `None` for `Put` when the key was absent or tombstoned
+    /// at the moment the writer ran; always `Some` for `Delete`
+    /// since tombstones target live keys only. Phase 3 plan §4.6
+    /// (ROADMAP.md:863).
     pub prev: Option<KeyValue>,
     /// Revision at which the event was produced. The dispatch
     /// eligibility filter compares
