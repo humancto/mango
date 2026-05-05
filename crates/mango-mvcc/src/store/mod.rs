@@ -494,6 +494,50 @@ impl<B: Backend> MvccStore<B> {
         &self.backend
     }
 
+    /// Acquire a coherent `(mvcc_snap, backend_snap)` pair under
+    /// the writer mutex.
+    ///
+    /// Phase 3 plan §4.5 (ROADMAP.md:863). Both snapshots observe
+    /// the same point in time with respect to concurrent writes —
+    /// most importantly [`Self::compact`], whose on-disk delete
+    /// (`commit_batch`) and `snapshot.store(new_floor)` happen
+    /// inside its own writer-lock hold. Acquiring the writer lock
+    /// here means the catch-up driver either sees the pre-compact
+    /// state or the post-compact state, never a torn pair.
+    ///
+    /// The Mvcc snapshot's `rev` is the upper bound for the
+    /// catch-up scan; `compacted` is the floor. Caller reads both
+    /// from this single returned `Arc<Snapshot>` (rust-expert nit
+    /// 3 of v3 review: don't re-load `self.snapshot` after the
+    /// pair is taken).
+    ///
+    /// Cost: one `tokio::sync::Mutex` acquisition + one
+    /// [`ArcSwap::load_full`] + one [`Backend::snapshot`]. The
+    /// writer is stalled for the duration of those three steps;
+    /// on redb the backend snapshot is a single `begin_read()` in
+    /// the µs range, so the stall is bounded. Catch-up driver
+    /// caps total scan attempts at `MAX_CATCHUP_ATTEMPTS` so the
+    /// total stall budget per watcher is bounded.
+    ///
+    /// # Errors
+    ///
+    /// - [`MvccError::Backend`] if `Backend::snapshot()` fails.
+    #[allow(
+        dead_code,
+        reason = "consumed by the catch-up driver in commit 6 of \
+                  the L863 series; landed first as a small isolated \
+                  primitive so its writer-mutex contract is \
+                  reviewed independently of the driver"
+    )]
+    pub(crate) async fn snapshot_pair_under_writer(
+        &self,
+    ) -> Result<(Arc<Snapshot>, B::Snapshot), MvccError> {
+        let _guard = self.writer.lock().await;
+        let mvcc = self.snapshot.load_full();
+        let be = self.backend.snapshot()?;
+        Ok((mvcc, be))
+    }
+
     /// Pre-mutation prev-kv lookup: the live version of `key`
     /// strictly before `at_rev`, materialised as a [`KeyValue`]
     /// against the on-disk snapshot `snap_be`.
