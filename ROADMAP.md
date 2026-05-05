@@ -860,7 +860,7 @@ revision and receive every event at or after that revision. Includes
 `watchable_store`, fragmenting, progress notifications.
 
 - [x] `WatchableStore` wrapping the MVCC store: `watch(range, start_rev) -> stream of Events`
-- [ ] Synced vs unsynced watcher groups (catch-up path for watchers behind current revision)
+- [x] Synced vs unsynced watcher groups (catch-up path for watchers behind current revision)
 - [ ] Event coalescing per-revision per-watcher
 - [ ] Progress-notify ticker (periodic `WatchResponse` with current revision so idle watchers know they're current)
 - [ ] Cancel + clean shutdown of a watcher; bounded per-watcher channel with backpressure (slow consumer disconnect policy documented)
