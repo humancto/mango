@@ -282,12 +282,36 @@ impl Watcher {
 /// [`WatchableStore::watch`] is paranoia-belt-suspenders rather than a
 /// realistic guard — the `Internal` arm just makes the failure mode
 /// typed instead of a panic.
+///
+/// # Synced vs unsynced split (Phase 3 plan §4.4 / ROADMAP.md:863)
+///
+/// Watchers fall into one of two disjoint groups:
+///
+/// - `synced` — caught up to `current_revision()`; receive every new
+///   event from the inline writer dispatch path.
+/// - `unsynced` — registered with `start_rev <= current_revision()`
+///   at the time of [`WatchableStore::watch`]; the catch-up driver
+///   (commit 6 of the L863 series) replays history events
+///   `[start_rev, snap_rev]` from the MVCC store before promoting
+///   the watcher to `synced`.
+///
+/// Both groups share the same `Watcher` shape and id space; only
+/// their dispatch / deregister sites differ. A given `WatcherId`
+/// appears in **at most one** map at any time.
 struct Registry {
     next_id: WatcherId,
-    /// Synced watchers: those whose `start_rev > current_revision()` at
-    /// registration. Phase 3 ships only this group; the unsynced
-    /// (catch-up) group lands in ROADMAP.md:863.
+    /// Synced watchers — receive events from the inline writer hot path.
     synced: HashMap<WatcherId, Watcher>,
+    /// Unsynced watchers — under catch-up. Inline dispatch SKIPS them;
+    /// the catch-up driver (ROADMAP.md:863, commit 6 of the L863
+    /// series) is responsible for replaying historical events and
+    /// promoting them to `synced`.
+    ///
+    /// In this commit the map exists but is always empty —
+    /// [`WatchableStore::watch`] still rejects `start_rev <=
+    /// current_revision()` with [`UnsupportedFeature::UnsyncedWatcher`].
+    /// That gate is lifted in commit 6 when the driver lands.
+    unsynced: HashMap<WatcherId, Watcher>,
 }
 
 impl Registry {
@@ -295,7 +319,26 @@ impl Registry {
         Self {
             next_id: 0,
             synced: HashMap::new(),
+            unsynced: HashMap::new(),
         }
+    }
+
+    /// Total live watchers across both groups. Used by
+    /// [`WatchableStore::watcher_count`] so the externally-visible
+    /// count is invariant under group transitions.
+    fn total_len(&self) -> usize {
+        self.synced.len().saturating_add(self.unsynced.len())
+    }
+
+    /// Remove watcher `id` from whichever group holds it. Returns
+    /// the removed [`Watcher`], or `None` if neither group held it.
+    /// The id space is shared and disjoint across groups, so
+    /// at most one removal succeeds.
+    fn remove(&mut self, id: WatcherId) -> Option<Watcher> {
+        if let Some(w) = self.synced.remove(&id) {
+            return Some(w);
+        }
+        self.unsynced.remove(&id)
     }
 }
 
@@ -520,11 +563,13 @@ impl<B: Backend> WatchableStore<B> {
         &self.store
     }
 
-    /// Number of registered watchers. Public (not test-only) so a future
-    /// `mango-server` admin / observability surface can read it.
+    /// Number of registered watchers across both `synced` and
+    /// `unsynced` groups. Invariant under catch-up promotion.
+    /// Public (not test-only) so a future `mango-server` admin /
+    /// observability surface can read it.
     #[must_use]
     pub fn watcher_count(&self) -> usize {
-        self.registry.read().synced.len()
+        self.registry.read().total_len()
     }
 }
 
@@ -610,12 +655,13 @@ impl<B: Backend> Drop for WatchableStore<B> {
     ///   `Arc<WatchableStore>` exists.
     fn drop(&mut self) {
         let mut reg = self.registry.write();
-        let watchers = std::mem::take(&mut reg.synced);
+        let synced = std::mem::take(&mut reg.synced);
+        let unsynced = std::mem::take(&mut reg.unsynced);
         // Drop the lock before consuming permits — the per-watcher
         // permit consumption only touches that watcher's own
         // `disconnect_permit` slot, no cross-locking needed.
         drop(reg);
-        for (_id, w) in watchers {
+        for (_id, w) in synced.into_iter().chain(unsynced.into_iter()) {
             w.consume_disconnect_permit(DisconnectReason::StoreDropped);
             // `w` (and its `Sender`) is dropped at the end of this
             // iteration; the channel closes for the receiver.
@@ -659,7 +705,11 @@ pin_project! {
                 // refactors to a deregister channel if the bench trips
                 // the T4 threshold.
                 let mut w = reg.write();
-                w.synced.remove(this.id);
+                // Watcher may live in either group depending on
+                // catch-up state; the `Registry::remove` helper
+                // tries both. Id space is disjoint across groups
+                // (Phase 3 plan §4.4 / ROADMAP.md:863).
+                let _removed = w.remove(*this.id);
             }
             // mpsc::Receiver::Drop closes the receiver; any in-flight
             // writer try_send on this watcher's tx fails with
