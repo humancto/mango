@@ -67,7 +67,7 @@ use crate::error::{MvccError, OpenError};
 use crate::key_history::KeyHistoryError;
 use crate::revision::Revision;
 use crate::sharded_key_index::{KeyIndexError, ShardedKeyIndex};
-use crate::watchable_store::WriteObserver;
+use crate::watchable_store::{WatchEvent, WatchEventKind, WriteObserver};
 
 use self::writer::WriterState;
 
@@ -147,6 +147,47 @@ fn checked_add_total(total: usize) -> Result<usize, MvccError> {
     total.checked_add(1).ok_or(MvccError::Internal {
         context: "txn physical write count overflow",
     })
+}
+
+/// Walk a built [`OpPlan`] slice and append one [`WatchEvent`] per
+/// physical write into `buf`. Phase 3 plan §4.2 (ROADMAP.md:862).
+///
+/// Per-variant mapping:
+///
+/// - [`OpPlan::Read`] — no event (read-only ops are not observable).
+/// - [`OpPlan::Put`] — one [`WatchEventKind::Put`] event with
+///   `revision = rev` from the plan entry.
+/// - [`OpPlan::Delete`] — one [`WatchEventKind::Delete`] event per
+///   `(key, rev)` pair in `tombs`, in match order; `value` is empty.
+///
+/// `prev` is `None` on every event in this PR (populated in
+/// ROADMAP.md:863).
+fn emit_txn_events(plan: &[OpPlan], buf: &mut Vec<WatchEvent>) {
+    for entry in plan {
+        match entry {
+            OpPlan::Read => {}
+            OpPlan::Put { key, value, rev } => {
+                buf.push(WatchEvent {
+                    kind: WatchEventKind::Put,
+                    key: Bytes::copy_from_slice(key),
+                    value: Bytes::copy_from_slice(value),
+                    prev: None,
+                    revision: *rev,
+                });
+            }
+            OpPlan::Delete { tombs } => {
+                for (k, key_rev) in tombs {
+                    buf.push(WatchEvent {
+                        kind: WatchEventKind::Delete,
+                        key: Bytes::copy_from_slice(k),
+                        value: Bytes::new(),
+                        prev: None,
+                        revision: *key_rev,
+                    });
+                }
+            }
+        }
+    }
 }
 
 /// User-facing MVCC store.
@@ -325,6 +366,32 @@ impl<B: Backend> MvccStore<B> {
         self.observer.load().is_some()
     }
 
+    /// Dispatch the writer's per-op `emit_buf` to the attached
+    /// observer (if any). Phase 3 plan §4.2 (ROADMAP.md:862).
+    ///
+    /// **Caller contract.** Must be invoked under the writer
+    /// `tokio::sync::Mutex` (same lock that owns `emit_buf`) AND
+    /// **after** `self.snapshot.store()` has published the new
+    /// revision. The dispatch-after-store ordering is load-bearing
+    /// for the `start_rev` race-free contract — a watcher that
+    /// receives an event for revision `R` is guaranteed to see
+    /// `current_revision() >= R` from any later read (Phase 3 plan
+    /// §4.2 / §11 test #11).
+    ///
+    /// `emit_buf` is unconditionally cleared at the end so the
+    /// allocation amortizes across writes. The no-observer hot
+    /// path is one `Vec::is_empty()` branch + one `ArcSwap::load`
+    /// + one `match` + one `Vec::clear`.
+    fn dispatch_observer(&self, emit_buf: &mut Vec<WatchEvent>, at_main: i64) {
+        if !emit_buf.is_empty() {
+            let observer = self.observer.load();
+            if let Some(obs) = (**observer).as_ref() {
+                obs.on_apply(emit_buf, at_main);
+            }
+        }
+        emit_buf.clear();
+    }
+
     /// Highest fully-published revision. Returns `0` on a fresh
     /// store.
     ///
@@ -449,6 +516,18 @@ impl<B: Backend> MvccStore<B> {
         })?;
         state.next_main = next;
 
+        // Phase 3 plan §4.2 (ROADMAP.md:862): synthesize the watch
+        // event before snapshot publication so the buffer is ready
+        // to dispatch immediately after `snapshot.store()`. `prev`
+        // is `None` here — populated in ROADMAP.md:863.
+        state.emit_buf.push(WatchEvent {
+            kind: WatchEventKind::Put,
+            key: Bytes::copy_from_slice(key),
+            value: Bytes::copy_from_slice(value),
+            prev: None,
+            revision: rev,
+        });
+
         // Publish the new snapshot under the writer mutex
         // (L846): atomic `(rev, compacted)` pair, ArcSwap's
         // `store` is the Release that pairs with readers'
@@ -459,6 +538,11 @@ impl<B: Backend> MvccStore<B> {
             rev: rev.main(),
             compacted: prev.compacted,
         }));
+
+        // Dispatch AFTER snapshot.store(), still under writer
+        // mutex (Phase 3 plan §4.2 — load-bearing for the
+        // `start_rev` race-free contract).
+        self.dispatch_observer(&mut state.emit_buf, rev.main());
 
         Ok(rev)
     }
@@ -770,6 +854,20 @@ impl<B: Backend> MvccStore<B> {
         })?;
         state.next_main = next;
 
+        // Phase 3 plan §4.2 (ROADMAP.md:862): one Delete event per
+        // tombstoned key, in match order, sub-revision matching the
+        // on-disk assignment. `value` is empty for Delete; `prev`
+        // is `None` (populated in ROADMAP.md:863).
+        for (k, key_rev) in &tombstones {
+            state.emit_buf.push(WatchEvent {
+                kind: WatchEventKind::Delete,
+                key: Bytes::copy_from_slice(k),
+                value: Bytes::new(),
+                prev: None,
+                revision: *key_rev,
+            });
+        }
+
         // L846: publish the new snapshot under the writer mutex.
         // `compacted` carries forward unchanged — DeleteRange
         // does not advance the floor.
@@ -778,6 +876,10 @@ impl<B: Backend> MvccStore<B> {
             rev: rev.main(),
             compacted: prev.compacted,
         }));
+
+        // Phase 3 plan §4.2: dispatch AFTER snapshot.store, still
+        // under writer mutex.
+        self.dispatch_observer(&mut state.emit_buf, rev.main());
 
         Ok((deleted, rev))
     }
@@ -874,6 +976,14 @@ impl<B: Backend> MvccStore<B> {
         self.commit_txn_batch(&plan).await?;
         self.apply_txn_in_mem(&plan)?;
 
+        // Phase 3 plan §4.2 (ROADMAP.md:862): walk the OpPlan and
+        // emit one event per physical write (Put → one Put event;
+        // Delete → one Delete event per tombstoned key; Read
+        // contributes nothing). Sub-revisions match the on-disk
+        // assignments inside `OpPlan::Put.rev` / the `tombs`
+        // pairs, so commit-revision ordering is preserved.
+        emit_txn_events(&plan, &mut state.emit_buf);
+
         let next = state.next_main.checked_add(1).ok_or(MvccError::Internal {
             context: "next_main overflow",
         })?;
@@ -886,6 +996,10 @@ impl<B: Backend> MvccStore<B> {
             rev: head_rev.main(),
             compacted: prev.compacted,
         }));
+
+        // Phase 3 plan §4.2: dispatch AFTER snapshot.store, still
+        // under writer mutex.
+        self.dispatch_observer(&mut state.emit_buf, head_rev.main());
 
         let responses = self.build_txn_responses_mutating(branch, &plan)?;
 
@@ -1571,6 +1685,163 @@ mod tests {
         // Slot still holds the first observer (not the rejected
         // second one).
         assert!(store.observer_is_attached());
+    }
+
+    /// Phase 3 plan §12 commit #2 (ROADMAP.md:862). Asserts that
+    /// `put` / `delete_range` / `txn` each dispatch the right
+    /// `WatchEvents` to the attached observer, in commit-revision
+    /// order, with sub-revisions matching on-disk assignments.
+    /// `at_main` matches the published main revision per call.
+    #[tokio::test(flavor = "current_thread")]
+    async fn observer_records_put_delete_txn_events() {
+        use crate::revision::Revision;
+        use crate::store::txn::{RequestOp, TxnRequest};
+        use crate::watchable_store::{WatchEvent, WatchEventKind, WriteObserver};
+        use bytes::Bytes;
+        use parking_lot::Mutex;
+
+        struct Recorder {
+            calls: Mutex<Vec<(Vec<WatchEvent>, i64)>>,
+        }
+        impl WriteObserver for Recorder {
+            fn on_apply(&self, events: &[WatchEvent], at_main: i64) {
+                self.calls.lock().push((events.to_vec(), at_main));
+            }
+        }
+
+        let store = MvccStore::open(fresh_backend()).expect("open");
+        let rec = Arc::new(Recorder {
+            calls: Mutex::new(Vec::new()),
+        });
+        store
+            .attach_observer(Arc::clone(&rec) as Arc<dyn WriteObserver>)
+            .expect("first attach");
+
+        // 1. Multi-op txn that pre-populates a/b: [Put a, Put b,
+        //    Range b]. Two physical writes; subs 0 and 1; main=1.
+        //    DeleteRange inside the same txn is intentionally
+        //    omitted — txn `DeleteRange` matches against the
+        //    pre-txn `keys_in_order` snapshot (see `build_txn_plan`
+        //    rustdoc), so deleting a/b in the same txn that puts
+        //    them is a no-op. Multi-key Delete is exercised via a
+        //    follow-up `delete_range` in step 2.
+        let txn_resp = store
+            .txn(TxnRequest {
+                compare: vec![],
+                success: vec![
+                    RequestOp::Put {
+                        key: b"a".to_vec(),
+                        value: b"av".to_vec(),
+                    },
+                    RequestOp::Put {
+                        key: b"b".to_vec(),
+                        value: b"bv".to_vec(),
+                    },
+                    RequestOp::Range(crate::store::range::RangeRequest {
+                        key: b"b".to_vec(),
+                        ..Default::default()
+                    }),
+                ],
+                failure: vec![],
+            })
+            .await
+            .expect("txn");
+        assert!(txn_resp.succeeded);
+        assert_eq!(txn_resp.header_revision, 1);
+
+        // 2. Range-DeleteRange [a, c) — tombstones both a and b
+        //    in one op. main=2, subs 0..1.
+        let (deleted, del_rev) = store.delete_range(b"a", b"c").await.expect("delete_range");
+        assert_eq!(deleted, 2);
+        assert_eq!(del_rev.main(), 2);
+
+        // 3. Single Put → one Put event at main=3, sub=0.
+        let put_rev = store.put(b"k1", b"v1").await.expect("put");
+        assert_eq!(put_rev.main(), 3);
+
+        let calls = rec.calls.lock().clone();
+        assert_eq!(calls.len(), 3, "one on_apply call per writer op");
+
+        // Call 1 — Txn: Put(a, sub=0), Put(b, sub=1). Range → no
+        //              event.
+        let (events, at_main) = &calls[0];
+        assert_eq!(*at_main, 1);
+        assert_eq!(events.len(), 2, "two physical writes from txn");
+
+        assert_eq!(events[0].kind, WatchEventKind::Put);
+        assert_eq!(events[0].key, Bytes::from_static(b"a"));
+        assert_eq!(events[0].value, Bytes::from_static(b"av"));
+        assert_eq!(events[0].revision, Revision::new(1, 0));
+        assert!(events[0].prev.is_none());
+
+        assert_eq!(events[1].kind, WatchEventKind::Put);
+        assert_eq!(events[1].key, Bytes::from_static(b"b"));
+        assert_eq!(events[1].value, Bytes::from_static(b"bv"));
+        assert_eq!(events[1].revision, Revision::new(1, 1));
+
+        // Call 2 — DeleteRange tombstones both keys; subs 0 and 1.
+        let (events, at_main) = &calls[1];
+        assert_eq!(*at_main, 2);
+        assert_eq!(events.len(), 2, "two tombstoned keys");
+
+        assert_eq!(events[0].kind, WatchEventKind::Delete);
+        assert_eq!(events[0].key, Bytes::from_static(b"a"));
+        assert!(events[0].value.is_empty());
+        assert_eq!(events[0].revision, Revision::new(2, 0));
+
+        assert_eq!(events[1].kind, WatchEventKind::Delete);
+        assert_eq!(events[1].key, Bytes::from_static(b"b"));
+        assert!(events[1].value.is_empty());
+        assert_eq!(events[1].revision, Revision::new(2, 1));
+
+        // Call 3 — Put.
+        let (events, at_main) = &calls[2];
+        assert_eq!(*at_main, 3);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, WatchEventKind::Put);
+        assert_eq!(events[0].key, Bytes::from_static(b"k1"));
+        assert_eq!(events[0].value, Bytes::from_static(b"v1"));
+        assert_eq!(events[0].revision, Revision::new(3, 0));
+    }
+
+    /// Phase 3 plan §4.2 negative-path assertion. A
+    /// `DeleteRange` that matches no live keys must NOT call
+    /// `on_apply` (events would be empty) and must not advance
+    /// `next_main`. Confirms the no-physical-write fast-path in
+    /// `delete_range` (`if matched.is_empty() { return ... }`)
+    /// short-circuits before any dispatch attempt.
+    #[tokio::test(flavor = "current_thread")]
+    async fn observer_skipped_on_zero_match_delete_range() {
+        use crate::watchable_store::{WatchEvent, WriteObserver};
+        use parking_lot::Mutex;
+
+        struct Recorder {
+            calls: Mutex<usize>,
+        }
+        impl WriteObserver for Recorder {
+            fn on_apply(&self, _events: &[WatchEvent], _at_main: i64) {
+                *self.calls.lock() += 1;
+            }
+        }
+
+        let store = MvccStore::open(fresh_backend()).expect("open");
+        let rec = Arc::new(Recorder {
+            calls: Mutex::new(0),
+        });
+        store
+            .attach_observer(Arc::clone(&rec) as Arc<dyn WriteObserver>)
+            .expect("attach");
+
+        // No keys present; a DeleteRange matches nothing.
+        let (deleted, _rev) = store
+            .delete_range(b"missing", b"")
+            .await
+            .expect("delete_range");
+        assert_eq!(deleted, 0);
+        // current_revision must NOT advance — DeleteRange that
+        // matched nothing returns early before allocating a main.
+        assert_eq!(store.current_revision(), 0);
+        assert_eq!(*rec.calls.lock(), 0, "no observer call for zero-match");
     }
 
     // === Put (plan §5.2) ===
