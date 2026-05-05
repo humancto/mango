@@ -322,7 +322,7 @@ impl Registry {
 /// drop (Weak ≠ ownership), which cleans up the registry and emits
 /// `StoreDropped`. The trampoline lives until the `MvccStore` itself
 /// is dropped (or another observer is attached); its only state is a
-/// 16-byte [`Weak`].
+/// single-pointer [`Weak`] plus the `dyn` vtable.
 pub struct WatchableStore<B: Backend> {
     store: Arc<MvccStore<B>>,
     registry: Arc<RwLock<Registry>>,
