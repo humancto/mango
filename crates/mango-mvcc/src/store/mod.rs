@@ -64,7 +64,7 @@ use mango_storage::{Backend, ReadSnapshot, WriteBatch};
 use crate::bucket::{register, KEY_BUCKET_ID};
 use crate::encoding::{decode_key, encode_key, KeyKind};
 use crate::error::{MvccError, OpenError};
-use crate::key_history::{KeyAtRev, KeyHistoryError};
+use crate::key_history::{KeyAtRev, KeyEventKind, KeyHistoryError};
 use crate::revision::Revision;
 use crate::sharded_key_index::{KeyIndexError, ShardedKeyIndex};
 use crate::watchable_store::{WatchEvent, WatchEventKind, WriteObserver};
@@ -443,6 +443,18 @@ impl<B: Backend> MvccStore<B> {
     /// allocation amortizes across writes. The no-observer hot
     /// path is one `Vec::is_empty()` branch + one `ArcSwap::load`
     /// + one `match` + one `Vec::clear`.
+    ///
+    /// INVARIANT W (load-bearing — see `watchable_store.rs` §4.4
+    /// catch-up race proof, ROADMAP.md:863):
+    /// `snapshot.store(new_snap)` and the `obs.on_apply(...)`
+    /// call below MUST run under the same writer-mutex
+    /// acquisition with NO `.await` point between them. The
+    /// catch-up `promote_to_synced` race-proof depends on this
+    /// sequencing. Splitting these calls (e.g. by adding an
+    /// `.await` between them, or by moving `snapshot.store` out
+    /// of the writer-mutex critical section) BREAKS the
+    /// catch-up correctness proof. If you must change this,
+    /// re-derive the proof.
     fn dispatch_observer(&self, emit_buf: &mut Vec<WatchEvent>, at_main: i64) {
         if !emit_buf.is_empty() {
             let observer = self.observer.load();
@@ -522,13 +534,6 @@ impl<B: Backend> MvccStore<B> {
     /// # Errors
     ///
     /// - [`MvccError::Backend`] if `Backend::snapshot()` fails.
-    #[allow(
-        dead_code,
-        reason = "consumed by the catch-up driver in commit 6 of \
-                  the L863 series; landed first as a small isolated \
-                  primitive so its writer-mutex contract is \
-                  reviewed independently of the driver"
-    )]
     pub(crate) async fn snapshot_pair_under_writer(
         &self,
     ) -> Result<(Arc<Snapshot>, B::Snapshot), MvccError> {
@@ -591,6 +596,122 @@ impl<B: Backend> MvccStore<B> {
             value,
             lease: None,
         }))
+    }
+
+    /// Catch-up scan over `[range_start, range_end)` for revisions
+    /// `rev.main() in [lo, hi]`, against the writer-locked
+    /// `(mvcc_snap, snap_be)` pair.
+    ///
+    /// Phase 3 plan §4.5 (ROADMAP.md:863). Used by the unsynced
+    /// watcher's catch-up driver to replay history events between
+    /// `start_rev` (the watcher's requested floor) and `mvcc_snap.rev`
+    /// (the upper bound captured under the writer mutex).
+    ///
+    /// `range_end.is_empty()` selects the single-key case.
+    ///
+    /// Events are emitted in `(rev.main, rev.sub)` ascending order
+    /// across the matched key set — etcd parity. Within one key the
+    /// per-key history walk already yields revs in ascending order
+    /// (`ShardedKeyIndex::events_in_range`); across keys we sort the
+    /// merged list once at the end.
+    ///
+    /// `prev_kv` is computed for every event via
+    /// [`Self::compute_prev_kv_strict`] against the same `snap_be`,
+    /// matching the writer hot path's contract: `Put` events carry
+    /// `Some(...)` only when a strictly-prior live version exists in
+    /// any generation; `Delete` events always carry `Some(...)`
+    /// (tombstones close a live generation).
+    ///
+    /// # Compaction guard
+    ///
+    /// Returns [`MvccError::Compacted`] when `mvcc_snap.compacted >= lo`.
+    /// The driver maps this to a terminal
+    /// `DisconnectReason::Compacted { floor }`.
+    ///
+    /// # Empty / inverted range
+    ///
+    /// Returns `Ok(Vec::new())` when `lo > hi`. The caller treats
+    /// this as "no events to send this iteration; check for promote".
+    ///
+    /// # Errors
+    ///
+    /// - [`MvccError::Compacted`] if the floor advanced past `lo`.
+    /// - [`MvccError::KeyIndex`] / [`MvccError::Backend`] surfaced
+    ///   verbatim — the driver maps these to a terminal
+    ///   `DisconnectReason::Internal` so the watcher sees a typed
+    ///   reason rather than a silent abort.
+    pub(crate) fn catchup_scan(
+        &self,
+        range_start: &[u8],
+        range_end: &[u8],
+        lo: i64,
+        hi: i64,
+        mvcc_snap: &Snapshot,
+        snap_be: &B::Snapshot,
+    ) -> Result<Vec<WatchEvent>, MvccError> {
+        if lo > hi {
+            return Ok(Vec::new());
+        }
+        if mvcc_snap.compacted >= lo {
+            return Err(MvccError::Compacted {
+                requested: lo,
+                floor: mvcc_snap.compacted,
+            });
+        }
+
+        // Snapshot the matched-keys list. Drop the read lock before
+        // any backend / index work so writers are not blocked across
+        // the per-key event walk.
+        let matched: Vec<Box<[u8]>> = {
+            let keys = self.keys_in_order.read();
+            if range_end.is_empty() {
+                if keys.contains_key(range_start) {
+                    vec![range_start.into()]
+                } else {
+                    Vec::new()
+                }
+            } else {
+                keys.range::<[u8], _>((Bound::Included(range_start), Bound::Excluded(range_end)))
+                    .map(|(k, ())| k.clone())
+                    .collect()
+            }
+        };
+
+        let mut events: Vec<WatchEvent> = Vec::new();
+        for key in &matched {
+            let key_events = self.index.events_in_range(key, lo, hi);
+            for (rev, kind) in key_events {
+                let watch_kind = match kind {
+                    KeyEventKind::Put => WatchEventKind::Put,
+                    KeyEventKind::Tombstone => WatchEventKind::Delete,
+                };
+                let value = match watch_kind {
+                    WatchEventKind::Put => {
+                        let enc = encode_key(rev, KeyKind::Put);
+                        snap_be
+                            .get(KEY_BUCKET_ID, enc.as_bytes())?
+                            .unwrap_or_default()
+                    }
+                    WatchEventKind::Delete => Bytes::new(),
+                };
+                let prev = self.compute_prev_kv_strict(key, rev, snap_be)?;
+                events.push(WatchEvent {
+                    kind: watch_kind,
+                    key: Bytes::copy_from_slice(key),
+                    value,
+                    prev,
+                    revision: rev,
+                });
+            }
+        }
+
+        // Cross-key merge: ascending by (main, sub). Within one key
+        // the per-key walk already produces this order; across keys
+        // we resort the combined list. `sort_by` is stable so equal
+        // revisions (impossible by construction — a single rev maps
+        // to one key) keep their input order.
+        events.sort_by(|a, b| a.revision.cmp(&b.revision));
+        Ok(events)
     }
 
     /// Single-key put.
