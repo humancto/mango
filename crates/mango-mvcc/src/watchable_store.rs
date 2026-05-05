@@ -302,16 +302,54 @@ impl Registry {
 ///
 /// # Lifetime / drop
 ///
-/// Hold the `Arc<WatchableStore<B>>` for as long as you hold any
-/// [`WatchStream`]. Dropping the `WatchableStore` while watchers are
-/// active sends a terminal
-/// [`WatchError::Disconnected`]`(DisconnectReason::StoreDropped)` to each
-/// active watcher (item 5 of the Phase 3 plan); item 1 ships only
-/// `SlowConsumer` (the `StoreDropped` arm is wired to the registry
-/// drop-time path in commit 5).
+/// Hold the `Arc<WatchableStore<B>>` for as long as you want events
+/// to be dispatched. Dropping the last `Arc<WatchableStore<B>>`
+/// sends a terminal
+/// [`WatchError::Disconnected`]`(DisconnectReason::StoreDropped)` to
+/// each active watcher and removes them from the registry (see
+/// [`Drop for WatchableStore`](#impl-Drop-for-WatchableStore<B>)).
+/// Subsequent writes against the underlying `MvccStore` invoke the
+/// trampoline observer, which finds the [`Weak`] failed to upgrade
+/// and is a no-op.
+///
+/// # Reference shape (no `Arc` cycle)
+///
+/// `WatchableStore` holds a strong [`Arc`] to its [`MvccStore`], but
+/// the observer slot on `MvccStore` holds a strong [`Arc`] to a
+/// **trampoline** observer that itself holds only a [`Weak`] back to
+/// the `WatchableStore`. Dropping the user's last
+/// `Arc<WatchableStore>` therefore causes the `WatchableStore` to
+/// drop (Weak ≠ ownership), which cleans up the registry and emits
+/// `StoreDropped`. The trampoline lives until the `MvccStore` itself
+/// is dropped (or another observer is attached); its only state is a
+/// 16-byte [`Weak`].
 pub struct WatchableStore<B: Backend> {
     store: Arc<MvccStore<B>>,
     registry: Arc<RwLock<Registry>>,
+}
+
+/// Trampoline observer holding a [`Weak`] back to its
+/// [`WatchableStore`]. Lives in the [`MvccStore`] observer slot as
+/// `Arc<dyn WriteObserver>`; on each `on_apply` it upgrades the
+/// `Weak` and delegates to [`WatchableStore::dispatch`]. If the
+/// upgrade fails (i.e. the user dropped the last
+/// `Arc<WatchableStore>`), the call is a no-op.
+///
+/// This indirection breaks the would-be `Arc` cycle between
+/// `WatchableStore` and `MvccStore`. See the doc on
+/// [`WatchableStore`].
+struct ObserverHandle<B: Backend> {
+    target: Weak<WatchableStore<B>>,
+}
+
+impl<B: Backend> WriteObserver for ObserverHandle<B> {
+    fn on_apply(&self, events: &[WatchEvent], at_main: i64) {
+        if let Some(ws) = self.target.upgrade() {
+            ws.dispatch(events, at_main);
+        }
+        // else: WatchableStore has been dropped. No watchers can be
+        // reachable; nothing to do.
+    }
 }
 
 impl<B: Backend> std::fmt::Debug for WatchableStore<B> {
@@ -336,11 +374,17 @@ impl<B: Backend> WatchableStore<B> {
             store,
             registry: Arc::new(RwLock::new(Registry::new())),
         });
-        // `Arc::clone` of the WatchableStore is the trait-object Arc the
-        // observer slot stores. Both arcs are Send+Sync (B: Backend
-        // implies the store is, the registry is RwLock-wrapped).
-        let obs: Arc<dyn WriteObserver> = Arc::clone(&this) as Arc<dyn WriteObserver>;
-        this.store.attach_observer(obs)?;
+        // The observer slot on MvccStore takes a strong Arc<dyn
+        // WriteObserver>. To avoid an Arc cycle (WatchableStore →
+        // MvccStore → WatchableStore), we install a trampoline that
+        // owns only a Weak back to `this`. Dropping the user's last
+        // Arc<WatchableStore> therefore drops the WatchableStore
+        // (running its Drop impl); subsequent writes upgrade-and-fail
+        // on the Weak and become no-ops.
+        let handle: Arc<dyn WriteObserver> = Arc::new(ObserverHandle {
+            target: Arc::downgrade(&this),
+        });
+        this.store.attach_observer(handle)?;
         Ok(this)
     }
 
@@ -478,8 +522,13 @@ impl<B: Backend> WatchableStore<B> {
     }
 }
 
-impl<B: Backend> WriteObserver for WatchableStore<B> {
-    fn on_apply(&self, events: &[WatchEvent], at_main: i64) {
+impl<B: Backend> WatchableStore<B> {
+    /// Inline dispatch from the writer hot path. Invoked by the
+    /// trampoline observer ([`ObserverHandle`]) under the writer's
+    /// `tokio::sync::Mutex`, AFTER `snapshot.store()` (the
+    /// dispatch-after-store ordering invariant; see Phase 3 plan
+    /// §4.2).
+    fn dispatch(&self, events: &[WatchEvent], at_main: i64) {
         // `at_main` is reserved for ROADMAP.md:865's progress-notify
         // watermark; unused in the inline-dispatch implementation but
         // taken here so the trait shape is forward-compatible.
@@ -534,6 +583,40 @@ impl<B: Backend> WriteObserver for WatchableStore<B> {
     }
 }
 
+impl<B: Backend> Drop for WatchableStore<B> {
+    /// Drain the registry and emit a terminal
+    /// [`WatchError::Disconnected`]`(`[`DisconnectReason::StoreDropped`]`)`
+    /// to every active watcher.
+    ///
+    /// Safety / soundness:
+    ///
+    /// - The terminal send is **infallible** because each watcher
+    ///   holds a reserved [`OwnedPermit`] in its `disconnect_permit`
+    ///   slot. Consuming the permit places the `Err(StoreDropped)`
+    ///   on the channel without contending for capacity.
+    /// - After the drain, the [`Sender`](mpsc::Sender) inside each
+    ///   `Watcher` is dropped (registry entry removed), which closes
+    ///   the channel. The watcher's [`WatchStream`] receives the
+    ///   `Err(StoreDropped)` followed by `None`.
+    /// - This `Drop` cannot recurse into the trampoline observer:
+    ///   the observer's `Weak::upgrade` is what produced the `Arc`
+    ///   that's about to be dropped; while we run, no other
+    ///   `Arc<WatchableStore>` exists.
+    fn drop(&mut self) {
+        let mut reg = self.registry.write();
+        let watchers = std::mem::take(&mut reg.synced);
+        // Drop the lock before consuming permits — the per-watcher
+        // permit consumption only touches that watcher's own
+        // `disconnect_permit` slot, no cross-locking needed.
+        drop(reg);
+        for (_id, w) in watchers {
+            w.consume_disconnect_permit(DisconnectReason::StoreDropped);
+            // `w` (and its `Sender`) is dropped at the end of this
+            // iteration; the channel closes for the receiver.
+        }
+    }
+}
+
 pin_project! {
     /// Stream of [`WatchEvent`]s for one registered watcher.
     ///
@@ -558,9 +641,9 @@ pin_project! {
 
     impl PinnedDrop for WatchStream {
         fn drop(this: Pin<&mut Self>) {
-            // SAFETY-EQUIVALENT: pin-project-lite's PinnedDrop block
-            // gives us a Pin<&mut Self> projection; we only access the
-            // unpinned fields (registry, id), which is sound.
+            // pin-project-lite's PinnedDrop block exposes a Pin<&mut
+            // Self> -> projected fields with no user `unsafe`. We
+            // only touch unpinned fields (registry, id).
             let this = this.project();
             if let Some(reg) = this.registry.upgrade() {
                 // parking_lot::RwLock::write is sync. Under the inline-

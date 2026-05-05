@@ -250,12 +250,13 @@ pub struct MvccStore<B: Backend> {
     observer: ArcSwap<Option<Arc<dyn WriteObserver>>>,
     /// CAS gate guarding [`Self::observer`] against double-attach.
     /// `attach_observer` performs an `AcqRel` `compare_exchange`
-    /// on this flag; only the winning thread proceeds to
-    /// [`ArcSwapOption::store`]. Avoids a TOCTOU window across
+    /// on this flag; only the winning thread proceeds to publish
+    /// the observer. Avoids a TOCTOU window across
     /// concurrent `attach_observer` calls — single-shot
     /// callers (the typical `WatchableStore::new` path) pay one
     /// uncontended atomic, contended callers see deterministic
-    /// `Err`.
+    /// `Err`. The winning thread proceeds to [`ArcSwap::store`]
+    /// on [`Self::observer`].
     observer_attached: AtomicBool,
 }
 

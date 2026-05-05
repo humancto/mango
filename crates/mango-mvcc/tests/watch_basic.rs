@@ -460,3 +460,51 @@ async fn slow_consumer_disconnect_emits_signal() {
     // (no separate user drop required).
     assert_eq!(ws.watcher_count(), 0);
 }
+
+/// Regression for the Arc-cycle / `StoreDropped` pair (rust-expert
+/// PR #83 Showstoppers S2 + S3).
+///
+/// Dropping the last `Arc<WatchableStore>` must:
+///
+/// - Run `Drop for WatchableStore` (proves the cycle is broken — if
+///   the trampoline observer held a strong Arc back to the
+///   `WatchableStore` the user's last Arc would never be the last,
+///   and Drop would never fire).
+/// - Emit a terminal `Err(WatchError::Disconnected(
+///   DisconnectReason::StoreDropped))` to every active watcher.
+/// - Close the channel after the terminal Err (Sender dropped via
+///   registry drain).
+#[tokio::test(flavor = "current_thread")]
+async fn dropping_watchable_store_emits_store_dropped_to_active_watchers() {
+    let store = open();
+    let ws = WatchableStore::new(Arc::clone(&store)).expect("new");
+    let mut s = ws
+        .watch(Bytes::from_static(b"k"), Bytes::new(), 0)
+        .expect("watch");
+
+    // Dropping the WatchableStore is what we're testing. The
+    // underlying MvccStore stays alive (we hold `store`).
+    drop(ws);
+
+    let terminal = timeout(Duration::from_millis(500), s.recv())
+        .await
+        .expect("terminal Err delivered before timeout")
+        .expect("channel still open until terminal")
+        .expect_err("StoreDropped is the Err arm");
+
+    assert!(
+        matches!(
+            terminal,
+            WatchError::Disconnected(DisconnectReason::StoreDropped),
+        ),
+        "got {terminal:?}",
+    );
+
+    let after = timeout(Duration::from_millis(200), s.recv())
+        .await
+        .expect("recv before timeout");
+    assert!(
+        after.is_none(),
+        "expected channel close after StoreDropped, got {after:?}",
+    );
+}
